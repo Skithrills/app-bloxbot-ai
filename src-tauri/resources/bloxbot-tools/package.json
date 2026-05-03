@@ -1,0 +1,9 @@
+{
+  "name": "bloxbot-tools",
+  "version": "1.0.0",
+  "description": "BloxBot Tools MCP Server (web search, lint, format)",
+  "main": "index.js",
+  "bin": {
+    "bloxbot-tools": "./index.js"
+  }
+}

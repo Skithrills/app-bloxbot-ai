@@ -1,0 +1,210 @@
+import type {
+  Event,
+  PermissionRequest,
+  QuestionRequest,
+  Session,
+  SessionStatus,
+  Todo,
+} from "@opencode-ai/sdk/v2/client";
+import type { QueryClient } from "@tanstack/react-query";
+
+import { qk } from "@/lib/queryKeys";
+import type { MessageWithParts } from "@/types";
+
+export interface MessagesCache {
+  messageIds: string[];
+  messagesById: Record<string, MessageWithParts>;
+}
+
+/**
+ * Maps an SSE Event to query cache updates.
+ * `activeSessionIdRef` is a ref so we can read it without restarting the SSE loop.
+ */
+export function sseDispatch(
+  queryClient: QueryClient,
+  event: Event,
+  activeSessionIdRef: { current: string | null },
+) {
+  if (!event || !event.type) return;
+
+  const currentSessionId = activeSessionIdRef.current;
+
+  try {
+    switch (event.type) {
+      case "session.created": {
+        const { info } = event.properties;
+        queryClient.setQueryData<Session[]>(qk.sessions, (prev) => {
+          if (!prev) return [info];
+          if (prev.some((s) => s.id === info.id)) return prev;
+          return [info, ...prev];
+        });
+        break;
+      }
+      case "session.updated": {
+        const { info } = event.properties;
+        queryClient.setQueryData<Session[]>(qk.sessions, (prev) => {
+          if (!prev) return prev;
+          return prev.map((s) => (s.id === info.id ? info : s));
+        });
+        break;
+      }
+      case "session.deleted": {
+        const { info } = event.properties;
+        queryClient.setQueryData<Session[]>(qk.sessions, (prev) => {
+          if (!prev) return prev;
+          return prev.filter((s) => s.id !== info.id);
+        });
+        break;
+      }
+      case "session.status": {
+        const { sessionID, status } = event.properties;
+        queryClient.setQueryData<Record<string, SessionStatus>>(qk.statuses, (prev) => {
+          if (prev?.[sessionID]?.type === status.type) return prev;
+          return { ...prev, [sessionID]: status };
+        });
+        break;
+      }
+      case "session.idle": {
+        const { sessionID } = event.properties;
+        queryClient.setQueryData<Record<string, SessionStatus>>(qk.statuses, (prev) => {
+          if (prev?.[sessionID]?.type === "idle") return prev;
+          return { ...prev, [sessionID]: { type: "idle" } as SessionStatus };
+        });
+        break;
+      }
+      case "message.updated": {
+        const { info } = event.properties;
+        if (info.sessionID !== currentSessionId) break;
+        queryClient.setQueryData<MessagesCache>(qk.messages(currentSessionId), (prev) => {
+          if (!prev)
+            return { messageIds: [info.id], messagesById: { [info.id]: { info, parts: [] } } };
+          const existing = prev.messagesById[info.id];
+          if (existing) {
+            return {
+              ...prev,
+              messagesById: { ...prev.messagesById, [info.id]: { ...existing, info } },
+            };
+          }
+          return {
+            messageIds: [...prev.messageIds, info.id],
+            messagesById: { ...prev.messagesById, [info.id]: { info, parts: [] } },
+          };
+        });
+        break;
+      }
+      case "message.part.updated": {
+        const { part } = event.properties;
+        if (part.sessionID !== currentSessionId) break;
+        queryClient.setQueryData<MessagesCache>(qk.messages(currentSessionId), (prev) => {
+          if (!prev) return prev;
+          const msg = prev.messagesById[part.messageID];
+          if (!msg) return prev;
+          const partIdx = msg.parts.findIndex((p) => p.id === part.id);
+          const newParts =
+            partIdx >= 0
+              ? msg.parts.map((p, i) => (i === partIdx ? part : p))
+              : [...msg.parts, part];
+          return {
+            ...prev,
+            messagesById: {
+              ...prev.messagesById,
+              [part.messageID]: { ...msg, parts: newParts },
+            },
+          };
+        });
+        break;
+      }
+      case "message.part.delta": {
+        const { messageID, partID, field, delta } = event.properties;
+        if (!currentSessionId) break;
+        queryClient.setQueryData<MessagesCache>(qk.messages(currentSessionId), (prev) => {
+          if (!prev) return prev;
+          const msg = prev.messagesById[messageID];
+          if (!msg) return prev;
+          const partIdx = msg.parts.findIndex((p) => p.id === partID);
+          if (partIdx < 0) return prev;
+          const part = { ...msg.parts[partIdx] };
+          const key = field || "text";
+          if (key in part && typeof (part as Record<string, unknown>)[key] === "string") {
+            (part as Record<string, unknown>)[key] =
+              ((part as Record<string, unknown>)[key] as string) + delta;
+          }
+          const newParts = msg.parts.map((p, i) => (i === partIdx ? part : p));
+          return {
+            ...prev,
+            messagesById: { ...prev.messagesById, [messageID]: { ...msg, parts: newParts } },
+          };
+        });
+        break;
+      }
+      case "message.removed": {
+        const { sessionID, messageID } = event.properties;
+        if (sessionID !== currentSessionId) break;
+        queryClient.setQueryData<MessagesCache>(qk.messages(currentSessionId), (prev) => {
+          if (!prev) return prev;
+          const { [messageID]: _removed, ...rest } = prev.messagesById;
+          return {
+            messageIds: prev.messageIds.filter((id) => id !== messageID),
+            messagesById: rest,
+          };
+        });
+        break;
+      }
+      case "message.part.removed": {
+        const { sessionID, messageID, partID } = event.properties;
+        if (sessionID !== currentSessionId) break;
+        queryClient.setQueryData<MessagesCache>(qk.messages(currentSessionId), (prev) => {
+          if (!prev) return prev;
+          const msg = prev.messagesById[messageID];
+          if (!msg) return prev;
+          return {
+            ...prev,
+            messagesById: {
+              ...prev.messagesById,
+              [messageID]: { ...msg, parts: msg.parts.filter((p) => p.id !== partID) },
+            },
+          };
+        });
+        break;
+      }
+      case "todo.updated": {
+        const { sessionID, todos } = event.properties;
+        if (sessionID === currentSessionId) {
+          queryClient.setQueryData<Todo[]>(qk.todos(currentSessionId), todos);
+        }
+        break;
+      }
+      case "question.asked": {
+        const props = event.properties;
+        if (props.sessionID === currentSessionId) {
+          queryClient.setQueryData<QuestionRequest | null>(qk.questions, props);
+        }
+        break;
+      }
+      case "question.replied":
+      case "question.rejected": {
+        const { sessionID } = event.properties;
+        if (sessionID === currentSessionId) {
+          queryClient.setQueryData<QuestionRequest | null>(qk.questions, null);
+        }
+        break;
+      }
+      case "permission.asked": {
+        const props = event.properties;
+        if (props.sessionID === currentSessionId) {
+          queryClient.setQueryData<PermissionRequest | null>(qk.permissions, props);
+        }
+        break;
+      }
+      case "permission.replied": {
+        const { sessionID } = event.properties;
+        if (sessionID === currentSessionId) {
+          queryClient.setQueryData<PermissionRequest | null>(qk.permissions, null);
+        }
+        break;
+      }
+    }
+  } catch (err) {
+    console.warn("sseDispatch: malformed event, skipping", event.type, err);
+  }
+}

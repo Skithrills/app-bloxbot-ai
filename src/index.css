@@ -1,0 +1,407 @@
+@import "tailwindcss";
+@import "tw-animate-css";
+@import "shadcn/tailwind.css";
+
+@custom-variant dark (&:is(.dark *));
+
+/* ── Custom fonts ────────────────────────────────────────────────── */
+
+@theme inline {
+  --font-sans: "DM Sans", system-ui, -apple-system, sans-serif;
+  --font-serif: "Instrument Serif", Georgia, serif;
+  --font-mono: "JetBrains Mono", ui-monospace, "SF Mono", monospace;
+
+  --radius-sm: calc(var(--radius) - 4px);
+  --radius-md: calc(var(--radius) - 2px);
+  --radius-lg: var(--radius);
+  --radius-xl: calc(var(--radius) + 4px);
+  --radius-2xl: calc(var(--radius) + 8px);
+  --radius-3xl: calc(var(--radius) + 12px);
+  --radius-4xl: calc(var(--radius) + 16px);
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --color-card: var(--card);
+  --color-card-foreground: var(--card-foreground);
+  --color-popover: var(--popover);
+  --color-popover-foreground: var(--popover-foreground);
+  --color-primary: var(--primary);
+  --color-primary-foreground: var(--primary-foreground);
+  --color-secondary: var(--secondary);
+  --color-secondary-foreground: var(--secondary-foreground);
+  --color-muted: var(--muted);
+  --color-muted-foreground: var(--muted-foreground);
+  --color-accent: var(--accent);
+  --color-accent-foreground: var(--accent-foreground);
+  --color-destructive: var(--destructive);
+  --color-border: var(--border);
+  --color-input: var(--input);
+  --color-ring: var(--ring);
+  --color-chart-1: var(--chart-1);
+  --color-chart-2: var(--chart-2);
+  --color-chart-3: var(--chart-3);
+  --color-chart-4: var(--chart-4);
+  --color-chart-5: var(--chart-5);
+  --color-sidebar: var(--sidebar);
+  --color-sidebar-foreground: var(--sidebar-foreground);
+  --color-sidebar-primary: var(--sidebar-primary);
+  --color-sidebar-primary-foreground: var(--sidebar-primary-foreground);
+  --color-sidebar-accent: var(--sidebar-accent);
+  --color-sidebar-accent-foreground: var(--sidebar-accent-foreground);
+  --color-sidebar-border: var(--sidebar-border);
+  --color-sidebar-ring: var(--sidebar-ring);
+
+  /* Custom semantic colors */
+  --success: oklch(0.556 0.16 142);
+  --color-success: var(--success);
+}
+
+/* ── Stone palette (light only) ──────────────────────────────────── */
+
+:root {
+  --radius: 0.625rem;
+  --background: oklch(0.985 0.001 106.424);   /* stone-50 */
+  --foreground: oklch(0.147 0.004 49.25);      /* stone-950 */
+  --card: oklch(1 0 0);                        /* white */
+  --card-foreground: oklch(0.147 0.004 49.25);
+  --popover: oklch(1 0 0);
+  --popover-foreground: oklch(0.147 0.004 49.25);
+  --primary: oklch(0.147 0.004 49.25);         /* stone-950 */
+  --primary-foreground: oklch(0.985 0.001 106.424);
+  --secondary: oklch(0.97 0.001 106.424);      /* stone-100 */
+  --secondary-foreground: oklch(0.147 0.004 49.25);
+  --muted: oklch(0.97 0.001 106.424);
+  --muted-foreground: oklch(0.553 0.013 58.071); /* stone-500 */
+  --accent: oklch(0.97 0.001 106.424);
+  --accent-foreground: oklch(0.147 0.004 49.25);
+  --destructive: oklch(0.577 0.245 27.325);
+  --border: oklch(0.923 0.003 48.717);         /* stone-200 */
+  --input: oklch(0.923 0.003 48.717);
+  --ring: oklch(0.553 0.013 58.071);
+  --chart-1: oklch(0.646 0.222 41.116);
+  --chart-2: oklch(0.6 0.118 184.704);
+  --chart-3: oklch(0.398 0.07 227.392);
+  --chart-4: oklch(0.828 0.189 84.429);
+  --chart-5: oklch(0.769 0.188 70.08);
+  --sidebar: oklch(0.985 0.001 106.424);
+  --sidebar-foreground: oklch(0.147 0.004 49.25);
+  --sidebar-primary: oklch(0.147 0.004 49.25);
+  --sidebar-primary-foreground: oklch(0.985 0.001 106.424);
+  --sidebar-accent: oklch(0.97 0.001 106.424);
+  --sidebar-accent-foreground: oklch(0.147 0.004 49.25);
+  --sidebar-border: oklch(0.923 0.003 48.717);
+  --sidebar-ring: oklch(0.553 0.013 58.071);
+}
+
+/* ── Roblox-inspired dark palette ─────────────────────────────────── */
+
+.dark {
+  --radius: 0.625rem;
+
+  /* Core backgrounds */
+  --background: oklch(0.147 0.005 268);          /* #111217 */
+  --foreground: oklch(0.84 0.002 270);            /* #CBCBCB */
+  --card: oklch(0.22 0.002 270);                  /* #252525 */
+  --card-foreground: oklch(0.84 0.002 270);
+  --popover: oklch(0.22 0.002 270);
+  --popover-foreground: oklch(0.84 0.002 270);
+
+  /* Primary — Vivid Blue brand accent */
+  --primary: oklch(0.45 0.28 275);                /* #1446FF */
+  --primary-foreground: oklch(0.985 0 0);
+
+  /* Secondary */
+  --secondary: oklch(0.25 0.002 270);             /* #2d2d2d */
+  --secondary-foreground: oklch(0.84 0.002 270);
+
+  /* Muted / subtle */
+  --muted: oklch(0.25 0.002 270);                 /* #2d2d2d */
+  --muted-foreground: oklch(0.57 0.002 270);      /* #848484 */
+
+  /* Accent — hover state */
+  --accent: oklch(0.24 0.002 270);                /* #2A2A2A */
+  --accent-foreground: oklch(0.84 0.002 270);
+
+  /* Destructive — danger red */
+  --destructive: oklch(0.51 0.23 30);             /* #CD170E */
+
+  /* Borders & inputs */
+  --border: oklch(0.17 0.002 270);                /* #1a1a1a */
+  --input: oklch(0.22 0.002 270);                 /* #252525 */
+
+  /* Focus ring — vivid blue */
+  --ring: oklch(0.45 0.28 275);                   /* #1446FF */
+
+  /* Chart colors */
+  --chart-1: oklch(0.45 0.28 275);                /* vivid blue */
+  --chart-2: oklch(0.65 0.16 240);                /* sky blue */
+  --chart-3: oklch(0.64 0.19 160);                /* success green */
+  --chart-4: oklch(0.51 0.23 30);                 /* danger red */
+  --chart-5: oklch(0.75 0.14 70);                 /* warm amber */
+
+  /* Sidebar */
+  --sidebar: oklch(0.147 0.005 268);              /* #111217 */
+  --sidebar-foreground: oklch(0.84 0.002 270);
+  --sidebar-primary: oklch(0.45 0.28 275);
+  --sidebar-primary-foreground: oklch(0.985 0 0);
+  --sidebar-accent: oklch(0.22 0.002 270);        /* #252525 */
+  --sidebar-accent-foreground: oklch(0.84 0.002 270);
+  --sidebar-border: oklch(0.17 0.002 270);        /* #1a1a1a */
+  --sidebar-ring: oklch(0.45 0.28 275);
+
+  /* Custom semantic colors */
+  --success: oklch(0.64 0.19 160);                /* #00BA65 */
+  --color-success: var(--success);
+}
+
+@layer base {
+  * {
+    @apply border-border outline-ring/50;
+  }
+  body {
+    @apply bg-background text-foreground;
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+  }
+  /* Full-height app shell */
+  html, body, #root {
+    height: 100%;
+    overflow: hidden;
+  }
+}
+
+/* ── Animations ──────────────────────────────────────────────────── */
+
+@keyframes fade-in {
+  from { opacity: 0; }
+  to   { opacity: 1; }
+}
+
+@keyframes fade-in-up {
+  from { opacity: 0; transform: translateY(6px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+
+@keyframes slide-in-left {
+  from { opacity: 0; transform: translateX(-8px); }
+  to   { opacity: 1; transform: translateX(0); }
+}
+
+@keyframes scale-in {
+  from { opacity: 0; transform: scale(0.96); }
+  to   { opacity: 1; transform: scale(1); }
+}
+
+.animate-fade-in {
+  animation: fade-in 200ms ease-out both;
+}
+
+.animate-fade-in-up {
+  animation: fade-in-up 250ms ease-out both;
+}
+
+.animate-slide-in-left {
+  animation: slide-in-left 200ms ease-out both;
+}
+
+.animate-scale-in {
+  animation: scale-in 200ms ease-out both;
+}
+
+/* ── Reject shake (upload error feedback) ────────────────────────── */
+
+@keyframes reject-shake {
+  0%        { transform: translateX(0); }
+  15%       { transform: translateX(-4px) rotate(-4deg); }
+  30%       { transform: translateX(4px) rotate(4deg); }
+  45%       { transform: translateX(-3px) rotate(-2deg); }
+  60%       { transform: translateX(3px) rotate(2deg); }
+  75%       { transform: translateX(-1px) rotate(-1deg); }
+  100%      { transform: translateX(0) rotate(0); }
+}
+
+.animate-reject-shake {
+  animation: reject-shake 500ms cubic-bezier(0.36, 0.07, 0.19, 0.97) both;
+}
+
+/* ── Lightbox animations ─────────────────────────────────────────── */
+
+@keyframes lightbox-backdrop-in {
+  from { opacity: 0; }
+  to   { opacity: 1; }
+}
+
+@keyframes lightbox-image-in {
+  from { opacity: 0; transform: scale(0.92); }
+  to   { opacity: 1; transform: scale(1); }
+}
+
+@keyframes lightbox-slide-left {
+  from { opacity: 0; transform: translateX(40px) scale(0.97); }
+  to   { opacity: 1; transform: translateX(0) scale(1); }
+}
+
+@keyframes lightbox-slide-right {
+  from { opacity: 0; transform: translateX(-40px) scale(0.97); }
+  to   { opacity: 1; transform: translateX(0) scale(1); }
+}
+
+.animate-lightbox-backdrop {
+  animation: lightbox-backdrop-in 200ms ease-out both;
+}
+
+.animate-lightbox-image {
+  animation: lightbox-image-in 250ms cubic-bezier(0.16, 1, 0.3, 1) both;
+}
+
+.animate-lightbox-slide-left {
+  animation: lightbox-slide-left 250ms cubic-bezier(0.16, 1, 0.3, 1) both;
+}
+
+.animate-lightbox-slide-right {
+  animation: lightbox-slide-right 250ms cubic-bezier(0.16, 1, 0.3, 1) both;
+}
+
+/* ── BloxBot loading face ────────────────────────────────────────── */
+
+@keyframes bloxbot-float {
+  0%, 100% { transform: translateY(0); }
+  50%      { transform: translateY(-4px); }
+}
+
+@keyframes bloxbot-blink {
+  0%, 92%, 100% { transform: scaleY(1); }
+  95%           { transform: scaleY(0.08); }
+}
+
+@keyframes bloxbot-dot-pulse {
+  0%, 100% { opacity: 0.25; }
+  50%      { opacity: 0.8; }
+}
+
+/* Gentle side-to-side sway for inline thinking indicator */
+@keyframes bloxbot-think {
+  0%, 100% { transform: translateY(0) rotate(0deg); }
+  25%      { transform: translateY(-1px) rotate(-3deg); }
+  75%      { transform: translateY(-1px) rotate(3deg); }
+}
+
+.bloxbot-face {
+  animation: bloxbot-float 2.5s ease-in-out infinite;
+}
+
+.bloxbot-face-think {
+  animation: bloxbot-think 1.8s ease-in-out infinite;
+}
+
+.bloxbot-eye {
+  transform-origin: center;
+  animation: bloxbot-blink 4s ease-in-out infinite;
+}
+
+.bloxbot-dot {
+  animation: bloxbot-dot-pulse 1.2s ease-in-out infinite;
+}
+
+/* ── Toast styles ────────────────────────────────────────────────── */
+/* NOTE: Sonner v2 owns ::before (swipe hit-area) and ::after (expanded
+   gap). We use inset box-shadow for the left accent bar instead. */
+
+/* Base toast visual overrides (safe properties only) */
+[data-sonner-toaster] [data-sonner-toast][data-styled="true"] {
+  --toast-accent: var(--muted-foreground);
+  font-family: "DM Sans", system-ui, -apple-system, sans-serif;
+  background: var(--popover);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  box-shadow:
+    inset 3px 0 0 0 var(--toast-accent),
+    0 1px 3px oklch(0.147 0.004 49.25 / 0.04),
+    0 4px 12px oklch(0.147 0.004 49.25 / 0.06),
+    0 8px 24px oklch(0.147 0.004 49.25 / 0.03);
+  padding: 14px 16px 14px 18px;
+}
+
+/* Error accent: warm red */
+[data-sonner-toaster] [data-sonner-toast][data-type="error"] {
+  --toast-accent: oklch(0.577 0.245 27.325);
+}
+
+/* Success accent: green */
+[data-sonner-toaster] [data-sonner-toast][data-type="success"] {
+  --toast-accent: oklch(0.556 0.16 142);
+}
+
+/* Info accent: muted blue */
+[data-sonner-toaster] [data-sonner-toast][data-type="info"] {
+  --toast-accent: oklch(0.55 0.12 250);
+}
+
+/* Warning accent: amber */
+[data-sonner-toaster] [data-sonner-toast][data-type="warning"] {
+  --toast-accent: oklch(0.75 0.18 65);
+}
+
+/* Toast title */
+[data-sonner-toaster] [data-sonner-toast] [data-title] {
+  font-weight: 500;
+  font-size: 13.5px;
+  line-height: 1.35;
+  letter-spacing: -0.01em;
+  color: var(--foreground);
+}
+
+/* Toast description */
+[data-sonner-toaster] [data-sonner-toast] [data-description] {
+  font-weight: 400;
+  font-size: 12.5px;
+  line-height: 1.4;
+  color: var(--muted-foreground);
+  margin-top: 2px;
+}
+
+/* Toast action button */
+[data-sonner-toaster] [data-sonner-toast] [data-button] {
+  font-family: "DM Sans", system-ui, -apple-system, sans-serif;
+  font-weight: 500;
+  font-size: 12.5px;
+  padding: 5px 12px;
+  border-radius: 6px;
+  background: var(--primary);
+  color: var(--primary-foreground);
+  border: none;
+  cursor: pointer;
+  transition: background 150ms ease, transform 100ms ease;
+}
+
+[data-sonner-toaster] [data-sonner-toast] [data-button]:hover {
+  background: oklch(0.28 0.006 49.25);
+}
+
+[data-sonner-toaster] [data-sonner-toast] [data-button]:active {
+  transform: scale(0.97);
+}
+
+/* Toast close button  - restyle Sonner's default circle */
+[data-sonner-toaster] [data-sonner-toast] [data-close-button] {
+  border-radius: 6px !important;
+  border: 1px solid var(--border) !important;
+  background: var(--accent) !important;
+  color: var(--muted-foreground) !important;
+  transition: opacity 150ms ease, background 120ms ease, color 120ms ease;
+}
+
+[data-sonner-toaster] [data-sonner-toast] [data-close-button]:hover {
+  background: var(--border) !important;
+  color: var(--foreground) !important;
+}
+
+/* Toast icon container */
+[data-sonner-toaster] [data-sonner-toast] [data-icon] {
+  width: 20px;
+  height: 20px;
+}
+
+[data-sonner-toaster] [data-sonner-toast] [data-icon] svg {
+  width: 16px;
+  height: 16px;
+}

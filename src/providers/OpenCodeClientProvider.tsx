@@ -1,0 +1,266 @@
+import { createOpencodeClient, type OpencodeClient } from "@opencode-ai/sdk/v2/client";
+import { type QueryClient, useQueryClient } from "@tanstack/react-query";
+import { invoke } from "@tauri-apps/api/core";
+import { createContext, type ReactNode, useContext, useEffect, useRef, useState } from "react";
+import { toast } from "sonner";
+import LoadingScreen from "@/components/LoadingScreen";
+import { qk } from "@/lib/queryKeys";
+import { sseDispatch } from "@/lib/sseDispatch";
+
+const SSE_RECONNECT_DELAY = 3000;
+const SSE_FAILURE_THRESHOLD = 3;
+
+type AppStatus = "waiting" | "ready" | "error";
+
+interface OpenCodeClientContextValue {
+  client: OpencodeClient | null;
+  status: AppStatus;
+  port: number;
+  ready: boolean;
+  initError: string | null;
+}
+
+export const OpenCodeClientContext = createContext<OpenCodeClientContextValue>({
+  client: null,
+  status: "waiting",
+  port: 0,
+  ready: false,
+  initError: null,
+});
+
+export function useOpenCodeClient() {
+  return useContext(OpenCodeClientContext);
+}
+
+export function OpenCodeClientProvider({
+  children,
+  activeSessionIdRef,
+}: {
+  children: ReactNode;
+  activeSessionIdRef: React.RefObject<string | null>;
+}) {
+  const queryClient = useQueryClient();
+
+  const [status, setStatus] = useState<AppStatus>("waiting");
+  const [port, setPort] = useState(0);
+  const [client, setClient] = useState<OpencodeClient | null>(null);
+  const [ready, setReady] = useState(false);
+  const [initError, setInitError] = useState<string | null>(null);
+
+  const sseAbortRef = useRef<AbortController | null>(null);
+
+  // ── Get port from Rust, wait for server, create client ────────────
+  useEffect(() => {
+    if (ready) return;
+
+    let cancelled = false;
+    let retryTimer: ReturnType<typeof setTimeout>;
+
+    // Step 1: Poll Tauri command until the sidecar port is available.
+    // Port starts at 0 and is set by start_opencode_server. We must wait
+    // for a non-zero value — otherwise the frontend will try to connect
+    // to http://127.0.0.1:0 and hang indefinitely.
+    async function waitForPort(): Promise<[number, string]> {
+      while (!cancelled) {
+        try {
+          const result = await invoke<[number, string]>("get_opencode_info");
+          if (result[0] > 0) return result;
+        } catch {
+          // invoke error, keep waiting
+        }
+        await new Promise((r) => {
+          retryTimer = setTimeout(r, 1000);
+        });
+      }
+      throw new Error("cancelled");
+    }
+
+    // Step 2: Poll the HTTP server until it responds.
+    async function waitForServer(baseUrl: string): Promise<void> {
+      while (!cancelled) {
+        try {
+          const res = await fetch(`${baseUrl}/session`, {
+            method: "GET",
+            signal: AbortSignal.timeout(3000),
+          });
+          if (res.ok || res.status >= 400) return;
+        } catch {
+          // Connection refused or timeout - keep polling.
+        }
+        await new Promise((r) => {
+          retryTimer = setTimeout(r, 1000);
+        });
+      }
+      throw new Error("cancelled");
+    }
+
+    async function init() {
+      try {
+        const [ocPort, workspace] = await waitForPort();
+        if (cancelled) return;
+
+        const baseUrl = `http://127.0.0.1:${ocPort}`;
+        await waitForServer(baseUrl);
+        if (cancelled) return;
+
+        const newClient = createOpencodeClient({ baseUrl, directory: workspace });
+        await prefetchServerState(newClient, queryClient);
+        if (cancelled) return;
+
+        setPort(ocPort);
+        setClient(newClient);
+        setReady(true);
+        setStatus("ready");
+        setInitError(null);
+      } catch (err) {
+        if (cancelled) return;
+        console.error("Failed to initialize OpenCode:", err);
+        setInitError(String(err));
+        // Retry the whole sequence.
+        retryTimer = setTimeout(init, 3000);
+      }
+    }
+
+    init();
+
+    return () => {
+      cancelled = true;
+      clearTimeout(retryTimer);
+    };
+  }, [ready, queryClient]);
+
+  // ── SSE subscription ────────────────────────────────────────────────
+  useEffect(() => {
+    if (!client || !ready) return;
+
+    const abortController = new AbortController();
+    sseAbortRef.current = abortController;
+    let consecutiveFailures = 0;
+    let reconnectToastId: string | number | undefined;
+
+    function showReconnectToast() {
+      if (reconnectToastId != null) return;
+      reconnectToastId = toast.error("Lost connection to OpenCode", {
+        description: "Events are no longer being received.",
+        duration: Number.POSITIVE_INFINITY,
+        action: {
+          label: "Reconnect",
+          onClick: () => window.location.reload(),
+        },
+      });
+    }
+
+    function dismissReconnectToast() {
+      if (reconnectToastId != null) {
+        toast.dismiss(reconnectToastId);
+        reconnectToastId = undefined;
+      }
+    }
+
+    async function subscribe() {
+      try {
+        if (!client) return;
+        const sseResult = await client.event.subscribe({});
+        if (!sseResult?.stream) {
+          consecutiveFailures++;
+          if (consecutiveFailures >= SSE_FAILURE_THRESHOLD) showReconnectToast();
+          if (!abortController.signal.aborted) {
+            setTimeout(() => {
+              if (!abortController.signal.aborted) subscribe();
+            }, SSE_RECONNECT_DELAY);
+          }
+          return;
+        }
+        consecutiveFailures = 0;
+        dismissReconnectToast();
+
+        for await (const event of sseResult.stream) {
+          if (abortController.signal.aborted) break;
+          sseDispatch(queryClient, event, activeSessionIdRef);
+        }
+
+        if (!abortController.signal.aborted) {
+          consecutiveFailures++;
+          if (consecutiveFailures >= SSE_FAILURE_THRESHOLD) showReconnectToast();
+          setTimeout(() => {
+            if (!abortController.signal.aborted) subscribe();
+          }, SSE_RECONNECT_DELAY);
+        }
+      } catch (err) {
+        if (!abortController.signal.aborted) {
+          console.error("SSE stream error:", err);
+          consecutiveFailures++;
+          if (consecutiveFailures >= SSE_FAILURE_THRESHOLD) showReconnectToast();
+          setTimeout(() => {
+            if (!abortController.signal.aborted) subscribe();
+          }, SSE_RECONNECT_DELAY);
+        }
+      }
+    }
+
+    subscribe();
+
+    return () => {
+      abortController.abort();
+      sseAbortRef.current = null;
+      dismissReconnectToast();
+    };
+  }, [client, ready, queryClient, activeSessionIdRef]);
+
+  const value: OpenCodeClientContextValue = {
+    client,
+    status,
+    port,
+    ready,
+    initError,
+  };
+
+  if (!ready) {
+    return (
+      <OpenCodeClientContext.Provider value={value}>
+        <LoadingScreen
+          message={initError ? "Failed to connect to OpenCode" : "Starting up..."}
+          detail={initError ?? undefined}
+          error={!!initError}
+          onRetry={initError ? () => window.location.reload() : undefined}
+        />
+      </OpenCodeClientContext.Provider>
+    );
+  }
+
+  return <OpenCodeClientContext.Provider value={value}>{children}</OpenCodeClientContext.Provider>;
+}
+
+// ── Pre-warm query cache with server state ──
+// Hooks have their own queryFn as fallback, but seeding the cache here
+// avoids extra round-trips on first render.
+
+async function prefetchServerState(client: OpencodeClient, queryClient: QueryClient) {
+  const [sessionRes, providerRes, statusRes, agentsRes, authRes] = await Promise.all([
+    client.session.list({}).catch(() => ({ data: undefined })),
+    client.provider.list({}).catch(() => ({ data: undefined })),
+    client.session.status({}).catch(() => ({ data: undefined })),
+    client.app.agents({}).catch(() => ({ data: undefined })),
+    client.provider.auth({}).catch(() => ({ data: undefined })),
+  ]);
+
+  if (sessionRes?.data) {
+    const sorted = [...sessionRes.data].sort((a, b) => b.time.created - a.time.created);
+    queryClient.setQueryData(qk.sessions, sorted);
+  }
+
+  if (statusRes?.data) {
+    queryClient.setQueryData(qk.statuses, statusRes.data);
+  }
+
+  if (agentsRes?.data && Array.isArray(agentsRes.data)) {
+    queryClient.setQueryData(qk.agents, agentsRes.data);
+  }
+
+  if (providerRes?.data) {
+    const providerData = authRes?.data
+      ? { ...providerRes.data, authMethods: authRes.data }
+      : providerRes.data;
+    queryClient.setQueryData(qk.providers, providerData);
+  }
+}

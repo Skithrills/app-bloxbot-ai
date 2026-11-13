@@ -1,8 +1,11 @@
 import type { SerializedEditorState } from "lexical";
+import { type ComposerVideo, isComposerVideo } from "@/lib/composerVideos";
 import type { ComposerImage } from "@/lib/toolImages";
 
 export interface DraftAttachment extends ComposerImage {
   id: string;
+  /** Set for a video, whose `dataUrl` is then the one frame shown for it. */
+  video?: ComposerVideo;
 }
 
 export interface ComposerDraft {
@@ -29,7 +32,8 @@ function isAttachment(value: unknown): value is DraftAttachment {
     typeof value.id === "string" &&
     typeof value.dataUrl === "string" &&
     typeof value.mime === "string" &&
-    typeof value.filename === "string"
+    typeof value.filename === "string" &&
+    (value.video === undefined || isComposerVideo(value.video))
   );
 }
 
@@ -117,6 +121,22 @@ export function readComposerDraft(sessionId: string): ComposerDraft {
   );
   if (draft.text || draft.attachments.length > 0) drafts.set(sessionId, draft);
   return draft;
+}
+
+type ComposerTextListener = (sessionId: string, text: string) => void;
+const textListeners = new Set<ComposerTextListener>();
+
+/** The open composer listens here for text to take up, such as a sent message being edited. */
+export function onComposerText(listener: ComposerTextListener) {
+  textListeners.add(listener);
+  return () => {
+    textListeners.delete(listener);
+  };
+}
+
+/** Puts text into a chat's composer, after anything already written there. */
+export function writeInComposer(sessionId: string, text: string) {
+  for (const listener of textListeners) listener(sessionId, text);
 }
 
 export function deleteComposerDraft(sessionId: string) {

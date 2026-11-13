@@ -26,11 +26,18 @@ export function setSessionOpener(opener: OpenSession): void {
  */
 export class SessionNotifier {
   private readonly busySessions = new Set<string>();
+  /**
+   * The busy chats the model has answered in. OpenCode is also busy while it moves a chat to
+   * another folder or compacts it, and neither of those is a turn that finished.
+   */
+  private readonly answering = new Set<string>();
 
   /** A turn that started before the event stream did never reports its start. */
   trackRunning(statuses: Record<string, SessionStatus> | undefined): void {
     for (const [sessionID, status] of Object.entries(statuses ?? {})) {
-      if (status.type !== "idle") this.busySessions.add(sessionID);
+      if (status.type === "idle") continue;
+      this.busySessions.add(sessionID);
+      this.answering.add(sessionID);
     }
   }
 
@@ -62,6 +69,7 @@ export class SessionNotifier {
     const finish = (sessionID: string) => {
       // OpenCode reports the end of a turn twice, as an idle status and as session.idle.
       if (!this.busySessions.delete(sessionID)) return;
+      if (!this.answering.delete(sessionID)) return;
       announce(sessionID, "chat_finished", "Chat finished");
       if (!userChat(sessionID)) return;
       maybeShowStarCallout().catch((error) => {
@@ -76,6 +84,11 @@ export class SessionNotifier {
         else this.busySessions.add(sessionID);
         break;
       }
+      case "message.updated":
+        if (event.properties.info.role === "assistant") {
+          this.answering.add(event.properties.sessionID);
+        }
+        break;
       case "session.idle":
         finish(event.properties.sessionID);
         break;
@@ -84,6 +97,7 @@ export class SessionNotifier {
         if (!sessionID) break;
         // Forgetting the turn here keeps the idle event that follows from also saying it finished.
         this.busySessions.delete(sessionID);
+        this.answering.delete(sessionID);
         const { error } = event.properties;
         if (error && error.name !== "MessageAbortedError") {
           announce(sessionID, "chat_failed", "Chat ran into a problem", "error");

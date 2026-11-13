@@ -1,6 +1,11 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { composerPredictionSuffix, createPredictionCache } from "@/lib/composerPredictions";
+import {
+  composerPredictionContext,
+  composerPredictionSuffix,
+  createPredictionCache,
+} from "@/lib/composerPredictions";
 import { createOpencodeClient } from "@/lib/opencode/client";
+import type { MessagesCache } from "@/lib/sseDispatch";
 
 const engine = vi.hoisted(() => ({
   model: { list: vi.fn() },
@@ -136,6 +141,79 @@ describe("composer predictions", () => {
     expect(composerPredictionSuffix(draft, `${draft} a shop`)).toBeNull();
     expect(composerPredictionSuffix(draft, "a shop\nand a spawn area")).toBeNull();
     expect(composerPredictionSuffix(draft, "```a shop```")).toBeNull();
+  });
+
+  it("asks for the whole next message when nothing is typed, and only with a chat to read", async () => {
+    const client = makeClient();
+    const context = JSON.stringify({ user: "Add a shop", assistant: "Done. Want a sign too?" });
+    engine.session.generate.mockResolvedValue({ text: '"Yes, add a sign"' });
+    await expect(client.composer.predict({ draft: "", modelID, context })).resolves.toBe(
+      "Yes, add a sign",
+    );
+    const { prompt } = engine.session.generate.mock.calls[0][0];
+    expect(prompt).toContain("Predict the next message the user would send");
+    expect(prompt.endsWith(context)).toBe(true);
+
+    // An empty composer in a chat with no reply has nothing to go on, and a short draft is too
+    // little to continue even when there is a chat.
+    await expect(client.composer.predict({ draft: "", modelID })).resolves.toBeNull();
+    await expect(client.composer.predict({ draft: "Yes", modelID, context })).resolves.toBeNull();
+    expect(engine.session.generate).toHaveBeenCalledOnce();
+
+    expect(composerPredictionSuffix("", "  Yes, add a sign ")).toBe("Yes, add a sign");
+    expect(composerPredictionSuffix("", "“Make it glow”")).toBe("Make it glow");
+    expect(composerPredictionSuffix("", "Sure!\nAnd a door")).toBeNull();
+    expect(composerPredictionSuffix("", "/goal pause")).toBeNull();
+  });
+
+  it("reads the end of the chat only once its latest reply has finished", () => {
+    const message = (id: string, role: string, text: string, extra: object = {}) => ({
+      info: {
+        id,
+        role,
+        time: { created: 1, ...(role === "assistant" && { completed: 2 }) },
+        ...extra,
+      },
+      parts: [
+        { id: `${id}-tool`, type: "tool" },
+        { id: `${id}-text`, type: "text", text },
+      ],
+    });
+    const cache = (...messages: ReturnType<typeof message>[]) =>
+      ({
+        messageIds: messages.map(({ info }) => info.id),
+        messagesById: Object.fromEntries(messages.map((item) => [item.info.id, item])),
+      }) as unknown as MessagesCache;
+    const ask = message("u1", "user", "Old question");
+    const latest = message(
+      "u2",
+      "user",
+      'Fix <Instance reference="game.Workspace.Door" class="Model">@Door</Instance>',
+    );
+    const steps = [message("a1", "assistant", "Looking."), message("a2", "assistant", "Fixed it.")];
+
+    expect(
+      composerPredictionContext(cache(ask, message("a0", "assistant", "Old"), latest, ...steps)),
+    ).toBe(JSON.stringify({ user: "Fix Door", assistant: "Looking.\nFixed it." }));
+    // A queued message waits behind the reply and isn't part of what was said.
+    const queued = message("u3", "user", "Later", {
+      inbox: { state: "pending", delivery: "queue" },
+    });
+    expect(composerPredictionContext(cache(latest, ...steps, queued))).toBe(
+      JSON.stringify({ user: "Fix Door", assistant: "Looking.\nFixed it." }),
+    );
+
+    expect(composerPredictionContext(cache())).toBeNull();
+    expect(composerPredictionContext(cache(latest))).toBeNull();
+    const arriving = message("a3", "assistant", "Still wri", { time: { created: 1 } });
+    expect(composerPredictionContext(cache(latest, steps[0], arriving))).toBeNull();
+    const failed = message("a4", "assistant", "Partly", { error: { name: "APIError" } });
+    expect(composerPredictionContext(cache(latest, failed))).toBeNull();
+
+    const long = message("a5", "assistant", `${"x".repeat(3000)} Shall I continue?`);
+    const context = JSON.parse(composerPredictionContext(cache(latest, long)) ?? "{}");
+    expect(context.assistant).toHaveLength(1500);
+    expect(context.assistant.endsWith("Shall I continue?")).toBe(true);
   });
 
   it("reuses a suggestion for the same draft and for typing along it", () => {

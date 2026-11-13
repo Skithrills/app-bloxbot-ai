@@ -7,13 +7,19 @@ import {
   ChevronRight,
   CircleAlert,
   Code2,
+  Copy,
+  FileDiff,
   FilePen,
   FilePlus,
   FileText,
   Globe,
+  LoaderCircle,
   type LucideIcon,
+  Pencil,
+  RotateCcw,
   Search,
   SquareTerminal,
+  TriangleAlert,
   Wrench,
 } from "lucide-react";
 import type { fromMarkdown } from "mdast-util-from-markdown";
@@ -35,6 +41,7 @@ import {
 } from "react";
 import Markdown, { type Components, defaultUrlTransform, type UrlTransform } from "react-markdown";
 import { AudioSpectrum } from "@/components/AudioVisualizer";
+import { DiffLines, DiffStat } from "@/components/DiffLines";
 import {
   ActivityGallery,
   ImageLightboxProvider,
@@ -60,6 +67,7 @@ import { modelLinksIn } from "@/lib/modelLinks";
 import { toAppProviderID } from "@/lib/openAiProfiles";
 import type { Part, QuestionAnswer, QuestionRequest, SessionStatus } from "@/lib/opencode/types";
 import { isStudioTool } from "@/lib/studioMcp";
+import { thinkingSummary } from "@/lib/thinkingSummary";
 import {
   type AddComposerImage,
   imageDataUrlMime,
@@ -89,23 +97,39 @@ const HIGHLIGHT_LANGUAGE_ALIASES: Record<string, HighlightLanguage> = {
 
 import { useAnswerQuestion, useRejectQuestion } from "@/hooks/mutations/useAnswerQuestion";
 import { useReplyPermission } from "@/hooks/mutations/useReplyPermission";
+import { useSendMessage } from "@/hooks/mutations/useSendMessage";
+import { useEligibleModels } from "@/hooks/useEligibleModels";
 import { useMessageIds, useTranscript } from "@/hooks/useMessages";
 import { useActivePermission } from "@/hooks/usePermissions";
 import { useProviderList } from "@/hooks/useProviders";
 import { useActiveQuestion } from "@/hooks/useQuestions";
 import { useSessionError } from "@/hooks/useSessionError";
 import { useSessionStatus } from "@/hooks/useSessionStatuses";
-import { type ModelChoice, pickFreeModel } from "@/lib/modelChoice";
+import { useSessions } from "@/hooks/useSessions";
+import { isPendingInboxMessage } from "@/lib/composerDelivery";
+import { writeInComposer } from "@/lib/composerDrafts";
+import { localVideoUrl, splitVideoNotes, videoNotesIn } from "@/lib/composerVideos";
+import { fileChangesIn, splitFilePath } from "@/lib/fileChanges";
+import { lineDiff, patchLineCounts } from "@/lib/lineDiff";
+import { messageDayAndTime, timeAgo, workedFor } from "@/lib/messageTime";
+import { fastModelPairs, type ModelChoice, pickFreeModel } from "@/lib/modelChoice";
 import {
+  FAST_MODE_LIMIT_DESCRIPTION,
+  FAST_MODE_LIMIT_TITLE,
   freeLimitEndsAt,
+  isFastModeRateLimit,
   isFreeUsageLimit,
   type ModelError,
   type ModelErrorPresentation,
   presentModelError,
 } from "@/lib/modelError";
+import { notify } from "@/lib/notifications";
+import { needsStudio } from "@/lib/promptSuggestions";
 import type { MessagesCache } from "@/lib/sseDispatch";
 import { useActiveSession } from "@/providers/ActiveSessionProvider";
+import { useOpenCodeClient } from "@/providers/OpenCodeClientProvider";
 import { usePreferences } from "@/providers/PreferencesProvider";
+import { useStudioTargetOptional } from "@/providers/StudioTargetProvider";
 import type { MessageWithParts } from "@/types";
 
 // ── Inline BloxBot thinking indicator ────────────────────────────────────
@@ -168,6 +192,7 @@ function ToolRow({
   icon: Icon,
   label,
   detail,
+  stat,
   running = false,
   failed = false,
   children,
@@ -175,6 +200,8 @@ function ToolRow({
   icon: LucideIcon;
   label: string;
   detail?: string;
+  /** Lines an edit put in and took out, shown in green and red after the file's name. */
+  stat?: { added: number; removed: number };
   running?: boolean;
   failed?: boolean;
   children?: ReactNode;
@@ -186,7 +213,11 @@ function ToolRow({
   const summary = (
     <>
       <Icon aria-hidden="true" size={13} className="shrink-0 opacity-70" />
-      <span className={`min-w-0 truncate ${running ? "text-shimmer" : ""}`} title={label}>
+      {/* A long detail, like a shell command, takes the leftover width and not the label's. */}
+      <span
+        className={`truncate ${detail ? "max-w-[60%] shrink-0" : "min-w-0"} ${running ? "text-shimmer" : ""}`}
+        title={label}
+      >
         {label}
       </span>
       {detail && (
@@ -194,6 +225,7 @@ function ToolRow({
           {detail}
         </span>
       )}
+      {stat && <DiffStat added={stat.added} removed={stat.removed} quiet />}
     </>
   );
   return (
@@ -204,7 +236,7 @@ function ToolRow({
             type="button"
             aria-expanded={open}
             onClick={() => setOpen((current) => !current)}
-            className={`flex min-w-0 items-center gap-1.5 rounded py-0.5 text-left text-sm transition-colors hover:text-foreground ${tone}`}
+            className={`group/row flex min-w-0 items-center gap-1.5 rounded py-0.5 text-left text-sm transition-colors hover:text-foreground ${tone}`}
           >
             {summary}
             <ChevronRight
@@ -214,7 +246,7 @@ function ToolRow({
             />
           </button>
         ) : (
-          <div className={`flex min-w-0 items-center gap-1.5 py-0.5 text-sm ${tone}`}>
+          <div className={`group/row flex min-w-0 items-center gap-1.5 py-0.5 text-sm ${tone}`}>
             {summary}
           </div>
         )}
@@ -276,22 +308,38 @@ function BashToolView({ input, output, status }: ToolViewProps) {
   );
 }
 
-function EditToolView({ input, status }: ToolViewProps) {
-  const filePath = inputField(input, "filePath");
-  const oldString = inputField(input, "oldString");
-  const newString = inputField(input, "newString");
-  const diff = [
-    ...(oldString ? oldString.split("\n").map((line) => `-${line}`) : []),
-    ...(newString ? newString.split("\n").map((line) => `+${line}`) : []),
-  ].join("\n");
+/**
+ * One edit, or several in a row to the same file as a single line. The line carries the total of
+ * lines added and removed, and opens to each edit's own change in the order they were made.
+ */
+function EditsToolView({
+  edits,
+}: {
+  edits: ReadonlyArray<Pick<ToolViewProps, "input" | "status">>;
+}) {
+  const diffs = edits.map(({ input }) =>
+    lineDiff(inputField(input, "oldString"), inputField(input, "newString")),
+  );
+  const shown = diffs.filter(({ text }) => text);
+  const done = edits.every(({ status }) => status === "completed");
   return (
     <ToolRow
       icon={FilePen}
-      label={status === "completed" ? "Edited" : "Editing"}
-      detail={shortPath(filePath)}
-      running={status === "running"}
+      label={done ? "Edited" : "Editing"}
+      detail={shortPath(inputField(edits[0].input, "filePath"))}
+      stat={{
+        added: diffs.reduce((total, diff) => total + diff.added, 0),
+        removed: diffs.reduce((total, diff) => total + diff.removed, 0),
+      }}
+      running={edits.some(({ status }) => status === "running")}
     >
-      {diff ? <ToolText text={diff} language="diff" /> : undefined}
+      {shown.length > 0 ? (
+        <div className="space-y-1.5">
+          {shown.map((diff, index) => (
+            <DiffLines key={index} text={diff.text} />
+          ))}
+        </div>
+      ) : undefined}
     </ToolRow>
   );
 }
@@ -307,9 +355,10 @@ function PatchToolView({ input, status }: ToolViewProps) {
       icon={FilePen}
       label={status === "completed" ? "Edited" : "Editing"}
       detail={files.join(", ")}
+      stat={patchLineCounts(patch)}
       running={status === "running"}
     >
-      {patch ? <ToolText text={patch} language="diff" /> : undefined}
+      {patch ? <DiffLines text={patch} /> : undefined}
     </ToolRow>
   );
 }
@@ -332,6 +381,7 @@ function WriteToolView({ input, status }: ToolViewProps) {
       icon={FilePlus}
       label={status === "completed" ? "Created" : "Creating"}
       detail={shortPath(inputField(input, "filePath"))}
+      stat={{ added: content ? content.replace(/\n$/, "").split("\n").length : 0, removed: 0 }}
       running={status === "running"}
     >
       {content ? <ToolText text={content.slice(0, 3000)} /> : undefined}
@@ -642,13 +692,22 @@ const TextPartView = memo(
 
 const ReasoningPartView = memo(function ReasoningPartView({
   part,
+  live,
 }: {
   part: Extract<Part, { type: "reasoning" }>;
+  /** The newest step of a turn that is still going. Only that one can still be in progress. */
+  live: boolean;
 }) {
   if (!part.text) return null;
-  const thinking = !part.time?.end;
+  // The end of a thought doesn't always get recorded, as when a turn is stopped or a step is
+  // retried. One with steps after it, or in a turn that is over, has ended all the same.
+  const thinking = live && !part.time?.end;
   return (
-    <ToolRow icon={Brain} label={thinking ? "Thinking" : "Thought"} running={thinking}>
+    <ToolRow
+      icon={Brain}
+      label={thinking ? (thinkingSummary(part.text) ?? "Thinking") : "Thought"}
+      running={thinking}
+    >
       <p className="whitespace-pre-wrap text-xs leading-relaxed text-muted-foreground">
         {part.text}
       </p>
@@ -696,7 +755,7 @@ const ToolPartView = memo(function ToolPartView({
       case "bash":
         return <BashToolView input={input} output={output} status={status} />;
       case "edit":
-        return <EditToolView input={input} output={output} status={status} />;
+        return <EditsToolView edits={[{ input, status }]} />;
       case "patch":
         return <PatchToolView input={input} status={status} />;
       case "read":
@@ -765,25 +824,32 @@ function imagesInToolPart(part: Extract<Part, { type: "tool" }>): LightboxImage[
   });
 }
 
-const CompactionPartView = memo(function CompactionPartView() {
+/** How a compaction is going: under way, done, or why it failed. */
+const CompactionPartView = memo(function CompactionPartView({
+  part,
+}: {
+  part: Extract<Part, { type: "compaction" }>;
+}) {
+  const failed = part.status === "failed";
   return (
-    <div className="my-1 flex items-center gap-1.5 text-xs text-muted-foreground">
-      <svg
-        width="9"
-        height="9"
-        viewBox="0 0 24 24"
-        fill="none"
-        stroke="currentColor"
-        strokeWidth="2"
-        strokeLinecap="round"
-        strokeLinejoin="round"
-      >
-        <polyline points="4 14 10 14 10 20" />
-        <polyline points="20 10 14 10 14 4" />
-        <line x1="14" y1="10" x2="21" y2="3" />
-        <line x1="3" y1="21" x2="10" y2="14" />
-      </svg>
-      Context compacted
+    <div
+      role="status"
+      data-compaction={part.status ?? "completed"}
+      title={failed ? part.error : undefined}
+      className={`my-1 flex items-center gap-1.5 text-xs ${failed ? "text-destructive" : "text-muted-foreground"}`}
+    >
+      {part.status === "running" ? (
+        <LoaderCircle aria-hidden="true" size={12} className="animate-spin" />
+      ) : failed ? (
+        <TriangleAlert aria-hidden="true" size={12} />
+      ) : (
+        <Check aria-hidden="true" size={12} />
+      )}
+      {part.status === "running"
+        ? "Compacting context…"
+        : failed
+          ? `Couldn't compact context${part.error ? `: ${part.error}` : ""}`
+          : "Context compacted"}
     </div>
   );
 });
@@ -955,52 +1021,153 @@ const NO_IMAGES: LightboxImage[] = [];
 const ActivityPartView = memo(function ActivityPartView({
   part,
   images = NO_IMAGES,
+  live = false,
   onOpenSubagent,
 }: {
   part: ActivityPart;
   images?: LightboxImage[];
+  live?: boolean;
   onOpenSubagent?: (sessionID: string) => void;
 }) {
   switch (part.type) {
     case "reasoning":
-      return <ReasoningPartView part={part} />;
+      return <ReasoningPartView part={part} live={live} />;
     case "tool":
       return <ToolPartView part={part} images={images} onOpenSubagent={onOpenSubagent} />;
     case "compaction":
-      return <CompactionPartView />;
+      return <CompactionPartView part={part} />;
   }
 });
 
-function ActivityGroup({ parts, images }: { parts: ActivityPart[]; images: ToolImages }) {
-  if (parts.length === 1) {
-    return <ActivityPartView part={parts[0]} images={images.get(parts[0].id)} />;
+type ToolPart = Extract<Part, { type: "tool" }>;
+
+/** The file an edit that went through, or is going through, is to. Failed edits stand alone. */
+function editedFile(part: ActivityPart): string | undefined {
+  if (part.type !== "tool" || baseToolName(part.tool) !== "edit") return undefined;
+  if (part.state.status === "error") return undefined;
+  return inputField(part.state.input ?? {}, "filePath") || undefined;
+}
+
+/** Edits made one after another to the same file read as one change, so they share a line. */
+function batchEdits(parts: ActivityPart[]): Array<ActivityPart | ToolPart[]> {
+  const items: Array<ActivityPart | ToolPart[]> = [];
+  for (const part of parts) {
+    const file = editedFile(part);
+    const previous = items[items.length - 1];
+    if (file && Array.isArray(previous) && editedFile(previous[0]) === file) {
+      previous.push(part as ToolPart);
+    } else {
+      items.push(file ? [part as ToolPart] : part);
+    }
   }
-  const tools = parts.filter((part) => part.type === "tool");
-  const running = parts.some(
-    (part) =>
-      (part.type === "tool" && ["pending", "running"].includes(part.state.status)) ||
-      (part.type === "reasoning" && !part.time?.end),
+  return items.map((item) => (Array.isArray(item) && item.length === 1 ? item[0] : item));
+}
+
+function ActivityItemView({
+  item,
+  images,
+  live = false,
+}: {
+  item: ActivityPart | ToolPart[];
+  images?: LightboxImage[];
+  live?: boolean;
+}) {
+  if (!Array.isArray(item)) return <ActivityPartView part={item} images={images} live={live} />;
+  return (
+    <div className="min-w-0 max-w-full overflow-hidden">
+      <EditsToolView
+        edits={item.map(({ state }) => ({ input: state.input ?? {}, status: state.status }))}
+      />
+    </div>
   );
+}
+
+/** Whether the turn being shown is still going: it is the chat's latest, and the chat is working. */
+const TurnRunning = createContext(false);
+
+/** The time now, kept current each second while `ticking`. */
+function useNow(ticking: boolean): number {
+  const [now, setNow] = useState(Date.now);
+  useEffect(() => {
+    if (!ticking) return;
+    setNow(Date.now());
+    const timer = window.setInterval(() => setNow(Date.now()), 1000);
+    return () => window.clearInterval(timer);
+  }, [ticking]);
+  return now;
+}
+
+function ActivityGroup({
+  parts,
+  images,
+  working = false,
+}: {
+  parts: ActivityPart[];
+  images: ToolImages;
+  /** The turn is still going and these are its latest steps, so more may follow them. */
+  working?: boolean;
+}) {
+  const items = batchEdits(parts);
+  const tools = parts.filter((part) => part.type === "tool");
+  // Whether the chat is working is what says these steps are still going. A step's own record
+  // can't: a thought's end isn't always written down, and then it would look unfinished forever.
+  const turnRunning = useContext(TurnRunning);
+  const running =
+    working ||
+    (turnRunning &&
+      tools.some((tool) => tool.state.status === "pending" || tool.state.status === "running"));
+  const now = useNow(running && items.length > 1);
+  if (items.length === 1) {
+    return <ActivityItemView item={items[0]} images={images.get(parts[0].id)} live={working} />;
+  }
   const allStudio =
     tools.length > 0 && tools.every((tool) => isStudioTool(tool.tool, tool.state.input));
+  // While it works, the line also says what the model last said it was doing, if it shares that.
+  const thoughts = running ? parts.filter((part) => part.type === "reasoning" && part.text) : [];
+  const latestThought = thoughts[thoughts.length - 1];
+  const summary = latestThought?.type === "reasoning" ? thinkingSummary(latestThought.text) : null;
+  // The time runs from the first step starting to the last one ending, or to now while it works.
+  const spans = parts.flatMap((part) => {
+    const time: { start?: number; end?: number } | undefined =
+      part.type === "tool"
+        ? "time" in part.state
+          ? part.state.time
+          : undefined
+        : part.type === "reasoning"
+          ? part.time
+          : undefined;
+    return typeof time?.start === "number" ? [{ start: time.start, end: time.end }] : [];
+  });
+  const started = Math.min(...spans.map(({ start }) => start));
+  // A step with no end on record counts up to where it started.
+  const ended = Math.max(...spans.map(({ start, end }) => end ?? start));
   const label = running
-    ? "Thinking"
-    : allStudio
-      ? `Used Roblox Studio ${tools.length === 1 ? "once" : `${tools.length} times`}`
-      : tools.length
-        ? `Used ${tools.length} ${tools.length === 1 ? "tool" : "tools"}`
-        : "Thought";
+    ? spans.length > 0 && now > started
+      ? `Working for ${workedFor(now - started)}`
+      : "Working"
+    : tools.length > 0 && spans.length > 0 && ended > started
+      ? `Worked for ${workedFor(ended - started)}`
+      : allStudio
+        ? `Used Roblox Studio ${tools.length === 1 ? "once" : `${tools.length} times`}`
+        : tools.length
+          ? `Used ${tools.length} ${tools.length === 1 ? "tool" : "tools"}`
+          : "Thought";
   return (
     <ToolImagesContext.Provider value={parts.flatMap((part) => images.get(part.id) ?? [])}>
       <ToolRow
         icon={Brain}
         label={label}
+        detail={running ? (summary ?? undefined) : undefined}
         running={running}
         failed={tools.some((tool) => tool.state.status === "error")}
       >
         <ToolImagesContext.Provider value={NO_IMAGES}>
-          {parts.map((part) => (
-            <ActivityPartView key={part.id} part={part} />
+          {items.map((item, index) => (
+            <ActivityItemView
+              key={Array.isArray(item) ? item[0].id : item.id}
+              item={item}
+              live={working && index === items.length - 1}
+            />
           ))}
         </ToolImagesContext.Provider>
       </ToolRow>
@@ -1104,54 +1271,351 @@ const QuestionPrompt = memo(function QuestionPrompt({
 // ── User message parts ──────────────────────────────────────────────────
 
 const UserPartsView = memo(
-  function UserPartsView({ parts }: { parts: Part[] }) {
+  function UserPartsView({ parts, hideText = false }: { parts: Part[]; hideText?: boolean }) {
     const fileParts: Extract<Part, { type: "file" }>[] = [];
     const textParts: Extract<Part, { type: "text" }>[] = [];
     for (const p of parts) {
       if (p.type === "file") fileParts.push(p as Extract<Part, { type: "file" }>);
       else if (p.type === "text") textParts.push(p as Extract<Part, { type: "text" }>);
     }
-    const images = fileParts.map((part) => ({
+    const files = fileParts.map((part) => ({
       id: part.id,
       src: part.url,
       name: part.filename ?? "Attachment",
     }));
+    // A video was sent as frames, with a note in the text saying which images they are. Here
+    // the note comes back out and its frames show as the one video.
+    const texts = textParts.map((part) => ({ part, ...splitVideoNotes(part.text) }));
+    const framed = new Set<number>();
+    const videos = texts.flatMap(({ videos: sent }) =>
+      sent.flatMap((video) => {
+        const frames = files.slice(video.first, video.last + 1);
+        if (frames.length === 0) return [];
+        for (let index = video.first; index <= video.last; index += 1) framed.add(index);
+        return [
+          {
+            name: video.name,
+            length: video.length,
+            src: video.path ? localVideoUrl(video.path) : undefined,
+            frames,
+          },
+        ];
+      }),
+    );
+    const images = files.filter((_file, index) => !framed.has(index));
     return (
       <div className="text-sm leading-relaxed">
-        {images.length > 0 && (
+        {files.length > 0 && (
           <div className="mb-1.5">
-            <ImageThumbnails images={images} />
+            <ImageThumbnails images={images} videos={videos} />
           </div>
         )}
-        {textParts.map((p) => (
-          <span key={p.id} className="whitespace-pre-wrap">
-            <ReferenceText
-              text={p.text}
-              focusable
-              source={{ sessionID: p.sessionID, partID: p.id }}
-            />
-          </span>
-        ))}
+        {!hideText &&
+          texts.map(({ part: p, text }) => (
+            <span key={p.id} className="whitespace-pre-wrap">
+              <ReferenceText
+                text={text}
+                focusable
+                source={{ sessionID: p.sessionID, partID: p.id }}
+              />
+            </span>
+          ))}
         {parts.length === 0 && <span className="italic opacity-50">...</span>}
       </div>
     );
   },
-  (prev, next) => prev.parts === next.parts,
+  (prev, next) => prev.parts === next.parts && prev.hideText === next.hideText,
 );
 
 // ── Message bubble ─────────────────────────────────────────────────────
 
-const messageClock = new Intl.DateTimeFormat(undefined, { hour: "numeric", minute: "2-digit" });
 const speedFormat = new Intl.NumberFormat(undefined, { maximumFractionDigits: 1 });
 
+/**
+ * How long ago, as "11 hours ago", kept current each minute. Pointing at it gives the day and
+ * the 24-hour time, as "Friday 14:00".
+ */
 function MessageTime({ timestamp }: { timestamp: number }) {
+  const [now, setNow] = useState(Date.now);
+  useEffect(() => {
+    const timer = window.setInterval(() => setNow(Date.now()), 60_000);
+    return () => window.clearInterval(timer);
+  }, []);
   if (!Number.isFinite(timestamp) || timestamp <= 0) return null;
   const time = new Date(timestamp);
   if (Number.isNaN(time.getTime())) return null;
+  const { day, time: clock } = messageDayAndTime(timestamp, now);
   return (
-    <time dateTime={time.toISOString()} title={time.toLocaleString()}>
-      {messageClock.format(time)}
+    <time dateTime={time.toISOString()} title={`${day} ${clock}`}>
+      {timeAgo(timestamp, now)}
     </time>
+  );
+}
+
+/** Opens each day in the chat, once, above that day's first message. */
+function DayLine({ timestamp }: { timestamp: number }) {
+  if (!Number.isFinite(timestamp) || timestamp <= 0) return null;
+  return (
+    <div className="pb-3 pt-1 text-center text-xs font-semibold text-muted-foreground">
+      {messageDayAndTime(timestamp).day}
+    </div>
+  );
+}
+
+/** Whether a message is the first one sent on its day. */
+function opensDay(groups: MessageWithParts[][], index: number): boolean {
+  const created = groups[index]?.[0]?.info.time.created;
+  if (!created) return false;
+  const before = groups[index - 1]?.[0]?.info.time.created;
+  return !before || new Date(before).toDateString() !== new Date(created).toDateString();
+}
+
+const MESSAGE_ACTION =
+  "inline-flex h-6 w-6 items-center justify-center rounded text-muted-foreground transition-colors hover:bg-accent hover:text-foreground focus-visible:outline-2 disabled:opacity-40 disabled:hover:bg-transparent";
+
+function CopyMessageButton({ text }: { text: string }) {
+  const [copied, setCopied] = useState(false);
+  useEffect(() => {
+    if (!copied) return;
+    const timer = window.setTimeout(() => setCopied(false), 1500);
+    return () => window.clearTimeout(timer);
+  }, [copied]);
+  const Icon = copied ? Check : Copy;
+  return (
+    <button
+      type="button"
+      title={copied ? "Copied" : "Copy"}
+      aria-label={copied ? "Copied" : "Copy message"}
+      className={MESSAGE_ACTION}
+      onClick={() =>
+        navigator.clipboard.writeText(text).then(
+          () => setCopied(true),
+          () => notify.error("Couldn't copy the message"),
+        )
+      }
+    >
+      <Icon aria-hidden="true" size={13} />
+    </button>
+  );
+}
+
+/** What a message says, as it reads on screen: object chips by name, and no note about frames. */
+function messageText(messages: readonly MessageWithParts[]): string {
+  return messages
+    .flatMap(({ parts }) =>
+      parts.flatMap((part) =>
+        part.type === "text" && !part.ignored
+          ? [instanceReferenceLabels(splitVideoNotes(part.text).text).trim()]
+          : [],
+      ),
+    )
+    .filter(Boolean)
+    .join("\n\n");
+}
+
+/**
+ * A sent message being rewritten where it stands. Nothing changes until it is sent: the reply
+ * under it stays, and Escape or Cancel leaves everything as it was. Sending rewinds the chat to
+ * before the message and sends the new text in its place, with the same attachments.
+ */
+function MessageEditor({ message, onDone }: { message: MessageWithParts; onDone: () => void }) {
+  const { client } = useOpenCodeClient();
+  const { activeSessionId } = useActiveSession();
+  const studioTarget = useStudioTargetOptional();
+  const sendMessage = useSendMessage();
+  const texts = message.parts.flatMap((part) =>
+    part.type === "text" && !part.ignored ? [part.text] : [],
+  );
+  // Object references stay as their markup, so they are still references when sent again.
+  const original = texts.map((text) => splitVideoNotes(text).text).join("\n");
+  const [draft, setDraft] = useState(original);
+  const [sending, setSending] = useState(false);
+  const fieldRef = useRef<HTMLTextAreaElement>(null);
+  const images = message.parts.flatMap((part) =>
+    part.type === "file" ? [{ mime: part.mime, url: part.url, filename: part.filename }] : [],
+  );
+
+  useLayoutEffect(() => {
+    const field = fieldRef.current;
+    if (!field) return;
+    field.focus();
+    field.setSelectionRange(field.value.length, field.value.length);
+  }, []);
+  // biome-ignore lint/correctness/useExhaustiveDependencies: the field grows with what is typed
+  useLayoutEffect(() => {
+    const field = fieldRef.current;
+    if (!field) return;
+    field.style.height = "auto";
+    field.style.height = `${field.scrollHeight}px`;
+  }, [draft]);
+
+  async function send() {
+    const next = draft.trim();
+    if (!client || !activeSessionId || sending || (!next && images.length === 0)) return;
+    if (studioTarget?.sendBlock && needsStudio(next)) {
+      notify.error(studioTarget.sendBlock);
+      return;
+    }
+    setSending(true);
+    try {
+      await client.session.undo(
+        { sessionID: activeSessionId, messageID: message.info.id },
+        { throwOnError: true },
+      );
+    } catch (error) {
+      notify.error("Couldn't edit the message", {
+        description: error instanceof Error ? error.message : String(error),
+      });
+      setSending(false);
+      return;
+    }
+    // The chat is rewound from here on, and this message with it.
+    if (needsStudio(next)) studioTarget?.noteRouted?.();
+    try {
+      await sendMessage.mutateAsync({
+        // A video's frames go again, so the note saying which images they are goes with them.
+        text: [next, ...texts.flatMap(videoNotesIn)].filter(Boolean).join("\n\n") || " ",
+        images: images.length > 0 ? images : undefined,
+        studioTargetReference: studioTarget?.promptReference ?? null,
+        studioTargetID: studioTarget ? (studioTarget.selected?.key ?? null) : undefined,
+      });
+    } catch (error) {
+      writeInComposer(activeSessionId, next);
+      notify.error("Edited message not sent", {
+        description: `${error instanceof Error ? error.message : String(error)} Your text is in the message box, and /redo brings the old messages back.`,
+      });
+    }
+  }
+
+  return (
+    <div className="mt-1">
+      <textarea
+        ref={fieldRef}
+        aria-label="Edit message"
+        value={draft}
+        rows={1}
+        disabled={sending}
+        onChange={(event) => setDraft(event.target.value)}
+        onKeyDown={(event) => {
+          if (event.nativeEvent.isComposing || event.keyCode === 229) return;
+          if (event.key === "Escape") {
+            event.preventDefault();
+            event.stopPropagation();
+            onDone();
+          } else if (event.key === "Enter" && !event.shiftKey) {
+            event.preventDefault();
+            void send();
+          }
+        }}
+        className="app-scrollbar block max-h-[50vh] w-full resize-none overflow-y-auto bg-transparent text-sm leading-relaxed outline-none"
+      />
+      <div className="mt-2 flex items-center justify-end gap-1.5">
+        <button
+          type="button"
+          disabled={sending}
+          onClick={onDone}
+          className="h-7 rounded-md border px-2.5 text-xs transition-colors hover:bg-accent disabled:opacity-40"
+        >
+          Cancel
+        </button>
+        <button
+          type="button"
+          disabled={sending || !client || (!draft.trim() && images.length === 0)}
+          onClick={() => void send()}
+          className="h-7 rounded-md bg-foreground px-2.5 text-xs font-medium text-background transition-opacity hover:opacity-90 disabled:opacity-40"
+        >
+          Send
+        </button>
+      </div>
+    </div>
+  );
+}
+
+/**
+ * Copy, and in the main chat Edit and Rewind. Edit rewrites the message in its bubble. Rewind
+ * takes the chat back to before the message: the replies from there on go, the files they changed
+ * go back to how they were, and the message's text returns to the composer. /redo undoes it.
+ */
+function UserMessageActions({
+  message,
+  sessionID,
+  onEdit,
+}: {
+  message: MessageWithParts;
+  sessionID?: string;
+  onEdit: () => void;
+}) {
+  const { client } = useOpenCodeClient();
+  const { activeSessionId } = useActiveSession();
+  const status = useSessionStatus(sessionID ?? activeSessionId);
+  const [rewinding, setRewinding] = useState(false);
+  const text = messageText([message]);
+  const busy = status !== undefined && status.type !== "idle";
+  const editable = !sessionID && !isPendingInboxMessage(message.info);
+
+  async function rewind() {
+    if (!client || !activeSessionId) return;
+    setRewinding(true);
+    try {
+      const { data } = await client.session.undo(
+        { sessionID: activeSessionId, messageID: message.info.id, files: true },
+        { throwOnError: true },
+      );
+      // What was typed goes back as it was sent, without the note about a video's frames.
+      const written = message.parts
+        .flatMap((part) =>
+          part.type === "text" && !part.ignored ? [splitVideoNotes(part.text).text] : [],
+        )
+        .join("\n");
+      if (written.trim()) writeInComposer(activeSessionId, written);
+      const files = data?.files ?? 0;
+      notify.message("Rewound to before this message", {
+        description: `${
+          files > 0
+            ? `${files} ${files === 1 ? "file was" : "files were"} put back as ${files === 1 ? "it was" : "they were"}.`
+            : "There were no file changes to take back."
+        } Changes made in Studio stay. Type /redo to bring it all back.`,
+      });
+    } catch (error) {
+      notify.error("Couldn't rewind the chat", {
+        description: error instanceof Error ? error.message : String(error),
+      });
+      setRewinding(false);
+    }
+  }
+
+  return (
+    <>
+      {text && <CopyMessageButton text={text} />}
+      {editable && (
+        <>
+          <button
+            type="button"
+            title={busy ? "Wait for the reply to finish before editing" : "Edit"}
+            aria-label="Edit message"
+            disabled={busy || rewinding}
+            className={MESSAGE_ACTION}
+            onClick={onEdit}
+          >
+            <Pencil aria-hidden="true" size={13} />
+          </button>
+          <button
+            type="button"
+            title={
+              busy
+                ? "Wait for the reply to finish before rewinding"
+                : "Rewind to here: take back the replies and file changes, and put this message back in the composer"
+            }
+            aria-label="Rewind to this message"
+            disabled={busy || rewinding || !client}
+            className={MESSAGE_ACTION}
+            onClick={() => void rewind()}
+          >
+            <RotateCcw aria-hidden="true" size={13} />
+          </button>
+        </>
+      )}
+    </>
   );
 }
 
@@ -1171,8 +1635,10 @@ function AssistantFooter({ messages }: { messages: MessageWithParts[] }) {
   }
   const { time } = messages[messages.length - 1].info;
   const completed = "completed" in time ? time.completed : undefined;
+  const text = messageText(messages);
   return (
-    <div className="mt-1 flex min-h-4 flex-wrap gap-x-2 text-[11px] tabular-nums text-muted-foreground transition-opacity group-hover/message:opacity-100 group-focus-within/message:opacity-100 [@media(hover:hover)]:opacity-0">
+    <div className="mt-1 flex min-h-6 flex-wrap items-center gap-x-2 text-[11px] tabular-nums text-muted-foreground transition-opacity group-hover/message:opacity-100 group-focus-within/message:opacity-100 [@media(hover:hover)]:opacity-0">
+      {text && completed !== undefined && <CopyMessageButton text={text} />}
       <MessageTime timestamp={completed ?? time.created} />
       {cost > 0 && <span title="Reported cost in US dollars">{formatModelCost(cost)}</span>}
       {elapsed > 0 && (
@@ -1181,6 +1647,104 @@ function AssistantFooter({ messages }: { messages: MessageWithParts[] }) {
         </span>
       )}
     </div>
+  );
+}
+
+/**
+ * Closes a finished turn with the files it edited: how many lines went in and came out of each,
+ * and the changed lines themselves under any file that is opened.
+ */
+function TurnChanges({
+  messages,
+  isLatest,
+  sessionID,
+}: {
+  messages: MessageWithParts[];
+  isLatest: boolean;
+  sessionID?: string;
+}) {
+  const { activeSessionId } = useActiveSession();
+  const chatID = sessionID ?? activeSessionId;
+  const status = useSessionStatus(chatID);
+  const { data: sessions } = useSessions();
+  const changes = useMemo(() => fileChangesIn(messages), [messages]);
+  const [open, setOpen] = useState<ReadonlySet<string>>(new Set());
+  // More edits can still come while the turn runs, and its activity already shows each one.
+  const running = isLatest && status !== undefined && status.type !== "idle";
+  if (changes.length === 0 || running) return null;
+
+  const directory = sessions?.find((session) => session.id === chatID)?.directory;
+  const allOpen = changes.every(({ file }) => open.has(file));
+  const toggle = (file: string) =>
+    setOpen((current) => {
+      const next = new Set(current);
+      if (!next.delete(file)) next.add(file);
+      return next;
+    });
+  return (
+    <section
+      data-preserve-scroll
+      aria-label="Files edited in this turn"
+      className="mt-2 overflow-hidden rounded-lg border bg-card text-sm"
+    >
+      <header className="flex items-center gap-2.5 border-b px-3 py-2">
+        <FileDiff aria-hidden="true" size={16} className="shrink-0 text-muted-foreground" />
+        <div className="min-w-0 flex-1">
+          <div className="font-medium">
+            Edited {changes.length} {changes.length === 1 ? "file" : "files"}
+          </div>
+          <DiffStat
+            added={changes.reduce((total, change) => total + change.added, 0)}
+            removed={changes.reduce((total, change) => total + change.removed, 0)}
+          />
+        </div>
+        <button
+          type="button"
+          onClick={() => setOpen(new Set(allOpen ? [] : changes.map(({ file }) => file)))}
+          className="shrink-0 rounded-md border px-2 py-1 text-xs transition-colors hover:bg-accent"
+        >
+          {allOpen ? "Hide changes" : "View changes"}
+        </button>
+      </header>
+      <ul className="divide-y">
+        {changes.map((change) => {
+          const { folder, name } = splitFilePath(change.file, directory);
+          const expanded = open.has(change.file);
+          return (
+            <li key={change.file} className="min-w-0">
+              <button
+                type="button"
+                aria-expanded={expanded}
+                title={change.file}
+                onClick={() => toggle(change.file)}
+                className="flex w-full min-w-0 items-center gap-2 px-3 py-1.5 text-left transition-colors hover:bg-accent/50"
+              >
+                <ChevronRight
+                  aria-hidden="true"
+                  size={12}
+                  className={`shrink-0 opacity-70 transition-transform ${expanded ? "rotate-90" : ""}`}
+                />
+                {/* A long path gives up its folders first, from the left, and keeps the name. */}
+                <span className="flex min-w-0 flex-1">
+                  <span dir="rtl" className="min-w-0 truncate text-muted-foreground">
+                    <bdi>{folder}</bdi>
+                  </span>
+                  <span className="shrink-0">{name}</span>
+                </span>
+                <DiffStat added={change.added} removed={change.removed} />
+              </button>
+              {expanded && (
+                <div className="animate-disclosure-expand space-y-1.5 px-3 pb-2">
+                  {change.diffs.map((diff, index) => (
+                    <DiffLines key={index} text={diff} />
+                  ))}
+                </div>
+              )}
+            </li>
+          );
+        })}
+      </ul>
+    </section>
   );
 }
 
@@ -1195,6 +1759,10 @@ function AssistantTurn({
   sessionID?: string;
   onOpenSubagent?: (sessionID: string) => void;
 }) {
+  const { activeSessionId } = useActiveSession();
+  const status = useSessionStatus(sessionID ?? activeSessionId);
+  // A stopped or failed turn is idle, so its steps read as finished.
+  const turnRunning = isLatest && status !== undefined && status.type !== "idle";
   const images = new Map<string, LightboxImage[]>();
   const captures = new Map<string, LightboxImage>();
   const duplicateIds = new Set<string>();
@@ -1218,9 +1786,11 @@ function AssistantTurn({
 
   const content: ReactNode[] = [];
   let activity: ActivityPart[] = [];
-  const flushActivity = () => {
+  const flushActivity = (working = false) => {
     if (activity.length === 0) return;
-    content.push(<ActivityGroup key={activity[0].id} parts={activity} images={images} />);
+    content.push(
+      <ActivityGroup key={activity[0].id} parts={activity} images={images} working={working} />,
+    );
     activity = [];
   };
   for (const [index, message] of messages.entries()) {
@@ -1276,11 +1846,65 @@ function AssistantTurn({
       content.push(<BloxBotThinking key={info.id} />);
     }
   }
-  flushActivity();
+  // Steps with nothing after them are still being added to while the turn runs. Between two
+  // steps none of them is running, and the work still isn't over.
+  flushActivity(turnRunning);
   return (
     <div className={`group/message w-full space-y-1 pb-4 ${sessionID ? "" : "max-w-[85%]"}`}>
-      {content}
+      <TurnRunning.Provider value={turnRunning}>{content}</TurnRunning.Provider>
+      <TurnChanges messages={messages} isLatest={isLatest} sessionID={sessionID} />
       <AssistantFooter messages={messages} />
+    </div>
+  );
+}
+
+function UserMessage({ message, sessionID }: { message: MessageWithParts; sessionID?: string }) {
+  const [editing, setEditing] = useState(false);
+  const inbox = message.info.role === "user" ? message.info.inbox : undefined;
+  const steer = inbox?.delivery === "steer" ? inbox.state : undefined;
+  const receipt = steer
+    ? {
+        pending: "Waiting for the next model step",
+        delivered: "Steer delivered to the conversation",
+        read: "Model received this steer",
+      }[steer]
+    : "Model received this message";
+  const ReceiptIcon = steer && steer !== "read" ? Check : CheckCheck;
+  // A steer still on its way is worth seeing without looking for it. The rest waits for the pointer.
+  const waiting = steer !== undefined && steer !== "read";
+  return (
+    <div className="group/message flex flex-col items-end pb-4">
+      <div
+        className={`min-w-0 max-w-[85%] rounded-2xl bg-secondary px-3.5 py-2 text-foreground wrap-anywhere ${editing ? "w-full" : ""}`}
+      >
+        <UserPartsView parts={message.parts} hideText={editing} />
+        {editing && <MessageEditor message={message} onDone={() => setEditing(false)} />}
+      </div>
+      <div
+        className={`mt-1 flex min-h-6 items-center gap-1.5 pr-1 text-[11px] tabular-nums text-muted-foreground transition-opacity group-hover/message:opacity-100 group-focus-within/message:opacity-100 ${waiting ? "" : "[@media(hover:hover)]:opacity-0"}`}
+      >
+        <span
+          role="img"
+          aria-label={receipt}
+          title={receipt}
+          className={steer === "read" ? "text-sky-600 dark:text-sky-400" : undefined}
+        >
+          <ReceiptIcon size={14} aria-hidden="true" />
+        </span>
+        <MessageTime timestamp={message.info.time.created} />
+        {!editing && (
+          <>
+            <span aria-hidden="true">·</span>
+            <span className="flex items-center gap-0.5">
+              <UserMessageActions
+                message={message}
+                sessionID={sessionID}
+                onEdit={() => setEditing(true)}
+              />
+            </span>
+          </>
+        )}
+      </div>
     </div>
   );
 }
@@ -1288,35 +1912,16 @@ function AssistantTurn({
 const MessageBubble = memo(function MessageBubble(props: ComponentProps<typeof AssistantTurn>) {
   const [message] = props.messages;
   if (message.info.role === "assistant") return <AssistantTurn {...props} />;
-  const steer = message.info.inbox?.delivery === "steer" ? message.info.inbox.state : undefined;
-  const receipt =
-    steer &&
-    {
-      pending: "Waiting for the next model step",
-      delivered: "Steer delivered to the conversation",
-      read: "Model received this steer",
-    }[steer];
-  const ReceiptIcon = steer === "read" ? CheckCheck : Check;
-  return (
-    <div className="flex flex-col items-end pb-4">
-      <div className="min-w-0 max-w-[85%] rounded-2xl bg-secondary px-3.5 py-2 text-foreground wrap-anywhere">
-        <UserPartsView parts={message.parts} />
+  // OpenCode files a compaction among the user's messages, but it is a step and not something sent.
+  const compaction = message.parts.find((part) => part.type === "compaction");
+  if (compaction) {
+    return (
+      <div className="flex justify-center pb-4">
+        <CompactionPartView part={compaction} />
       </div>
-      <div className="mt-1 flex items-center gap-1.5 pr-1 text-[11px] tabular-nums text-muted-foreground">
-        <MessageTime timestamp={message.info.time.created} />
-        {receipt && (
-          <span
-            role="img"
-            aria-label={receipt}
-            title={receipt}
-            className={steer === "read" ? "text-sky-600 dark:text-sky-400" : undefined}
-          >
-            <ReceiptIcon size={14} aria-hidden="true" />
-          </span>
-        )}
-      </div>
-    </div>
-  );
+    );
+  }
+  return <UserMessage key={message.info.id} message={message} sessionID={props.sessionID} />;
 });
 
 function groupTranscript(cache: MessagesCache, ids: string[]) {
@@ -1350,8 +1955,10 @@ function railPreview(group: MessageWithParts[]) {
   let fallback = "Message";
   for (const { parts } of group) {
     for (const part of parts) {
-      if (part.type === "text" && !part.ignored && part.text.trim()) {
-        const text = instanceReferenceLabels(part.text.slice(0, 2000))
+      // A message that is only a video has no text of its own, just the note about its frames.
+      const written = part.type === "text" && !part.ignored ? splitVideoNotes(part.text).text : "";
+      if (written.trim()) {
+        const text = instanceReferenceLabels(written.slice(0, 2000))
           .replace(/!\[([^\]]*)\]\([^\n)]*\)/g, (_, alt) => alt || "Image")
           // Keep line breaks so the rail card can render the markdown structure.
           .replace(/[^\S\n]+/g, " ")
@@ -1360,6 +1967,7 @@ function railPreview(group: MessageWithParts[]) {
         return text.length > 600 ? `${text.slice(0, 599)}…` : text;
       }
       if (part.type === "file") fallback = part.filename || "Attachment";
+      if (part.type === "compaction") fallback = "Context compacted";
       if (part.type === "tool") fallback = "Tool activity";
       if (part.type === "reasoning" && fallback === "Message") fallback = "Thinking";
     }
@@ -1399,14 +2007,89 @@ function ChatTranscriptRail({
 
 // ── Main component ─────────────────────────────────────────────────────
 
+/**
+ * Retrying can't get past fast mode's own rate limit once a single request is larger than it.
+ * This says so, and moves the chat to the same model at standard speed in one step.
+ */
+function FastModeLimitNotice({ message }: { message: string }) {
+  const { client } = useOpenCodeClient();
+  const { activeSessionId } = useActiveSession();
+  const { selectedModel, selectedVariant, setSelectedModel, unavailableModels } = usePreferences();
+  const models = useEligibleModels({ includeUnavailable: true });
+  const studioTarget = useStudioTargetOptional();
+  const sendMessage = useSendMessage();
+  const [switching, setSwitching] = useState(false);
+  const pair = selectedModel
+    ? fastModelPairs(models, unavailableModels).get(selectedModel)
+    : undefined;
+  const onFast = pair && selectedModel === `${pair.fast.providerId}/${pair.fast.id}`;
+  if (!pair || !onFast) return <BloxBotThinking label="Waiting to retry" detail={message} />;
+
+  async function continueAtStandardSpeed() {
+    if (!client || !activeSessionId || !pair) return;
+    const standard = `${pair.standard.providerId}/${pair.standard.id}`;
+    const variant =
+      selectedVariant && Object.keys(pair.standard.variants ?? {}).includes(selectedVariant)
+        ? selectedVariant
+        : null;
+    setSwitching(true);
+    try {
+      await client.session.abort(
+        { sessionID: activeSessionId, wait: true },
+        { throwOnError: true },
+      );
+      setSelectedModel(standard, variant);
+      await sendMessage.mutateAsync({
+        text: "Continue from where you stopped.",
+        model: standard,
+        variant,
+        studioTargetReference: studioTarget?.promptReference ?? null,
+        studioTargetID: studioTarget ? (studioTarget.selected?.key ?? null) : undefined,
+      });
+    } catch (error) {
+      notify.error("Couldn't continue without Fast mode", {
+        description: error instanceof Error ? error.message : String(error),
+      });
+      setSwitching(false);
+    }
+  }
+
+  return (
+    <div role="alert" className="my-1 rounded-xl border bg-card px-3.5 py-3">
+      <div className="text-sm font-medium">{FAST_MODE_LIMIT_TITLE}</div>
+      <p className="mt-0.5 text-xs leading-relaxed text-muted-foreground">
+        {FAST_MODE_LIMIT_DESCRIPTION}
+      </p>
+      <button
+        type="button"
+        disabled={switching || !client}
+        onClick={() => void continueAtStandardSpeed()}
+        className="mt-2.5 inline-flex h-7 items-center rounded-md bg-foreground px-2.5 text-xs font-medium text-background transition-opacity hover:opacity-90 disabled:opacity-40"
+      >
+        {switching ? "Switching…" : `Continue with ${pair.standard.name} at standard speed`}
+      </button>
+      <details className="mt-2 text-xs text-muted-foreground">
+        <summary className="cursor-pointer">Provider details</summary>
+        <div className="mt-1 break-words font-mono">{message.slice(0, 1000)}</div>
+      </details>
+    </div>
+  );
+}
+
 const BusyThinkingIndicator = memo(function BusyThinkingIndicator({
   status,
   lastMessage,
+  canSwitchModel = false,
 }: {
   status: SessionStatus | undefined;
   lastMessage: MessageWithParts | undefined;
+  /** The main chat, where the model can be changed from here. */
+  canSwitchModel?: boolean;
 }) {
   if (status?.type === "retry") {
+    if (canSwitchModel && isFastModeRateLimit(status.message)) {
+      return <FastModeLimitNotice message={status.message} />;
+    }
     return <BloxBotThinking label="Waiting to retry" detail={status.message} />;
   }
   if (status?.type !== "busy" || !lastMessage || lastMessage.info.role !== "user") return null;
@@ -1673,6 +2356,9 @@ function ChatMessages({
                 }}
               >
                 <div>
+                  {opensDay(messages, virtualItem.index) && (
+                    <DayLine timestamp={messages[virtualItem.index][0].info.time.created} />
+                  )}
                   <MessageBubble
                     messages={messages[virtualItem.index]}
                     isLatest={virtualItem.index === messages.length - 1}
@@ -1694,7 +2380,11 @@ function ChatMessages({
             {activePermission && (
               <PermissionPrompt permission={activePermission} onReply={handleReplyPermission} />
             )}
-            <BusyThinkingIndicator status={sessionStatus} lastMessage={lastMessage} />
+            <BusyThinkingIndicator
+              status={sessionStatus}
+              lastMessage={lastMessage}
+              canSwitchModel={!sessionID}
+            />
             {sessionError && !lastMessageHasError && (
               <ModelErrorCard error={sessionError} allowModelSwitch={!sessionID} />
             )}

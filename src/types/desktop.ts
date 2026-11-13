@@ -256,6 +256,10 @@ export interface DesktopApi {
   /** Opens the page where the system lets people allow BloxBot's notifications. */
   openNotificationSettings(): Promise<void>;
   exportToolImage(image: ToolImageExport): Promise<boolean>;
+  /** Asks where to save a copy of a video the chat plays from disk. False when cancelled. */
+  saveVideo(url: string): Promise<boolean>;
+  /** Where a chosen, dropped or pasted file is on disk. Empty for one that was never a file. */
+  getFilePath(file: File): string;
   loadConfig(): Promise<AppConfig>;
   patchConfig(patch: Partial<AppConfig>): Promise<void>;
   setModelSettings(patch: ModelSettingsPatch): Promise<void>;

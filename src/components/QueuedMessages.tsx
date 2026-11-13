@@ -2,6 +2,7 @@ import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { CornerDownRight, ListOrdered, Trash2 } from "lucide-react";
 import { ReferenceText } from "@/components/ReferenceChip";
 import { useTranscript } from "@/hooks/useMessages";
+import { splitVideoNotes } from "@/lib/composerVideos";
 import { instanceReferenceLabels } from "@/lib/instanceReferences";
 import { notify } from "@/lib/notifications";
 import { qk } from "@/lib/queryKeys";
@@ -59,7 +60,9 @@ export function QueuedMessages({ sessionID }: { sessionID: string | null }) {
       className="app-scrollbar mb-1 max-h-32 divide-y overflow-y-auto rounded-lg border bg-card"
     >
       {messages.map(({ info, parts }) => {
-        const text = parts.flatMap((part) => (part.type === "text" ? [part.text] : [])).join(" ");
+        const text = parts
+          .flatMap((part) => (part.type === "text" ? [splitVideoNotes(part.text).text] : []))
+          .join(" ");
         const files = parts.filter((part) => part.type === "file").length;
         const attachmentLabel = files === 1 ? "1 attachment" : `${files} attachments`;
         const preview = text.trim() || (files > 0 ? attachmentLabel : "Queued message");

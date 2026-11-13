@@ -47,7 +47,6 @@ import { ReferenceChip } from "@/components/ReferenceChip";
 import { StudioClassIcon } from "@/components/StudioClassIcon";
 import { MENU_LABEL, MENU_SURFACE } from "@/components/ui/menu";
 import { useComposerPrediction } from "@/hooks/useComposerPrediction";
-import { canPredictDraft } from "@/lib/composerPredictions";
 import type { ExplorerNode, ExplorerReference } from "@/lib/explorer";
 import { serializeInstanceReference } from "@/lib/instanceReferences";
 import type { Command } from "@/lib/opencode/types";
@@ -500,9 +499,13 @@ function $predictionTarget() {
   if (!$isParagraphNode(paragraph) || !$isRangeSelection(selection) || !selection.isCollapsed()) {
     return null;
   }
+  const { anchor } = selection;
+  // Nothing typed yet: the suggestion is a whole message, shown where the placeholder was.
+  if (root.getChildrenSize() === 1 && paragraph.getChildrenSize() === 0) {
+    return anchor.key === paragraph.getKey() ? { draft: "", key: paragraph.getKey() } : null;
+  }
   const tail = paragraph.getLastChild();
   if (!$isTextNode(tail)) return null;
-  const { anchor } = selection;
   const atEnd =
     (anchor.key === tail.getKey() && anchor.offset === tail.getTextContentSize()) ||
     (anchor.key === paragraph.getKey() && anchor.offset === paragraph.getChildrenSize());
@@ -518,16 +521,25 @@ function $predictionTarget() {
   ) {
     return null;
   }
+  // Short drafts stay candidates so typing along a whole-message suggestion keeps the rest of it.
   const draft = root.getTextContent();
-  return canPredictDraft(draft) ? { draft, key: tail.getKey() } : null;
+  return draft ? { draft, key: tail.getKey() } : null;
 }
 
-function ComposerPredictionPlugin() {
+function ComposerPredictionPlugin({
+  context,
+  onNextMessage,
+}: {
+  /** The end of the chat, which a suggestion for an empty composer is read from. */
+  context: string | null;
+  /** The whole message suggested for an empty composer, or null when there is none to show. */
+  onNextMessage: (suggestion: string | null) => void;
+}) {
   const [editor] = useLexicalComposerContext();
   const [candidate, setCandidate] = useState<ReturnType<typeof $predictionTarget>>(null);
   const composing = useRef(false);
   const dismissed = useRef<{ draft: string; accepted?: string }>();
-  const suffix = useComposerPrediction(candidate);
+  const suffix = useComposerPrediction(candidate, context);
 
   useEffect(() => {
     function sync() {
@@ -580,9 +592,10 @@ function ComposerPredictionPlugin() {
 
   useLayoutEffect(() => {
     if (!candidate || !suffix) return;
-    const element = editor.getElementByKey(candidate.key);
-    if (!element) return;
-    element.setAttribute("data-composer-prediction", suffix);
+    const element = candidate.draft ? editor.getElementByKey(candidate.key) : null;
+    if (candidate.draft && !element) return;
+    if (element) element.setAttribute("data-composer-prediction", suffix);
+    else onNextMessage(suffix);
     const handle = (event: KeyboardEvent, accept: boolean) => {
       if (
         event.defaultPrevented ||
@@ -632,9 +645,10 @@ function ComposerPredictionPlugin() {
     return () => {
       stopTab();
       stopEscape();
-      element.removeAttribute("data-composer-prediction");
+      if (element) element.removeAttribute("data-composer-prediction");
+      else onNextMessage(null);
     };
-  }, [candidate, editor, suffix]);
+  }, [candidate, editor, onNextMessage, suffix]);
 
   return (
     <output className="sr-only">
@@ -651,6 +665,8 @@ interface PromptEditorProps {
   objectsUnavailable?: string | null;
   noStudio?: boolean;
   predictionScope?: string | null;
+  /** The end of the chat. With it, an empty composer suggests the whole next message. */
+  predictionContext?: string | null;
   /** Typing "@" asks for a fresh copy of the place's objects. */
   onObjectsWanted?: () => void;
   onChange(text: string, state: SerializedEditorState): void;
@@ -668,6 +684,7 @@ export default forwardRef<PromptEditorHandle, PromptEditorProps>(function Prompt
     objectsUnavailable,
     noStudio,
     predictionScope,
+    predictionContext = null,
     onObjectsWanted,
     onChange,
     onSubmit,
@@ -677,6 +694,7 @@ export default forwardRef<PromptEditorHandle, PromptEditorProps>(function Prompt
   ref,
 ) {
   const editorRef = useMemo(() => ({ current: null as LexicalEditor | null }), []);
+  const [nextMessage, setNextMessage] = useState<string | null>(null);
   const objectIndex = useMemo(() => buildObjectSearchIndex(objects), [objects]);
   useImperativeHandle(ref, () => ({
     clear() {
@@ -753,9 +771,24 @@ export default forwardRef<PromptEditorHandle, PromptEditorProps>(function Prompt
             />
           }
           placeholder={
-            <div className="pointer-events-none absolute left-0 top-1 text-sm text-muted-foreground/50">
-              {placeholder}
-            </div>
+            nextMessage ? (
+              // The suggestion takes the placeholder's place. Screen readers get it from the
+              // prediction plugin's announcement.
+              <div
+                aria-hidden="true"
+                data-composer-next-message={nextMessage}
+                className="pointer-events-none absolute inset-x-0 top-1 flex items-center gap-1.5 text-sm text-muted-foreground"
+              >
+                <span className="min-w-0 truncate">{nextMessage}</span>
+                <kbd className="shrink-0 rounded border px-1 font-sans text-[10px] leading-4 text-muted-foreground/70">
+                  Tab
+                </kbd>
+              </div>
+            ) : (
+              <div className="pointer-events-none absolute left-0 top-1 text-sm text-muted-foreground/50">
+                {placeholder}
+              </div>
+            )
           }
           ErrorBoundary={LexicalErrorBoundary}
         />
@@ -786,7 +819,13 @@ export default forwardRef<PromptEditorHandle, PromptEditorProps>(function Prompt
           commands={commands}
           onSubmit={onSubmit}
         />
-        {predictionScope && <ComposerPredictionPlugin key={predictionScope} />}
+        {predictionScope && (
+          <ComposerPredictionPlugin
+            key={predictionScope}
+            context={predictionContext}
+            onNextMessage={setNextMessage}
+          />
+        )}
         <SetEditorRef editorRef={editorRef} />
       </div>
     </LexicalComposer>

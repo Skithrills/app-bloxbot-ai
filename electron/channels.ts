@@ -38,4 +38,5 @@ export const channels = {
   systemNotificationClicked: "app:system-notification-clicked",
   openNotificationSettings: "app:open-notification-settings",
   exportToolImage: "tool-image:export",
+  saveVideo: "video:save",
 } as const;

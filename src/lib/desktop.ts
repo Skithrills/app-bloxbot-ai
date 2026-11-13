@@ -375,6 +375,10 @@ export const desktop: DesktopApi = {
     runPromise(desktopEffects.getUploadAccess(studioKey, modelUrl)),
   readModelFile: (url) => runPromise(desktopEffects.readModelFile(url)),
   exportToolImage: (image) => runPromise(desktopEffects.exportToolImage(image)),
+  saveVideo: (url) =>
+    window.bloxbot?.saveVideo?.(url) ??
+    Promise.reject(new DesktopError({ message: "Saving a video requires the desktop app." })),
+  getFilePath: (file) => window.bloxbot?.getFilePath?.(file) ?? "",
   uploadModelToPlace: (url, studioKey, hash, addOnly) =>
     runPromise(desktopEffects.uploadModelToPlace(url, studioKey, hash, addOnly)),
   onModelUploadStep: (listener) => window.bloxbot?.onModelUploadStep(listener) ?? (() => {}),

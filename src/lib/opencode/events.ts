@@ -704,6 +704,9 @@ export class EventTranslator {
           })),
           { type: "session.compacted", properties: { sessionID: event.data.sessionID } },
         ];
+      // The chat is read again at each stage, so it shows the compaction starting, then how it ended.
+      case "session.compaction.started":
+      case "session.compaction.failed":
       case "session.compaction.ended":
         return [{ type: "session.compacted", properties: { sessionID: event.data.sessionID } }];
       case "permission.asked":

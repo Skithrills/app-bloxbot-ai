@@ -1,4 +1,4 @@
-import { contextBridge, ipcRenderer } from "electron";
+import { contextBridge, ipcRenderer, webUtils } from "electron";
 
 import type {
   BlenderSetupProgress,
@@ -55,6 +55,8 @@ const api: DesktopApi = {
     ipcRenderer.invoke(channels.showSystemNotification, notification),
   openNotificationSettings: () => ipcRenderer.invoke(channels.openNotificationSettings),
   exportToolImage: (image) => ipcRenderer.invoke(channels.exportToolImage, image),
+  saveVideo: (url) => ipcRenderer.invoke(channels.saveVideo, url),
+  getFilePath: (file) => webUtils.getPathForFile(file),
   onSystemNotificationClick: (listener) => {
     const handleClick = (_event: Electron.IpcRendererEvent, id: string) => listener(id);
     ipcRenderer.on(channels.systemNotificationClicked, handleClick);

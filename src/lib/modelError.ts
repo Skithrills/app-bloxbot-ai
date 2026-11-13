@@ -50,6 +50,18 @@ export function isModelUnavailable(error: ModelError): boolean {
   return errorSays(error, /model is (no longer )?unavailable/i);
 }
 
+/**
+ * A provider's limit on fast mode alone, counted per minute apart from the model's usual limit.
+ * A long chat can send more than it in a single request, and then no amount of waiting helps.
+ */
+export function isFastModeRateLimit(message: string | undefined): boolean {
+  return !!message && /rate limit of [\d,.]+ fast mode \w+ tokens per minute/i.test(message);
+}
+
+export const FAST_MODE_LIMIT_TITLE = "Fast mode's rate limit is in the way";
+export const FAST_MODE_LIMIT_DESCRIPTION =
+  "Your provider allows a set amount of fast mode input each minute, and this chat now sends more than that in one request, so trying again keeps failing. Standard speed has its own, larger limit.";
+
 function retryAfter(error: ModelError): number | undefined {
   const { retryAfterMs } = error.data as { retryAfterMs?: unknown };
   return typeof retryAfterMs === "number" && retryAfterMs > 0 ? retryAfterMs : undefined;
@@ -107,6 +119,15 @@ export function presentModelError(
       kind: "unavailable",
       title: "This model is no longer available",
       description: "It may have been removed. Switch to another model to keep going.",
+      detail,
+    };
+  }
+
+  if (isFastModeRateLimit(detail)) {
+    return {
+      kind: "generic",
+      title: FAST_MODE_LIMIT_TITLE,
+      description: `${FAST_MODE_LIMIT_DESCRIPTION} Turn off Fast mode in the effort menu and send again.`,
       detail,
     };
   }

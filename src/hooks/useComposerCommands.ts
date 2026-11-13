@@ -3,6 +3,7 @@ import { useMemo } from "react";
 import { useCreateSession } from "@/hooks/mutations/useCreateSession";
 import { useCommands } from "@/hooks/useCommands";
 import { fetchMessages } from "@/hooks/useMessages";
+import { splitVideoNotes } from "@/lib/composerVideos";
 import { notify } from "@/lib/notifications";
 import type { Session } from "@/lib/opencode/types";
 import { CLIENT_COMMANDS, mergeCommands, parseSlashCommand } from "@/lib/promptSuggestions";
@@ -104,7 +105,10 @@ export function useComposerCommands(actions: {
           return;
         }
         await client.session.undo({ sessionID, messageID: target.info.id }, options);
-        const text = target.parts.flatMap((part) => (part.type === "text" ? [part.text] : []));
+        // A video's frames don't come back with the text, so neither does the note about them.
+        const text = target.parts.flatMap((part) =>
+          part.type === "text" ? [splitVideoNotes(part.text).text] : [],
+        );
         actions.restoreDraft(text.join("\n"), sessionID);
         notify.message("Message undone", {
           description:

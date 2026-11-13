@@ -549,6 +549,34 @@ describe("history", () => {
     expect(messages[1]?.parts.map((part) => part.type)).toEqual(["reasoning", "tool", "text"]);
   });
 
+  it("says how a compaction is going, and rereads the chat as it starts and ends", () => {
+    const compaction = (fields: object) =>
+      historyToMessages(sessionID, [
+        { id: "msg_9", type: "compaction", reason: "manual", time: { created: 9 }, ...fields },
+      ] as never)[0]?.parts[0];
+    expect(compaction({ status: "running", summary: "" })).toMatchObject({
+      type: "compaction",
+      auto: false,
+      status: "running",
+    });
+    expect(compaction({ status: "completed", summary: "Done" })).toMatchObject({
+      status: "completed",
+    });
+    expect(compaction({ status: "failed", error: { message: "No model" } })).toMatchObject({
+      status: "failed",
+      error: "No model",
+    });
+
+    for (const type of ["started", "failed", "ended"]) {
+      expect(
+        new EventTranslator().translate({
+          type: `session.compaction.${type}`,
+          data: { sessionID },
+        } as never),
+      ).toEqual([{ type: "session.compacted", properties: { sessionID } }]);
+    }
+  });
+
   it("gives parts the same ids as the live stream, so a refetch can't duplicate them", () => {
     const parts = historyToMessages(sessionID, history)[1]?.parts;
     expect(parts?.map((part) => part.id)).toEqual(["msg_2:reasoning:0", "call_1", "msg_2:text:0"]);

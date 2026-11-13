@@ -1093,6 +1093,412 @@ describe("User journeys", () => {
     );
   });
 
+  it("says what the model is doing in place of Thinking when it shares titled reasoning", async () => {
+    const session = makeSession("thinking", "Thinking summary");
+    const sessionID = session.id;
+    const reasoning = (id: string, text: string, done: boolean) => ({
+      id,
+      sessionID,
+      messageID: "work",
+      type: "reasoning",
+      text,
+      time: { start: 1, ...(done && { end: 2 }) },
+    });
+    const turn = (...parts: object[]) => ({
+      data: [
+        {
+          info: { id: "user", sessionID, role: "user", time: { created: 1 } },
+          parts: [{ id: "request", type: "text", text: "Fix the door" }],
+        },
+        {
+          info: {
+            id: "work",
+            sessionID,
+            role: "assistant",
+            parentID: "user",
+            time: { created: 2 },
+          },
+          parts,
+        },
+      ],
+    });
+    const messages = vi
+      .fn()
+      .mockResolvedValue(
+        turn(reasoning("r1", "**Reading the door script**\n\nIt has a debounce.", false)),
+      );
+    const client = createClient({ messages });
+    const queryClient = createQueryClient();
+    seedReadyState(queryClient, { sessions: [session] });
+    queryClient.setQueryData(qk.statuses, { [sessionID]: { type: "busy" } });
+    render(<TestApp client={client} queryClient={queryClient} />);
+    fireEvent.click(await screen.findByText("Thinking summary"));
+    expect(await screen.findByRole("button", { name: "Reading the door script" })).toBeVisible();
+
+    // Several steps collapse into one line, which carries the newest step's title.
+    messages.mockResolvedValue(
+      turn(
+        reasoning("r1", "**Reading the door script**\n\nIt has a debounce.", true),
+        {
+          id: "t1",
+          sessionID,
+          messageID: "work",
+          type: "tool",
+          tool: "read",
+          state: { status: "completed", input: { filePath: "Door.luau" }, output: "" },
+        },
+        reasoning("r2", "**Fixing the debounce**\n\nThe flag never", false),
+      ),
+    );
+    await act(() => queryClient.refetchQueries({ queryKey: qk.messages(sessionID) }));
+    // It also keeps count of how long the work has been going.
+    expect(
+      await screen.findByRole("button", { name: /^Working for .+Fixing the debounce$/ }),
+    ).toBeVisible();
+    expect(screen.queryByText("Thinking")).toBeNull();
+
+    // A thought whose end was never recorded doesn't keep the clock running. Once the chat stops
+    // working the steps read as finished, and so does that thought.
+    act(() => {
+      queryClient.setQueryData(qk.statuses, { [sessionID]: { type: "idle" } });
+    });
+    const finished = await screen.findByRole("button", { name: "Worked for 1s" });
+    expect(screen.queryByRole("button", { name: /^Working/ })).toBeNull();
+    fireEvent.click(finished);
+    expect(screen.getAllByRole("button", { name: "Thought" })).toHaveLength(2);
+  });
+
+  it("rewinds to a sent message, putting its text back in the composer and files back as they were", async () => {
+    const session = makeSession("rewind", "Rewind chat");
+    const sessionID = session.id;
+    const created = Date.now() - 11 * 60 * 60 * 1000 - 60_000;
+    const undo = vi.fn().mockResolvedValue({ data: { files: 2 } });
+    const client = createClient({
+      undo,
+      messages: vi.fn().mockResolvedValue({
+        data: [
+          {
+            info: { id: "user", sessionID, role: "user", time: { created } },
+            parts: [{ id: "request", type: "text", text: "Make the wall thicker" }],
+          },
+          {
+            info: {
+              id: "reply",
+              sessionID,
+              role: "assistant",
+              parentID: "user",
+              time: { created: created + 1000, completed: created + 5000 },
+            },
+            parts: [{ id: "answer", type: "text", text: "The wall is 8 studs thick now." }],
+          },
+        ],
+      }),
+    });
+    const queryClient = createQueryClient();
+    seedReadyState(queryClient, { sessions: [session] });
+    render(<TestApp client={client} queryClient={queryClient} />);
+    fireEvent.click(await screen.findByText("Rewind chat"));
+
+    // Under the message: that the model got it, how long ago, then Copy, Edit and Rewind.
+    expect(await screen.findByRole("img", { name: "Model received this message" })).toBeVisible();
+    expect(screen.getAllByText("11 hours ago")).toHaveLength(2);
+    expect(screen.getAllByRole("button", { name: "Copy message" })).toHaveLength(2);
+    expect(screen.getByRole("button", { name: "Edit message" })).toBeEnabled();
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: "Rewind to this message" }));
+    });
+    expect(undo).toHaveBeenCalledExactlyOnceWith(
+      { sessionID, messageID: "user", files: true },
+      { throwOnError: true },
+    );
+    await waitFor(() =>
+      expect(screen.getByRole("textbox", { name: "Message" })).toHaveTextContent(
+        "Make the wall thicker",
+      ),
+    );
+    expect(await screen.findByText("Rewound to before this message")).toBeVisible();
+    expect(screen.getByText(/2 files were put back as they were\./)).toBeVisible();
+    expect(client.session.promptAsync).not.toHaveBeenCalled();
+  });
+
+  it("shows a compaction as a step with its status, not as a message that was sent", async () => {
+    const session = makeSession("compacted", "Compacted chat");
+    const sessionID = session.id;
+    const compaction = (status: string, error?: string) => ({
+      info: { id: "compaction", sessionID, role: "user", time: { created: Date.now() } },
+      parts: [
+        {
+          id: "compaction:compaction",
+          sessionID,
+          messageID: "compaction",
+          type: "compaction",
+          auto: false,
+          status,
+          error,
+        },
+      ],
+    });
+    const messages = vi.fn().mockResolvedValue({ data: [compaction("running")] });
+    const client = createClient({ messages });
+    const queryClient = createQueryClient();
+    seedReadyState(queryClient, { sessions: [session] });
+    render(<TestApp client={client} queryClient={queryClient} />);
+    fireEvent.click(await screen.findByText("Compacted chat"));
+
+    expect(await screen.findByText("Compacting context…")).toBeVisible();
+    // Nothing of a sent message: no receipt, and nothing to copy, edit or rewind.
+    expect(screen.queryByRole("img", { name: "Model received this message" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "Rewind to this message" })).toBeNull();
+
+    messages.mockResolvedValue({ data: [compaction("completed")] });
+    await act(() => queryClient.invalidateQueries({ queryKey: qk.messages(sessionID) }));
+    expect(await screen.findByText("Context compacted")).toBeVisible();
+
+    messages.mockResolvedValue({ data: [compaction("failed", "No model is connected")] });
+    await act(() => queryClient.invalidateQueries({ queryKey: qk.messages(sessionID) }));
+    expect(
+      await screen.findByText("Couldn't compact context: No model is connected"),
+    ).toBeVisible();
+  });
+
+  it("offers standard speed when fast mode's own rate limit keeps a turn retrying", async () => {
+    const session = makeSession("fast", "Fast limit");
+    const sessionID = session.id;
+    const id = "claude-opus";
+    const message =
+      "This request would exceed your rate limit of 200,000 fast mode input tokens per minute.";
+    const abort = vi.fn().mockResolvedValue({ data: true });
+    const client = createClient({
+      abort,
+      messages: vi.fn().mockResolvedValue({
+        data: [
+          {
+            info: { id: "user", sessionID, role: "user", time: { created: Date.now() } },
+            parts: [{ id: "request", type: "text", text: "Refactor the shop" }],
+          },
+        ],
+      }),
+    });
+    const queryClient = createQueryClient();
+    seedReadyState(queryClient, { sessions: [session] });
+    const provider = {
+      id: "anthropic",
+      name: "Anthropic",
+      env: [],
+      models: {
+        [id]: { id, name: "Claude Opus", variants: { high: {} } },
+        [`${id}-fast`]: { id: `${id}-fast`, name: "Claude Opus Fast", variants: { high: {} } },
+      },
+    };
+    queryClient.setQueryData(qk.providers, {
+      all: [provider],
+      connected: ["anthropic"],
+      default: { anthropic: id },
+    });
+    queryClient.setQueryData(qk.config, {
+      lastModel: `anthropic/${id}-fast`,
+      hiddenModels: [],
+      theme: "system",
+    });
+    render(<TestApp client={client} queryClient={queryClient} />);
+    fireEvent.click(await screen.findByText("Fast limit"));
+    await screen.findByText("Refactor the shop");
+
+    // Any other reason to retry is only reported, as before.
+    act(() => {
+      queryClient.setQueryData(qk.statuses, {
+        [sessionID]: { type: "retry", attempt: 1, message: "Overloaded", next: Date.now() + 5000 },
+      });
+    });
+    expect(await screen.findByText("Waiting to retry")).toBeVisible();
+    expect(screen.queryByRole("alert")).toBeNull();
+
+    act(() => {
+      queryClient.setQueryData(qk.statuses, {
+        [sessionID]: { type: "retry", attempt: 3, message, next: Date.now() + 5000 },
+      });
+    });
+    const notice = within(await screen.findByRole("alert"));
+    expect(notice.getByText("Fast mode's rate limit is in the way")).toBeVisible();
+    await act(async () => {
+      fireEvent.click(
+        notice.getByRole("button", { name: "Continue with Claude Opus at standard speed" }),
+      );
+    });
+    // The stuck turn is stopped first, then the same chat goes on with the standard model.
+    expect(abort).toHaveBeenCalledExactlyOnceWith(
+      { sessionID, wait: true },
+      { throwOnError: true },
+    );
+    await waitFor(() => expect(client.session.promptAsync).toHaveBeenCalledOnce());
+    expect(abort.mock.invocationCallOrder[0]).toBeLessThan(
+      client.session.promptAsync.mock.invocationCallOrder[0],
+    );
+    expect(client.session.promptAsync).toHaveBeenCalledWith(
+      expect.objectContaining({
+        sessionID,
+        parts: [{ type: "text", text: "Continue from where you stopped." }],
+        model: { providerID: "anthropic", modelID: id },
+      }),
+      { throwOnError: true },
+    );
+  });
+
+  it("puts edits to one file on a single line with their line counts, and shows a sent video as one attachment", async () => {
+    const session = makeSession("edits", "Edit batch");
+    const sessionID = session.id;
+    const created = Date.UTC(2026, 10, 14, 9, 0);
+    const url =
+      "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAIAAAABCAYAAAD0In+KAAAADklEQVR4nGP4z8DwHwQBEPgD/U6VwW8AAAAASUVORK5CYII=";
+    const edit = (id: string, file: string, oldString: string, newString: string) => ({
+      type: "tool",
+      id,
+      sessionID,
+      messageID: "work",
+      tool: "edit",
+      state: {
+        status: "completed",
+        input: { filePath: `C:/game/src/${file}`, oldString, newString },
+        output: "",
+        time: { start: created + 1000, end: created + 33_000 },
+      },
+    });
+    const undo = vi.fn().mockResolvedValue({});
+    const writeText = vi.fn().mockResolvedValue(undefined);
+    Object.assign(navigator, { clipboard: { writeText } });
+    const client = createClient({
+      undo,
+      messages: vi.fn().mockResolvedValue({
+        data: [
+          {
+            info: { id: "user", sessionID, role: "user", time: { created } },
+            parts: [
+              {
+                id: "request",
+                type: "text",
+                text: 'Fix the door\n\n[Video "clip.mp4" (0:08): attached images 1–2 are still frames from it, taken at 2.0s, 6.0s. Its audio is not included.]',
+              },
+              { id: "frame-1", type: "file", mime: "image/jpeg", url, filename: "frame 1.jpg" },
+              { id: "frame-2", type: "file", mime: "image/jpeg", url, filename: "frame 2.jpg" },
+              { id: "notes", type: "file", mime: "image/png", url, filename: "notes.png" },
+            ],
+          },
+          {
+            info: {
+              id: "work",
+              sessionID,
+              role: "assistant",
+              parentID: "user",
+              time: { created: created + 500, completed: created + 2000 },
+            },
+            parts: [
+              // The second line is the same before and after, so only one line changed.
+              edit(
+                "e1",
+                "Door.luau",
+                "local open = false\nprint(open)",
+                "local open = true\nprint(open)",
+              ),
+              edit("e2", "Door.luau", "print(open)", "print(open)\nreturn open"),
+              edit("e3", "Key.luau", "local key = 1", "local key = 2"),
+              { id: "summary", type: "text", text: "The door **opens** now." },
+            ],
+          },
+        ],
+      }),
+    });
+    const queryClient = createQueryClient();
+    seedReadyState(queryClient, { sessions: [session] });
+    render(<TestApp client={client} queryClient={queryClient} />);
+    fireEvent.click(await screen.findByText("Edit batch"));
+
+    // Finished work is summed up by how long it took.
+    fireEvent.click(await screen.findByRole("button", { name: "Worked for 32s" }));
+    const door = screen.getByRole("button", { name: /Edited.*Door\.luau.*\+2.*−1/ });
+    expect(screen.getByRole("button", { name: /Edited.*Key\.luau.*\+1.*−1/ })).toBeVisible();
+    expect(screen.getAllByRole("button", { name: /Edited/ })).toHaveLength(2);
+    expect(within(door).getByTitle("2 lines added")).toHaveTextContent("+2");
+    expect(within(door).getByTitle("1 line removed")).toHaveTextContent("−1");
+
+    // The finished turn closes with every file it edited, each opening to its changed lines.
+    const card = within(screen.getByRole("region", { name: "Files edited in this turn" }));
+    expect(card.getByText("Edited 2 files")).toBeVisible();
+    expect(card.getByTitle("3 lines added")).toHaveTextContent("+3");
+    expect(card.getByTitle("2 lines removed")).toHaveTextContent("−2");
+    const doorRow = card.getByRole("button", { name: /Door\.luau.*\+2.*−1/ });
+    expect(doorRow).toHaveAttribute("title", "C:/game/src/Door.luau");
+    expect(doorRow).toHaveAttribute("aria-expanded", "false");
+    expect(screen.queryByText("local open = true")).toBeNull();
+    fireEvent.click(doorRow);
+    expect(doorRow).toHaveAttribute("aria-expanded", "true");
+    expect(card.getByText("local open = true")).toBeVisible();
+    expect(card.getByText("return open")).toBeVisible();
+    expect(card.queryByText("local key = 2")).toBeNull();
+    fireEvent.click(card.getByRole("button", { name: "View changes" }));
+    expect(card.getByText("local key = 2")).toBeVisible();
+    fireEvent.click(card.getByRole("button", { name: "Hide changes" }));
+    expect(card.queryByText("local open = true")).toBeNull();
+
+    // The note that told the model which images are frames stays out of the bubble.
+    expect(screen.queryByText(/still frames from it/)).toBeNull();
+    expect(screen.getAllByText("Fix the door").length).toBeGreaterThan(0);
+    expect(screen.getByRole("button", { name: "Open notes.png" })).toBeVisible();
+    expect(screen.queryByRole("button", { name: "Open frame 1.jpg" })).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "Open clip.mp4, 2 frames" }));
+    const dialog = within(screen.getByRole("dialog"));
+    expect(dialog.getByText("1 / 2")).toBeVisible();
+    fireEvent.click(dialog.getByRole("button", { name: "Close image" }));
+
+    // Both messages copy as they read, and the sent one can be taken back to the composer.
+    const [copyUser, copyReply] = screen.getAllByRole("button", { name: "Copy message" });
+    await act(async () => fireEvent.click(copyUser));
+    expect(writeText).toHaveBeenLastCalledWith("Fix the door");
+    expect(screen.getByRole("button", { name: "Copied" })).toBeVisible();
+    await act(async () => fireEvent.click(copyReply));
+    expect(writeText).toHaveBeenLastCalledWith("The door **opens** now.");
+    // Editing happens in the bubble. Until it is sent nothing is rewound, and Escape drops it.
+    fireEvent.click(screen.getByRole("button", { name: "Edit message" }));
+    const field = () => screen.getByRole("textbox", { name: "Edit message" });
+    expect(field()).toHaveValue("Fix the door");
+    expect(field()).toHaveFocus();
+    fireEvent.change(field(), { target: { value: "Never mind" } });
+    fireEvent.keyDown(field(), { key: "Escape" });
+    expect(screen.queryByRole("textbox", { name: "Edit message" })).toBeNull();
+    expect(undo).not.toHaveBeenCalled();
+    expect(screen.getAllByText("Fix the door").length).toBeGreaterThan(0);
+    expect(screen.getByText(/The door/)).toBeVisible();
+
+    // Sent, it rewinds to before the message and goes again with the same attachments.
+    fireEvent.click(screen.getByRole("button", { name: "Edit message" }));
+    fireEvent.change(field(), { target: { value: "Fix the gate" } });
+    await act(async () => {
+      fireEvent.keyDown(field(), { key: "Enter" });
+    });
+    await waitFor(() => expect(client.session.promptAsync).toHaveBeenCalledOnce());
+    expect(undo).toHaveBeenCalledExactlyOnceWith(
+      { sessionID, messageID: "user" },
+      { throwOnError: true },
+    );
+    expect(undo.mock.invocationCallOrder[0]).toBeLessThan(
+      client.session.promptAsync.mock.invocationCallOrder[0],
+    );
+    expect(client.session.promptAsync).toHaveBeenCalledWith(
+      expect.objectContaining({
+        sessionID,
+        parts: [
+          {
+            type: "text",
+            text: 'Fix the gate\n\n[Video "clip.mp4" (0:08): attached images 1–2 are still frames from it, taken at 2.0s, 6.0s. Its audio is not included.]',
+          },
+          { type: "file", mime: "image/jpeg", url, filename: "frame 1.jpg" },
+          { type: "file", mime: "image/jpeg", url, filename: "frame 2.jpg" },
+          { type: "file", mime: "image/png", url, filename: "notes.png" },
+        ],
+      }),
+      { throwOnError: true },
+    );
+  }, 20_000);
+
   it("keeps Explorer mounted to the right of Context and lets either panel close independently", async () => {
     const closeStudio = openStudio();
     const chat = makeSession("context-explorer", "Inspect a place");

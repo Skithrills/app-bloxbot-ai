@@ -8,7 +8,7 @@ import {
   Plus,
   Settings2,
 } from "lucide-react";
-import { type MouseEvent, memo, useEffect, useMemo, useRef, useState } from "react";
+import { type DragEvent, type MouseEvent, memo, useEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { ProjectFolderDialog } from "@/components/ProjectFolderDialog";
 import { MENU_ITEM, MENU_SURFACE } from "@/components/ui/menu";
@@ -59,6 +59,21 @@ function formatTime(timestamp: number): string {
 function statusDot(status?: { type: string }): string {
   return status?.type === "busy" ? "bg-[var(--running)] animate-pulse" : "hidden";
 }
+
+/** Marks a drag as a chat from this list, so nothing else dropped on a folder is taken for one. */
+const CHAT_DRAG_TYPE = "application/x-bloxbot-chat";
+/** Where a chat outside every folder is dropped. A folder is named by its directory. */
+const OTHER_CHATS = "";
+const DROP_TARGET = "rounded-md bg-brand/10";
+/**
+ * Stands in for the faded copy of the row a browser drags by default, which BloxBot replaces with
+ * a card of its own.
+ */
+const NO_DRAG_IMAGE = new Image();
+NO_DRAG_IMAGE.src =
+  "data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7";
+/** Keeps the card clear of the pointer, so what is under it can still be read. */
+const DRAG_CARD_OFFSET = 14;
 
 const folderButtonClass =
   "flex h-6 w-6 shrink-0 items-center justify-center rounded text-muted-foreground transition-colors hover:bg-accent hover:text-foreground disabled:opacity-40";
@@ -111,6 +126,32 @@ const ChatSidebar = memo(function ChatSidebar({
     trigger?: HTMLElement;
   } | null>(null);
   const [deleteTarget, setDeleteTarget] = useState<Session | null>(null);
+  const [draggedChat, setDraggedChat] = useState<Session | null>(null);
+  const [dropTarget, setDropTarget] = useState<string | null>(null);
+  /** A chat dropped somewhere new, waiting for a yes. No directory means out of every folder. */
+  const [moveTarget, setMoveTarget] = useState<{
+    session: Session;
+    directory?: string;
+    name: string;
+  } | null>(null);
+  const cancelMoveRef = useRef<HTMLButtonElement>(null);
+  const dragCardRef = useRef<HTMLDivElement>(null);
+  const dragStartRef = useRef({ x: 0, y: 0 });
+
+  // The card follows the pointer without redrawing the list on every move.
+  useEffect(() => {
+    if (!draggedChat) return;
+    const place = (x: number, y: number) => {
+      const card = dragCardRef.current;
+      if (card) {
+        card.style.transform = `translate(${x + DRAG_CARD_OFFSET}px, ${y + DRAG_CARD_OFFSET}px)`;
+      }
+    };
+    place(dragStartRef.current.x, dragStartRef.current.y);
+    const follow = (event: globalThis.DragEvent) => place(event.clientX, event.clientY);
+    document.addEventListener("dragover", follow);
+    return () => document.removeEventListener("dragover", follow);
+  }, [draggedChat]);
   const [transitioningSessionId, setTransitioningSessionId] = useState<string | null>(null);
   const editRef = useRef<HTMLInputElement>(null);
   const cancelDeleteRef = useRef<HTMLButtonElement>(null);
@@ -218,6 +259,61 @@ const ChatSidebar = memo(function ChatSidebar({
     return () => window.removeEventListener("keydown", handleKeyDown);
   }, [deleteTarget]);
 
+  useEffect(() => {
+    if (!moveTarget) return;
+    cancelMoveRef.current?.focus();
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") setMoveTarget(null);
+    };
+    window.addEventListener("keydown", handleKeyDown);
+    return () => window.removeEventListener("keydown", handleKeyDown);
+  }, [moveTarget]);
+
+  /** The folder a chat is in, as its directory, or {@link OTHER_CHATS} when it is in none. */
+  const placeOf = (session: Session) =>
+    findProjectFolder(folders, session.directory)?.directory ?? OTHER_CHATS;
+
+  /** What a folder, or the list of other chats, needs to take a chat dragged onto it. */
+  function dropHandlers(place: string, name: string) {
+    const accepts = draggedChat !== null && placeOf(draggedChat) !== place;
+    return {
+      onDragOver: (event: DragEvent) => {
+        if (!accepts || !event.dataTransfer.types.includes(CHAT_DRAG_TYPE)) return;
+        event.preventDefault();
+        event.dataTransfer.dropEffect = "move";
+        if (dropTarget !== place) setDropTarget(place);
+      },
+      onDragLeave: (event: DragEvent) => {
+        if (
+          event.relatedTarget instanceof Node &&
+          event.currentTarget.contains(event.relatedTarget)
+        ) {
+          return;
+        }
+        setDropTarget((current) => (current === place ? null : current));
+      },
+      onDrop: (event: DragEvent) => {
+        const session = draggedChat;
+        setDropTarget(null);
+        setDraggedChat(null);
+        if (!accepts || !session) return;
+        event.preventDefault();
+        const status = sessionStatuses[session.id];
+        if (status && status.type !== "idle") {
+          notify.message("Wait for the chat to finish before moving it.");
+          return;
+        }
+        setMoveTarget({ session, directory: place || undefined, name });
+      },
+    };
+  }
+
+  function confirmMove() {
+    if (!moveTarget) return;
+    moveSession.mutate({ sessionID: moveTarget.session.id, directory: moveTarget.directory });
+    setMoveTarget(null);
+  }
+
   useEffect(
     () => () => {
       if (transitionTimerRef.current !== null) window.clearTimeout(transitionTimerRef.current);
@@ -309,6 +405,8 @@ const ChatSidebar = memo(function ChatSidebar({
         <div
           onContextMenu={(event) => openContextMenu(event, session)}
           className={`group relative mx-1 rounded-md transition-colors duration-150 ${
+            draggedChat?.id === session.id ? "opacity-40" : ""
+          } ${
             isActive
               ? "bg-accent text-foreground"
               : "text-muted-foreground hover:bg-accent/50 hover:text-foreground"
@@ -342,6 +440,20 @@ const ChatSidebar = memo(function ChatSidebar({
               aria-current={isActive ? "page" : undefined}
               className="flex w-full items-start gap-2 rounded-md px-2 py-1.5 text-left"
               onClick={() => handleSelect(session.id)}
+              // Drag a chat onto a folder, or onto the other chats, to move it there.
+              draggable={folders.length > 0}
+              onDragStart={(event) => {
+                event.dataTransfer.setData(CHAT_DRAG_TYPE, session.id);
+                event.dataTransfer.setData("text/plain", session.title || "Untitled");
+                event.dataTransfer.effectAllowed = "move";
+                event.dataTransfer.setDragImage?.(NO_DRAG_IMAGE, 0, 0);
+                dragStartRef.current = { x: event.clientX, y: event.clientY };
+                setDraggedChat(session);
+              }}
+              onDragEnd={() => {
+                setDraggedChat(null);
+                setDropTarget(null);
+              }}
             >
               <div
                 className={`mt-[7px] h-1.5 w-1.5 shrink-0 rounded-full transition-colors duration-300 ${statusDot(status)}`}
@@ -567,14 +679,20 @@ const ChatSidebar = memo(function ChatSidebar({
               const matches = groupedSessions.get(folder.directory) ?? [];
               const FolderIcon = expanded ? FolderOpen : Folder;
               return (
-                <section key={folder.directory} aria-label={folder.name} className="mb-2">
+                <section
+                  key={folder.directory}
+                  aria-label={folder.name}
+                  data-drop-target={dropTarget === folder.directory || undefined}
+                  className={`mb-2 transition-colors ${dropTarget === folder.directory ? DROP_TARGET : ""}`}
+                  {...dropHandlers(folder.directory, folder.name)}
+                >
                   <div className="flex items-center gap-0.5 px-1">
                     <button
                       type="button"
                       aria-expanded={expanded}
                       title={folder.directory}
                       onClick={() => toggleFolder(folder.directory)}
-                      className="flex min-w-0 flex-1 items-center gap-1.5 rounded-md px-1 py-1.5 text-left text-xs font-medium text-muted-foreground hover:bg-accent hover:text-foreground"
+                      className="flex min-w-0 flex-1 items-center gap-1.5 rounded-md px-1 py-1.5 text-left text-xs font-medium text-muted-foreground hover:bg-accent/50 hover:text-foreground"
                     >
                       <ChevronRight
                         size={12}
@@ -603,15 +721,29 @@ const ChatSidebar = memo(function ChatSidebar({
                     </button>
                   </div>
                   {expanded && matches.length > 0 && (
-                    <div className="ml-4">{matches.map(renderChat)}</div>
+                    // The gap keeps a hovered folder title apart from an open chat right under it.
+                    <div className="ml-4 mt-1">{matches.map(renderChat)}</div>
                   )}
                 </section>
               );
             })}
-            {folders.length > 0 && (groupedSessions.get(undefined)?.length ?? 0) > 0 && (
-              <h2 className="px-3 py-1.5 text-xs font-medium text-muted-foreground">Other chats</h2>
-            )}
-            {groupedSessions.get(undefined)?.map(renderChat)}
+            {/* While a chat from a folder is dragged, this is here to drop it on even when empty. */}
+            {folders.length > 0 &&
+              ((groupedSessions.get(undefined)?.length ?? 0) > 0 ||
+                (draggedChat !== null && placeOf(draggedChat) !== OTHER_CHATS)) && (
+                <section
+                  aria-label="Other chats"
+                  data-drop-target={dropTarget === OTHER_CHATS || undefined}
+                  className={`min-h-12 pb-1 transition-colors ${dropTarget === OTHER_CHATS ? DROP_TARGET : ""}`}
+                  {...dropHandlers(OTHER_CHATS, "Other chats")}
+                >
+                  <h2 className="px-3 py-1.5 text-xs font-medium text-muted-foreground">
+                    Other chats
+                  </h2>
+                  {groupedSessions.get(undefined)?.map(renderChat)}
+                </section>
+              )}
+            {folders.length === 0 && groupedSessions.get(undefined)?.map(renderChat)}
           </div>
 
           {snoozedSessions.length > 0 && (
@@ -804,6 +936,86 @@ const ChatSidebar = memo(function ChatSidebar({
               }
             />
           )}
+
+          {draggedChat &&
+            createPortal(
+              <div
+                ref={dragCardRef}
+                aria-hidden="true"
+                data-drag-card=""
+                className="pointer-events-none fixed left-0 top-0 z-[400] w-60 rounded-lg border bg-card px-3 py-2 text-card-foreground shadow-xl"
+              >
+                <div className="truncate text-sm font-medium leading-snug">
+                  {draggedChat.title || "Untitled"}
+                </div>
+                <div className="mt-0.5 truncate text-xs text-muted-foreground">
+                  {dropTarget === null
+                    ? "Drop on a folder to move it"
+                    : `Move to ${
+                        dropTarget === OTHER_CHATS
+                          ? "Other chats"
+                          : (findProjectFolder(folders, dropTarget)?.name ?? "this folder")
+                      }`}
+                </div>
+              </div>,
+              document.body,
+            )}
+
+          {moveTarget &&
+            createPortal(
+              <div
+                className="animate-lightbox-backdrop fixed inset-0 z-[300] flex items-center justify-center bg-black/55 p-4 backdrop-blur-[2px]"
+                onMouseDown={(event) => {
+                  if (event.target === event.currentTarget) setMoveTarget(null);
+                }}
+              >
+                <div
+                  role="alertdialog"
+                  aria-modal="true"
+                  aria-labelledby="move-session-title"
+                  aria-describedby="move-session-description"
+                  className="animate-scale-in w-full max-w-sm rounded-xl border bg-card p-5 text-card-foreground shadow-2xl"
+                >
+                  <h2 id="move-session-title" className="text-base font-medium">
+                    Move chat to {moveTarget.name}?
+                  </h2>
+                  <p
+                    id="move-session-description"
+                    className="mt-1.5 text-xs leading-relaxed text-muted-foreground"
+                  >
+                    {moveTarget.directory
+                      ? `“${moveTarget.session.title || "Untitled"}” will work in this folder from now on, and can read and change the files in it:`
+                      : `“${moveTarget.session.title || "Untitled"}” will leave its folder and work in the default workspace from now on.`}
+                  </p>
+                  {moveTarget.directory && (
+                    <p className="mt-2 flex min-w-0 items-center gap-1.5 text-xs">
+                      <Folder size={13} aria-hidden="true" className="shrink-0" />
+                      <span className="truncate" title={moveTarget.directory}>
+                        {moveTarget.directory}
+                      </span>
+                    </p>
+                  )}
+                  <div className="mt-5 flex justify-end gap-2">
+                    <button
+                      ref={cancelMoveRef}
+                      type="button"
+                      onClick={() => setMoveTarget(null)}
+                      className="rounded-md bg-secondary px-3 py-1.5 text-xs font-medium transition-colors hover:bg-accent"
+                    >
+                      Cancel
+                    </button>
+                    <button
+                      type="button"
+                      onClick={confirmMove}
+                      className="rounded-md bg-foreground px-3 py-1.5 text-xs font-medium text-background transition-opacity hover:opacity-90"
+                    >
+                      Move
+                    </button>
+                  </div>
+                </div>
+              </div>,
+              document.body,
+            )}
 
           {deleteTarget &&
             createPortal(

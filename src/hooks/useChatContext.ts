@@ -8,7 +8,7 @@ import { splitModelKey } from "@/lib/splitModelKey";
 import { useOpenCodeClient } from "@/providers/OpenCodeClientProvider";
 import { usePreferences } from "@/providers/PreferencesProvider";
 
-const COMPACT_MUTATION_KEY = ["compact-session"] as const;
+export const COMPACT_MUTATION_KEY = ["compact-session"] as const;
 
 export function useChatContext(sessionID: string | null, beforeMessageID?: string) {
   const { client, ready } = useOpenCodeClient();

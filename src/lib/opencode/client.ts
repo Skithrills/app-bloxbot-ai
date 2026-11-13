@@ -12,6 +12,7 @@ import {
 } from "@opencode/client";
 import {
   canPredictDraft,
+  composerNextMessagePrompt,
   composerPredictionPrompt,
   composerPredictionSuffix,
   isComposerPredictionModel,
@@ -525,15 +526,20 @@ export function createOpencodeClient(options: {
 
   const client = {
     composer: {
+      /**
+       * Continues a draft. With nothing typed yet, `context` is the end of the chat and the
+       * suggestion is the whole next message.
+       */
       predict: async (
-        { draft, modelID }: { draft: string; modelID: string },
+        { draft, modelID, context }: { draft: string; modelID: string; context?: string },
         { signal }: Pick<RequestOptions, "signal"> = {},
       ): Promise<string | null> => {
+        const nextMessage = draft === "" && context ? context : null;
         if (
           predictionInFlight ||
           Date.now() < predictionRetryAt ||
           signal?.aborted ||
-          !canPredictDraft(draft) ||
+          (!nextMessage && !canPredictDraft(draft)) ||
           !isKnownFreeModelKey(`opencode/${modelID}`)
         ) {
           return null;
@@ -578,7 +584,12 @@ export function createOpencodeClient(options: {
           }
           // This endpoint supplies the tools Zen expects without running them or writing history.
           const reply = await api.session.generate(
-            { sessionID, prompt: composerPredictionPrompt(draft) },
+            {
+              sessionID,
+              prompt: nextMessage
+                ? composerNextMessagePrompt(nextMessage)
+                : composerPredictionPrompt(draft),
+            },
             { signal },
           );
           return signal?.aborted ? null : composerPredictionSuffix(draft, reply.text);
@@ -729,9 +740,11 @@ export function createOpencodeClient(options: {
           requestOptions,
           async (): Promise<Todo[]> => todosFromHistory(await history(input.sessionID)),
         ),
-      abort: (input: { sessionID: string }, requestOptions?: RequestOptions) =>
+      /** Stops the turn. With `wait`, answers once it has stopped, so another can start. */
+      abort: (input: { sessionID: string; wait?: boolean }, requestOptions?: RequestOptions) =>
         settle(requestOptions, async () => {
           await api.session.interrupt({ sessionID: input.sessionID });
+          if (input.wait) await api.experimental.session.wait({ sessionID: input.sessionID });
           return true;
         }),
       promptAsync: (input: PromptInput, requestOptions?: RequestOptions) =>
@@ -830,11 +843,19 @@ export function createOpencodeClient(options: {
       fork: (input: { sessionID: string; before?: string }, requestOptions?: RequestOptions) =>
         settle(requestOptions, async () => remember(await api.session.fork(input))),
       /** Rewinds the chat to before a message. Sending again makes it final. */
-      undo: (input: { sessionID: string; messageID: string }, requestOptions?: RequestOptions) =>
+      /**
+       * With `files`, the files the chat changed from that message on go back to how they were
+       * too, and the answer says how many. Redo puts them forward again.
+       */
+      undo: (
+        input: { sessionID: string; messageID: string; files?: boolean },
+        requestOptions?: RequestOptions,
+      ) =>
         settle(requestOptions, async () => {
           await api.session.interrupt({ sessionID: input.sessionID });
           await api.experimental.session.wait({ sessionID: input.sessionID });
-          await api.session.revert.stage(input);
+          const staged = await api.session.revert.stage(input);
+          return { files: staged?.files?.length ?? 0 };
         }),
       redo: (input: { sessionID: string }, requestOptions?: RequestOptions) =>
         settle(requestOptions, async () => {

@@ -19,8 +19,12 @@ import { SessionNotifier, setChatOnScreen } from "@/lib/sessionNotifications";
 
 const event = (type: string, properties: Record<string, unknown>) =>
   ({ type, properties }) as unknown as Event;
-const busy = (sessionID: string) =>
+const working = (sessionID: string) =>
   event("session.status", { sessionID, status: { type: "busy" } });
+const reply = (sessionID: string) =>
+  event("message.updated", { sessionID, info: { id: "reply", sessionID, role: "assistant" } });
+/** A turn the model answers in. */
+const busy = (sessionID: string) => [working(sessionID), reply(sessionID)];
 const idleStatus = (sessionID: string) =>
   event("session.status", { sessionID, status: { type: "idle" } });
 const idle = (sessionID: string) => event("session.idle", { sessionID });
@@ -29,8 +33,8 @@ describe("SessionNotifier", () => {
   let notifier: SessionNotifier;
   let queryClient: QueryClient;
   const active = { current: "chat" as string | null };
-  const send = (...events: Event[]) => {
-    for (const item of events) notifier.handleEvent(queryClient, item, active);
+  const send = (...events: Array<Event | Event[]>) => {
+    for (const item of events.flat()) notifier.handleEvent(queryClient, item, active);
   };
 
   beforeEach(() => {
@@ -57,6 +61,22 @@ describe("SessionNotifier", () => {
       expect.objectContaining({ description: "Build a castle" }),
     );
     expect(maybeShowStarCallout).toHaveBeenCalledOnce();
+  });
+
+  it("says nothing when a chat was busy without the model answering, as when it is moved", () => {
+    send(working("chat"), idleStatus("chat"), idle("chat"));
+    expect(attention).not.toHaveBeenCalled();
+    expect(maybeShowStarCallout).not.toHaveBeenCalled();
+
+    // The turn after it is announced as usual.
+    send(busy("chat"), idleStatus("chat"), idle("chat"));
+    expect(attention).toHaveBeenCalledOnce();
+  });
+
+  it("announces a turn that was already running when the app started listening", () => {
+    notifier.trackRunning({ chat: { type: "busy" } });
+    send(idle("chat"));
+    expect(attention).toHaveBeenCalledOnce();
   });
 
   it("stays quiet about the chat on screen but announces others", () => {

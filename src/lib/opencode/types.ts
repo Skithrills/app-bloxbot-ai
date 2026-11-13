@@ -487,6 +487,9 @@ export type CompactionPart = {
   messageID: string;
   type: "compaction";
   auto: boolean;
+  status?: "running" | "completed" | "failed";
+  /** Why it failed. */
+  error?: string;
   overflow?: boolean;
   tail_start_id?: string;
 };

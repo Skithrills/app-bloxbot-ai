@@ -211,6 +211,103 @@ describe("ChatSidebar", () => {
     );
   });
 
+  it("moves a chat dragged onto a folder or back onto the other chats, once confirmed", async () => {
+    const directory = "C:\\Games\\Game A";
+    const loose = makeSession("loose", "Loose chat");
+    const filed = { ...makeSession("filed", "Filed chat"), directory };
+    const move = vi.fn(
+      async ({ sessionID, directory: to }: { sessionID: string; directory?: string }) => ({
+        data: { ...(sessionID === loose.id ? loose : filed), directory: to ?? "C:\\default" },
+      }),
+    );
+    const client = createClient({ move });
+    const qc = createQueryClient();
+    seedState(qc, { sessions: [loose, filed] });
+    const projectFolders: ProjectFolder[] = [{ directory, name: "Game A", studio: null }];
+    qc.setQueryData(qk.config, { ...(await loadConfig()), projectFolders });
+    render(<TestSidebar client={client} queryClient={qc} />);
+    const dataTransfer = () => {
+      const data = new Map<string, string>();
+      return {
+        setData: (type: string, value: string) => data.set(type, value),
+        getData: (type: string) => data.get(type) ?? "",
+        get types() {
+          return [...data.keys()];
+        },
+        effectAllowed: "",
+        dropEffect: "",
+      };
+    };
+    const drag = (title: string, onto: HTMLElement) => {
+      const transfer = dataTransfer();
+      const chat = screen.getByText(title).closest("button");
+      if (!chat) throw new Error("Expected a chat row");
+      fireEvent.dragStart(chat, { dataTransfer: transfer });
+      fireEvent.dragOver(onto, { dataTransfer: transfer });
+      return { chat, transfer };
+    };
+
+    // The folder a chat is already in doesn't take it.
+    const folder = screen.getByRole("region", { name: "Game A" });
+    const own = drag("Filed chat", folder);
+    expect(folder).not.toHaveAttribute("data-drop-target");
+    // What is dragged is a whole card of the app's own, with the chat's name on it.
+    const card = () => document.querySelector("[data-drag-card]");
+    expect(card()).toHaveTextContent("Filed chat");
+    expect(card()).toHaveTextContent("Drop on a folder to move it");
+    fireEvent.drop(folder, { dataTransfer: own.transfer });
+    expect(screen.queryByRole("alertdialog")).toBeNull();
+    fireEvent.dragEnd(own.chat);
+    expect(card()).toBeNull();
+
+    const into = drag("Loose chat", folder);
+    expect(folder).toHaveAttribute("data-drop-target");
+    expect(card()).toHaveTextContent("Move to Game A");
+    fireEvent.drop(folder, { dataTransfer: into.transfer });
+    expect(folder).not.toHaveAttribute("data-drop-target");
+    expect(card()).toBeNull();
+    const ask = within(screen.getByRole("alertdialog", { name: "Move chat to Game A?" }));
+    expect(ask.getByText(directory)).toBeVisible();
+    expect(move).not.toHaveBeenCalled();
+    // Cancelling leaves the chat where it was.
+    fireEvent.click(ask.getByRole("button", { name: "Cancel" }));
+    expect(screen.queryByRole("alertdialog")).toBeNull();
+    expect(move).not.toHaveBeenCalled();
+
+    const again = drag("Loose chat", folder);
+    fireEvent.drop(folder, { dataTransfer: again.transfer });
+    fireEvent.click(screen.getByRole("button", { name: "Move" }));
+    await waitFor(() =>
+      expect(move).toHaveBeenLastCalledWith(
+        { sessionID: loose.id, directory },
+        { throwOnError: true },
+      ),
+    );
+    expect(await within(folder).findByText("Loose chat")).toBeInTheDocument();
+
+    // With every chat in a folder, the other chats still appear while one is dragged.
+    expect(screen.queryByRole("region", { name: "Other chats" })).toBeNull();
+    const out = screen.getByText("Filed chat").closest("button");
+    if (!out) throw new Error("Expected a chat row");
+    const transfer = dataTransfer();
+    fireEvent.dragStart(out, { dataTransfer: transfer });
+    const others = screen.getByRole("region", { name: "Other chats" });
+    fireEvent.dragOver(others, { dataTransfer: transfer });
+    fireEvent.drop(others, { dataTransfer: transfer });
+    fireEvent.click(
+      within(screen.getByRole("alertdialog", { name: "Move chat to Other chats?" })).getByRole(
+        "button",
+        { name: "Move" },
+      ),
+    );
+    await waitFor(() =>
+      expect(move).toHaveBeenLastCalledWith(
+        { sessionID: filed.id, directory: undefined },
+        { throwOnError: true },
+      ),
+    );
+  });
+
   it("remembers the folder's chosen Studio for a new project chat", async () => {
     const directory = "C:\\Games\\Game A";
     const studio = { key: "game-a", label: "Game A", detail: null, placeId: "101" };

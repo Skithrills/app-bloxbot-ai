@@ -1,4 +1,4 @@
-import { mkdir, rename, readFile, rm, writeFile } from "node:fs/promises";
+import { copyFile, mkdir, rename, readFile, rm, writeFile } from "node:fs/promises";
 import { networkDriveLetters, onNetworkDrive } from "./networkDrives";
 import { isOpenableUrl } from "./openableUrl";
 import {
@@ -17,7 +17,7 @@ import {
   openBlender,
   removeBlenderTools,
 } from "./services/BlenderTools";
-import { dirname, join } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
 import {
@@ -81,6 +81,12 @@ import {
 } from "./studioQueries";
 import { withBlender, withModelSettings, withSystemPrompt } from "./opencodeConfig";
 import { channels } from "./channels";
+import {
+  LOCAL_VIDEO_SCHEME,
+  localVideoPath,
+  serveLocalVideo,
+  videoSaveOptions,
+} from "./localVideo";
 import { makeOpenCodeLayer, OpenCode } from "./services/OpenCode";
 import { createSubscriptionUsageReader } from "./services/SubscriptionUsage";
 import { createSystemNotifier, notificationSettingsUrl } from "./systemNotifications";
@@ -89,6 +95,10 @@ import { loadWindowState, minimumWindowSize, saveWindowState, type WindowMode } 
 
 protocol.registerSchemesAsPrivileged([
   { scheme: STUDIO_ICON_SCHEME, privileges: { standard: true, secure: true } },
+  {
+    scheme: LOCAL_VIDEO_SCHEME,
+    privileges: { standard: true, secure: true, stream: true, corsEnabled: true },
+  },
 ]);
 
 const currentDirectory = dirname(fileURLToPath(import.meta.url));
@@ -697,6 +707,18 @@ const registerIpcHandlers = Effect.sync(() => {
     await writeFile(result.filePath, bytes);
     return true;
   });
+  ipcMain.handle(channels.saveVideo, async (event, raw: unknown) => {
+    // Only a video the chat can already play, named by the same address it plays from.
+    const path = localVideoPath(await Schema.decodeUnknownPromise(Schema.String)(raw));
+    if (!path) throw new Error("Not a video on this computer");
+    const options = videoSaveOptions(path);
+    const window = BrowserWindow.fromWebContents(event.sender);
+    const result = await (window ? dialog.showSaveDialog(window, options) : dialog.showSaveDialog(options));
+    if (result.canceled || !result.filePath) return false;
+    // Saving over the file itself would leave it empty.
+    if (resolve(result.filePath) !== resolve(path)) await copyFile(path, result.filePath);
+    return true;
+  });
   ipcMain.handle(
     channels.uploadModelToPlace,
     async (event, url: unknown, studioKey: unknown, hash: unknown, addOnly: unknown) => {
@@ -946,6 +968,7 @@ Effect.runFork(
         },
       });
       protocol.handle(STUDIO_ICON_SCHEME, studioIconProtocolHandler(resolveStudioIcon));
+      protocol.handle(LOCAL_VIDEO_SCHEME, serveLocalVideo);
     });
     yield* registerIpcHandlers;
     yield* Effect.sync(() => Menu.setApplicationMenu(null));

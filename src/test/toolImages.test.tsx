@@ -6,6 +6,7 @@ import { pathToFileURL } from "node:url";
 import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { ImageLightboxProvider, ImageThumbnails } from "@/components/ImageLightbox";
+import { readVideoSound } from "@/components/VideoPlayer";
 import { desktop } from "@/lib/desktop";
 import { normalizeStudioToolImages } from "../../electron/services/ToolImages";
 
@@ -91,6 +92,102 @@ describe("tool image lightbox", () => {
         expect(exportToolImage).toHaveBeenLastCalledWith({ action, png, filename: "Viewport" }),
       );
     }
+  });
+
+  it("plays a sent video with BloxBot's controls, and steps between it and images in one gallery", async () => {
+    localStorage.clear();
+    const play = vi.spyOn(HTMLMediaElement.prototype, "play").mockImplementation(async function (
+      this: HTMLMediaElement,
+    ) {
+      fireEvent.play(this);
+    });
+    const frame = (id: string) => ({ id, name: `${id}.jpg`, src: dataUrl });
+    const { container } = render(
+      <ImageLightboxProvider>
+        <ImageThumbnails
+          images={[{ id: "notes", name: "notes.png", src: dataUrl }]}
+          videos={[
+            {
+              name: "clip.mp4",
+              length: "0:08",
+              src: "bloxbot-video://local/C%3A%5Cclips%5Cclip.mp4",
+              frames: [frame("f1"), frame("f2")],
+            },
+            // Its file's place isn't known, so its frames are what there is to open.
+            { name: "old.mp4", length: "0:03", frames: [frame("g1")] },
+          ]}
+        />
+      </ImageLightboxProvider>,
+    );
+    const inline = container.querySelector("video");
+    expect(inline).toHaveAttribute("src", "bloxbot-video://local/C%3A%5Cclips%5Cclip.mp4");
+    // The browser's own controls stay off. These are the app's.
+    expect(inline).not.toHaveAttribute("controls");
+    expect(screen.getByRole("slider", { name: "Seek" })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Full screen" })).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "Play" }));
+    expect(play).toHaveBeenCalledOnce();
+    expect(screen.getByRole("button", { name: "Pause" })).toBeInTheDocument();
+    if (!inline) throw new Error("Expected a video");
+    fireEvent.pause(inline);
+
+    // Videos start silent. Turning the sound on, and how loud, is kept for the next one.
+    expect(inline.muted).toBe(true);
+    const volume = screen.getByRole("slider", { name: "Volume" });
+    expect(volume).toHaveAttribute("aria-valuetext", "Muted");
+    fireEvent.click(screen.getByRole("button", { name: "Unmute" }));
+    expect(inline.muted).toBe(false);
+    expect(screen.getByRole("button", { name: "Mute" })).toHaveAttribute("aria-pressed", "false");
+    fireEvent.change(volume, { target: { value: "0.4" } });
+    expect(inline.volume).toBeCloseTo(0.4);
+    expect(volume).toHaveAttribute("aria-valuetext", "40%");
+    expect(readVideoSound()).toEqual({ volume: 0.4, muted: false });
+    fireEvent.keyDown(volume, { key: "ArrowUp" });
+    expect(readVideoSound().volume).toBeCloseTo(0.5);
+    // Dragged down to nothing is muted, and unmuting from there comes back audible.
+    fireEvent.change(volume, { target: { value: "0" } });
+    expect(readVideoSound()).toEqual({ volume: 0, muted: true });
+    fireEvent.click(screen.getByRole("button", { name: "Unmute" }));
+    expect(readVideoSound()).toEqual({ volume: 0.5, muted: false });
+    expect(screen.getByRole("button", { name: "Open old.mp4, 1 frames" })).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "Open clip.mp4" }));
+    const dialog = within(screen.getByRole("dialog", { name: "clip.mp4" }));
+    // The next video opens with the sound as it was left.
+    expect(screen.getByRole("dialog").querySelector("video")?.volume).toBeCloseTo(0.5);
+    expect(dialog.getByRole("slider", { name: "Volume" })).toHaveAttribute("aria-valuetext", "50%");
+    expect(dialog.getByText("1 / 2")).toBeVisible();
+    expect(dialog.getByRole("button", { name: "Full screen" })).toBeVisible();
+    expect(dialog.getByRole("button", { name: "Playback speed, 1×" })).toBeVisible();
+    fireEvent.click(dialog.getByRole("button", { name: "Playback speed, 1×" }));
+    expect(dialog.getByRole("button", { name: "Playback speed, 1.5×" })).toBeVisible();
+    // Arrow keys inside the player move through the video, and not on to the next attachment.
+    fireEvent.keyDown(dialog.getByRole("slider", { name: "Seek" }), { key: "ArrowRight" });
+    expect(dialog.getByText("1 / 2")).toBeVisible();
+    fireEvent.click(dialog.getByRole("button", { name: "Next image" }));
+    const next = within(screen.getByRole("dialog", { name: "notes.png" }));
+    expect(next.getByText("2 / 2")).toBeVisible();
+    expect(next.getByRole("img", { name: "notes.png" })).toBeVisible();
+    fireEvent.click(next.getByRole("button", { name: "Previous image" }));
+    expect(screen.getByRole("dialog", { name: "clip.mp4" })).toBeVisible();
+
+    // Right-clicking the picture saves a copy of the video from where it is on disk.
+    const saveVideo = vi.spyOn(desktop, "saveVideo").mockResolvedValue(true);
+    fireEvent.contextMenu(screen.getByRole("button", { name: "Play clip.mp4" }));
+    expect(await screen.findByRole("menuitem", { name: "Copy Frame" })).toBeVisible();
+    expect(screen.getByRole("menuitem", { name: "Save Frame as PNG" })).toBeVisible();
+    fireEvent.click(screen.getByRole("menuitem", { name: "Save Video As…" }));
+    await waitFor(() =>
+      expect(saveVideo).toHaveBeenCalledExactlyOnceWith(
+        "bloxbot-video://local/C%3A%5Cclips%5Cclip.mp4",
+      ),
+    );
+
+    // Once the file has gone, the frame that stood for the video is shown in its place.
+    const playing = screen.getByRole("dialog").querySelector("video");
+    if (!playing) throw new Error("Expected the gallery's video");
+    fireEvent.error(playing);
+    expect(screen.getByText(/file has moved or been deleted/)).toBeVisible();
   });
 
   it("opens the correct transcript's image and exposes capture metadata and zoom", () => {

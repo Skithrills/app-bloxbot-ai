@@ -294,7 +294,16 @@ export function toMessageWithParts(
   if (message.type === "compaction") {
     return {
       info: userInfo(sessionID, message.id, message.time.created),
-      parts: [{ ...shared, id: `${message.id}:compaction`, type: "compaction", auto: true }],
+      parts: [
+        {
+          ...shared,
+          id: `${message.id}:compaction`,
+          type: "compaction",
+          auto: message.reason !== "manual",
+          status: message.status,
+          ...(message.status === "failed" ? { error: message.error.message } : {}),
+        },
+      ],
     };
   }
   if (message.type !== "assistant") return null;

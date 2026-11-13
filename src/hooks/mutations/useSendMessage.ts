@@ -15,6 +15,9 @@ interface SendMessageInput {
   studioTargetReference?: string | null;
   studioTargetID?: string | null;
   delivery?: ComposerDelivery;
+  /** Sends with this model and effort instead of the selected ones, which may not have caught up. */
+  model?: string;
+  variant?: string | null;
 }
 
 interface SendMessageContext {
@@ -33,11 +36,20 @@ export function useSendMessage() {
   const queryClient = useQueryClient();
   return useMutation<void, Error, SendMessageInput, SendMessageContext | undefined>({
     mutationKey: sendMessageMutationKey(activeSessionId),
-    mutationFn: async ({ text, images, studioTargetReference, studioTargetID, delivery }) => {
+    mutationFn: async ({
+      text,
+      images,
+      studioTargetReference,
+      studioTargetID,
+      delivery,
+      ...use
+    }) => {
       if (!client || !activeSessionId) throw new Error("No client or session");
       if (!delivery && modelSelectionMessage) throw new Error(modelSelectionMessage);
 
-      const [provider, model] = !delivery && selectedModel ? splitModelKey(selectedModel) : [];
+      const modelKey = use.model ?? selectedModel;
+      const variant = use.variant === undefined ? selectedVariant : use.variant;
+      const [provider, model] = !delivery && modelKey ? splitModelKey(modelKey) : [];
       const accepted = delivery
         ? client.session.promptInbox(
             {
@@ -61,7 +73,7 @@ export function useSendMessage() {
               ...(studioTargetReference && { system: studioTargetReference }),
               ...(hideFreeModels && { requirePaidModel: true }),
               ...(provider && model && { model: { providerID: provider, modelID: model } }),
-              ...(selectedVariant && { variant: selectedVariant }),
+              ...(variant && { variant }),
             },
             { throwOnError: true },
           );

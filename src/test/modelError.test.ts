@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   FREE_LIMIT_FALLBACK_MS,
   freeLimitEndsAt,
+  isFastModeRateLimit,
   isFreeUsageLimit,
   isModelUnavailable,
   isRegionLocked,
@@ -38,6 +39,28 @@ describe("model error presentation", () => {
       kind: "context",
       title: "This conversation is too large",
     });
+  });
+});
+
+describe("fast mode's own rate limit", () => {
+  it("is told apart from a model's usual limit, which waiting does get past", () => {
+    const fast =
+      "This request would exceed your rate limit of 200,000 fast mode input tokens per minute.";
+    expect(isFastModeRateLimit(fast)).toBe(true);
+    expect(isFastModeRateLimit("rate limit of 1,000,000 fast mode output tokens per minute")).toBe(
+      true,
+    );
+    expect(
+      isFastModeRateLimit("would exceed your rate limit of 2,000,000 input tokens per minute"),
+    ).toBe(false);
+    expect(isFastModeRateLimit(undefined)).toBe(false);
+    const shown = presentModelError({
+      name: "APIError",
+      data: { message: fast, statusCode: 429, isRetryable: true },
+    });
+    expect(shown.title).toBe("Fast mode's rate limit is in the way");
+    expect(shown.description).toContain("Turn off Fast mode");
+    expect(shown.detail).toBe(fast);
   });
 });
 

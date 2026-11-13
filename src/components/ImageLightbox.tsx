@@ -1,4 +1,15 @@
-import { ChevronLeft, ChevronRight, Copy, Download, Minus, Paperclip, Plus, X } from "lucide-react";
+import {
+  ChevronLeft,
+  ChevronRight,
+  Copy,
+  Download,
+  Expand,
+  Film,
+  Minus,
+  Paperclip,
+  Plus,
+  X,
+} from "lucide-react";
 import { ContextMenu, Dialog, HoverCard } from "radix-ui";
 import {
   createContext,
@@ -9,6 +20,7 @@ import {
   useRef,
   useState,
 } from "react";
+import { VIDEO_CONTROL, VideoPlayer } from "@/components/VideoPlayer";
 import { desktop } from "@/lib/desktop";
 import { notify } from "@/lib/notifications";
 import { type AddComposerImage, imageForComposer } from "@/lib/toolImages";
@@ -21,6 +33,18 @@ export interface LightboxImage {
   label?: string;
   captureId?: string;
   capture?: { timestamp: number; arguments: Record<string, unknown> };
+  /** Set for a video, which plays from here. `src` is then the frame that stands for it. */
+  video?: { src: string };
+}
+
+/** A video as it was sent: still frames in order. `frames` is never empty. */
+export interface LightboxVideo {
+  name: string;
+  /** Like "0:08". */
+  length: string;
+  /** Where the video itself plays from, when its file's place on disk is known. */
+  src?: string;
+  frames: readonly LightboxImage[];
 }
 
 interface Gallery {
@@ -70,7 +94,14 @@ async function exportImage(
 const imageMenuItem =
   "flex cursor-default select-none items-center gap-2 rounded px-2 py-1.5 text-sm outline-none data-[highlighted]:bg-accent data-[highlighted]:text-accent-foreground";
 
-function ImageContextMenu({ image, children }: { image: LightboxImage; children: ReactElement }) {
+/** Right-click a picture to copy it or save it, and in the chat to attach it. */
+export function ImageContextMenu({
+  image,
+  children,
+}: {
+  image: LightboxImage;
+  children: ReactElement;
+}) {
   const addImage = useContext(AddImageToComposer);
   const triggerRef = useRef<HTMLSpanElement>(null);
   const exportFromMenu = (action: ToolImageExport["action"]) => {
@@ -245,6 +276,36 @@ function ImageViewer({ image }: { image: LightboxImage }) {
   );
 }
 
+/** A video in the gallery. Once its file has moved, the frame that stood for it is what's left. */
+function VideoViewer({ image }: { image: LightboxImage }) {
+  const [unplayable, setUnplayable] = useState(false);
+  if (!image.video || unplayable) {
+    return (
+      <>
+        <section
+          aria-label="Video preview"
+          className="min-h-0 overflow-auto rounded-md bg-black/70"
+        >
+          <img src={image.src} alt={image.name} className="m-auto block max-h-[62vh] max-w-full" />
+        </section>
+        <p className="text-xs text-muted-foreground">
+          This video's file has moved or been deleted, so it can't play. The frames that were sent
+          are still in the message.
+        </p>
+      </>
+    );
+  }
+  return (
+    <VideoPlayer
+      src={image.video.src}
+      name={image.name}
+      poster={image.src}
+      autoPlay
+      onError={() => setUnplayable(true)}
+    />
+  );
+}
+
 export function ImageLightboxProvider({
   children,
   onAddImage,
@@ -313,7 +374,7 @@ export function ImageLightboxProvider({
                       {image.name}
                     </Dialog.Title>
                     <Dialog.Description className="sr-only">
-                      Image attachment preview
+                      {image.video ? "Video attachment" : "Image attachment preview"}
                     </Dialog.Description>
                     {gallery.images.length > 1 && (
                       <fieldset className="flex items-center gap-1" aria-label="Image gallery">
@@ -342,7 +403,11 @@ export function ImageLightboxProvider({
                       <X size={16} aria-hidden />
                     </Dialog.Close>
                   </div>
-                  <ImageViewer key={image.id} image={image} />
+                  {image.video ? (
+                    <VideoViewer key={image.id} image={image} />
+                  ) : (
+                    <ImageViewer key={image.id} image={image} />
+                  )}
                 </>
               )}
             </Dialog.Content>
@@ -445,17 +510,133 @@ export function ReplyImage({ image, caption }: { image: LightboxImage; caption: 
   );
 }
 
-export function ImageThumbnails({ images }: { images: readonly LightboxImage[] }) {
+/**
+ * A sent video. While its file is where it was sent from it plays here, and opens in the gallery
+ * beside the message's other attachments. After that, the frames that were sent remain.
+ */
+function VideoThumbnail({
+  video,
+  onOpen,
+}: {
+  video: LightboxVideo;
+  onOpen?: (trigger: HTMLButtonElement) => void;
+}) {
   const openGallery = useContext(OpenGallery);
+  const [unplayable, setUnplayable] = useState(false);
+  const poster = video.frames[Math.floor(video.frames.length / 2)];
+  const frameCount = `${video.frames.length} ${video.frames.length === 1 ? "frame" : "frames"}`;
+  if (video.src && !unplayable) {
+    return (
+      <div className="w-full max-w-full sm:max-w-[340px]">
+        <VideoPlayer
+          src={video.src}
+          name={video.name}
+          poster={poster.src}
+          compact
+          videoClassName="max-h-56"
+          onError={() => setUnplayable(true)}
+          trailing={
+            <>
+              <button
+                type="button"
+                aria-label={`Open the ${frameCount} sent from ${video.name}`}
+                title={`The model was sent ${frameCount} from this video, without sound`}
+                className={VIDEO_CONTROL}
+                onClick={(event) =>
+                  openGallery?.({ images: video.frames, index: 0, trigger: event.currentTarget })
+                }
+              >
+                <Film aria-hidden="true" size={14} />
+              </button>
+              {onOpen && (
+                <button
+                  type="button"
+                  aria-label={`Open ${video.name}`}
+                  title="Open larger"
+                  className={VIDEO_CONTROL}
+                  onClick={(event) => onOpen(event.currentTarget)}
+                >
+                  <Expand aria-hidden="true" size={14} />
+                </button>
+              )}
+            </>
+          }
+        />
+      </div>
+    );
+  }
+  return (
+    <button
+      type="button"
+      aria-label={`Open ${video.name}, ${video.frames.length} frames`}
+      title={`${video.name}, sent as ${video.frames.length} still frames without sound`}
+      className="relative block max-w-full cursor-zoom-in overflow-hidden rounded-md border bg-black/30 hover:border-foreground/50 focus-visible:outline-2"
+      onClick={(event) =>
+        openGallery?.({ images: video.frames, index: 0, trigger: event.currentTarget })
+      }
+    >
+      <img
+        src={poster.src}
+        alt={video.name}
+        loading="lazy"
+        className="max-h-36 max-w-full object-contain sm:max-w-[240px]"
+      />
+      <span className="absolute inset-x-0 bottom-0 flex min-w-0 items-center gap-1.5 bg-black/60 px-1.5 py-1 text-xs text-white">
+        <Film aria-hidden="true" size={12} className="shrink-0" />
+        <span className="min-w-0 truncate">{video.name}</span>
+        <span className="ml-auto shrink-0 tabular-nums">{video.length}</span>
+      </span>
+    </button>
+  );
+}
+
+export function ImageThumbnails({
+  images,
+  videos = [],
+}: {
+  images: readonly LightboxImage[];
+  videos?: readonly LightboxVideo[];
+}) {
+  const openGallery = useContext(OpenGallery);
+  // One gallery for the message: its videos that can play, then its images, with the same
+  // previous and next controls for both.
+  const playable = videos.flatMap((video): LightboxImage[] => {
+    const poster = video.frames[Math.floor(video.frames.length / 2)];
+    return video.src
+      ? [{ id: `${poster.id}:video`, src: poster.src, name: video.name, video: { src: video.src } }]
+      : [];
+  });
+  const gallery = [...playable, ...images];
+  let playableIndex = 0;
   return (
     <div className="flex flex-wrap gap-1.5">
+      {videos.map((video) => {
+        const index = video.src ? playableIndex++ : -1;
+        return (
+          <VideoThumbnail
+            key={video.frames[0].id}
+            video={video}
+            onOpen={
+              index >= 0
+                ? (trigger) => openGallery?.({ images: gallery, index, trigger })
+                : undefined
+            }
+          />
+        );
+      })}
       {images.map((image, index) => (
         <ImageContextMenu image={image} key={image.id}>
           <button
             type="button"
             aria-label={`Open ${image.name}`}
             className="block max-w-full cursor-zoom-in overflow-hidden rounded-md border bg-black/30 hover:border-foreground/50 focus-visible:outline-2"
-            onClick={(event) => openGallery?.({ images, index, trigger: event.currentTarget })}
+            onClick={(event) =>
+              openGallery?.({
+                images: gallery,
+                index: playable.length + index,
+                trigger: event.currentTarget,
+              })
+            }
           >
             <img
               src={image.src}

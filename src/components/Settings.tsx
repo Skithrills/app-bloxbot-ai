@@ -1097,7 +1097,9 @@ function AppearanceTab() {
           />
         </div>
         <p className="mt-1.5 text-xs text-muted-foreground">
-          A free OpenCode Zen model uses your draft to suggest a continuation. Press Tab to accept.
+          A free OpenCode Zen model uses your draft to suggest a continuation. With nothing typed,
+          it reads your last message and the latest reply to suggest what to send next. Press Tab to
+          accept.
         </p>
       </div>
     </div>

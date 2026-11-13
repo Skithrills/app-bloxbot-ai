@@ -6,7 +6,7 @@
  */
 
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { useEffect, useRef } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import ChatInput from "@/components/ChatInput";
@@ -52,7 +52,39 @@ vi.mock("@/providers/StudioTargetProvider", async (importOriginal) => ({
   useStudioTargetOptional: () => studio,
 }));
 
+// jsdom can't decode video, so the frames come from here.
+const videos = vi.hoisted(() => ({ read: vi.fn() }));
+vi.mock("@/lib/composerVideos", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@/lib/composerVideos")>()),
+  readVideoFrames: videos.read,
+}));
+
 // ── Helpers ──────────────────────────────────────────────────────────
+
+/** Switches predictions on, with the free model they are allowed to use. */
+function enablePredictions(qc: QueryClient, modelID: string, hideFreeModels = false) {
+  qc.setQueryData(qk.config, { ...DEFAULT_APP_CONFIG, composerPredictions: true, hideFreeModels });
+  qc.setQueryData(qk.providers, {
+    all: [
+      {
+        id: "opencode",
+        source: "custom",
+        name: "OpenCode Zen",
+        env: [],
+        models: {
+          [modelID]: {
+            id: modelID,
+            name: "Example Free",
+            cost: { input: 0, output: 0, cache: { read: 0, write: 0 } },
+            capabilities: { input: { text: true }, output: { text: true } },
+          },
+        },
+      },
+    ],
+    connected: ["opencode"],
+    default: { opencode: modelID },
+  });
+}
 
 function makeSession(id: string, title: string): Session {
   return {
@@ -279,33 +311,7 @@ describe("ChatInput", () => {
       <TestChatInput
         client={client}
         queryClient={queryClient}
-        prepareCache={(qc) => {
-          qc.setQueryData(qk.config, {
-            ...DEFAULT_APP_CONFIG,
-            composerPredictions: true,
-            hideFreeModels,
-          });
-          qc.setQueryData(qk.providers, {
-            all: [
-              {
-                id: "opencode",
-                source: "custom",
-                name: "OpenCode Zen",
-                env: [],
-                models: {
-                  [modelID]: {
-                    id: modelID,
-                    name: "Example Free",
-                    cost: { input: 0, output: 0, cache: { read: 0, write: 0 } },
-                    capabilities: { input: { text: true }, output: { text: true } },
-                  },
-                },
-              },
-            ],
-            connected: ["opencode"],
-            default: { opencode: modelID },
-          });
-        }}
+        prepareCache={(qc) => enablePredictions(qc, modelID, hideFreeModels)}
       />,
     );
     const editor = screen.getByRole("textbox", { name: "Message" });
@@ -366,6 +372,290 @@ describe("ChatInput", () => {
       ),
     );
     expect(client.composer.predict).toHaveBeenCalledTimes(2);
+  });
+
+  it("suggests the whole next message in an empty composer, in place of the placeholder", async () => {
+    const client = createClient();
+    const modelID = "example-free";
+    const placeholder = "Describe what you want to build...";
+    const reply = (id: string, text: string, completed: boolean) => ({
+      info: {
+        id,
+        sessionID: "s1",
+        role: "assistant",
+        time: { created: 2, ...(completed && { completed: 3 }) },
+      },
+      parts: [{ id: `${id}-text`, type: "text", text }],
+    });
+    const chat = (...replies: ReturnType<typeof reply>[]) =>
+      ({
+        messageIds: ["ask", ...replies.map(({ info }) => info.id)],
+        messagesById: Object.fromEntries(
+          [
+            {
+              info: { id: "ask", sessionID: "s1", role: "user", time: { created: 1 } },
+              parts: [{ id: "ask-text", type: "text", text: "Watch this clip" }],
+            },
+            ...replies,
+          ].map((message) => [message.info.id, message]),
+        ),
+      }) as unknown as MessagesCache;
+    client.composer.predict.mockResolvedValueOnce("Yes, pull more frames");
+    const queryClient = createQueryClient();
+    const { container } = render(
+      <TestChatInput
+        client={client}
+        queryClient={queryClient}
+        prepareCache={(qc) => {
+          enablePredictions(qc, modelID);
+          // A reply that is still arriving has nothing settled to read a suggestion from.
+          qc.setQueryData(qk.messages("s1"), chat(reply("partial", "You broke", false)));
+        }}
+      />,
+    );
+    const editor = screen.getByRole("textbox", { name: "Message" });
+    const focusEmpty = async () => {
+      const paragraph = editor.querySelector("p");
+      if (!paragraph) throw new Error("Expected an empty paragraph");
+      await act(async () => {
+        editor.focus();
+        window.getSelection()?.collapse(paragraph, 0);
+        document.dispatchEvent(new Event("selectionchange"));
+      });
+    };
+    const waitForPrediction = { timeout: COMPOSER_PREDICTION_DELAY_MS + 2_000 };
+    const suggestion = () => container.querySelector("[data-composer-next-message]");
+
+    await focusEmpty();
+    await act(() => new Promise((resolve) => setTimeout(resolve, COMPOSER_PREDICTION_DELAY_MS)));
+    expect(client.composer.predict).not.toHaveBeenCalled();
+    expect(screen.getByText(placeholder)).toBeInTheDocument();
+
+    act(() => {
+      queryClient.setQueryData(
+        qk.messages("s1"),
+        chat(reply("done", "You broke a skylight. Want more frames?", true)),
+      );
+    });
+    await waitFor(
+      () =>
+        expect(suggestion()).toHaveAttribute("data-composer-next-message", "Yes, pull more frames"),
+      waitForPrediction,
+    );
+    expect(client.composer.predict).toHaveBeenCalledExactlyOnceWith(
+      {
+        draft: "",
+        modelID,
+        context: JSON.stringify({
+          user: "Watch this clip",
+          assistant: "You broke a skylight. Want more frames?",
+        }),
+      },
+      { signal: expect.any(AbortSignal) },
+    );
+    expect(screen.queryByText(placeholder)).toBeNull();
+    expect(editor).toHaveTextContent("");
+
+    // Typing along the suggestion keeps the rest of it as the usual gray continuation.
+    await act(async () => {
+      fireEvent.input(editor, { target: { textContent: "Yes, pull" } });
+    });
+    const tail = editor.querySelector("[data-lexical-text]")?.firstChild;
+    if (!tail) throw new Error("Expected a Lexical text node");
+    await act(async () => {
+      window.getSelection()?.collapse(tail, "Yes, pull".length);
+      document.dispatchEvent(new Event("selectionchange"));
+    });
+    await waitFor(() =>
+      expect(editor.querySelector("[data-composer-prediction]")).toHaveAttribute(
+        "data-composer-prediction",
+        " more frames",
+      ),
+    );
+    expect(suggestion()).toBeNull();
+
+    // Emptied again, the suggestion is back at once, and Tab writes it without sending.
+    await act(async () => {
+      fireEvent.input(editor, { target: { textContent: "" } });
+    });
+    await focusEmpty();
+    await waitFor(() => expect(suggestion()).not.toBeNull());
+    expect(fireEvent.keyDown(editor, { key: "Tab" })).toBe(false);
+    await waitFor(() => expect(editor).toHaveTextContent("Yes, pull more frames"));
+    expect(suggestion()).toBeNull();
+    expect(client.composer.predict).toHaveBeenCalledOnce();
+    expect(client.session.promptAsync).not.toHaveBeenCalled();
+  });
+
+  it("attaches a video as still frames and tells the model which images they are", async () => {
+    const client = createClient();
+    const frames = [0.5, 1.5].map((time) => ({
+      dataUrl: `data:image/jpeg;base64,AA${time}`,
+      time,
+    }));
+    let finishReading = (_video: { duration: number; frames: typeof frames }) => {};
+    videos.read.mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          finishReading = resolve;
+        }),
+    );
+    const { container } = render(
+      <TestChatInput client={client} queryClient={createQueryClient()} />,
+    );
+    const fileInput = container.querySelector<HTMLInputElement>('input[type="file"]');
+    if (!fileInput) throw new Error("File input was not rendered");
+    const textarea = await screen.findByRole("textbox", { name: "Message" });
+    const clip = new File(["video"], "clip.mp4", { type: "video/mp4" });
+    await act(async () => {
+      fireEvent.change(fileInput, { target: { files: [clip] } });
+    });
+    expect(videos.read).toHaveBeenCalledExactlyOnceWith(clip);
+    expect(await screen.findByText("Reading video")).toBeInTheDocument();
+
+    // Sending now would leave the video out, so the message waits for it.
+    await act(async () => {
+      fireEvent.input(textarea, { target: { textContent: "What happens here?" } });
+      await Promise.resolve();
+      fireEvent.keyDown(textarea, { key: "Enter" });
+    });
+    expect(client.session.promptAsync).not.toHaveBeenCalled();
+    expect(textarea).toHaveTextContent("What happens here?");
+
+    await act(async () => finishReading({ duration: 2, frames }));
+    expect(await screen.findByText("clip.mp4")).toBeInTheDocument();
+    expect(screen.queryByText("Reading video")).toBeNull();
+    expect(screen.getByTitle("Sent as 2 still frames, without sound")).toHaveTextContent("0:02");
+
+    await act(async () => {
+      fireEvent.click(screen.getByTitle("Send"));
+    });
+    await waitFor(() => expect(client.session.promptAsync).toHaveBeenCalledOnce());
+    expect(client.session.promptAsync).toHaveBeenCalledWith(
+      expect.objectContaining({
+        sessionID: "s1",
+        parts: [
+          {
+            type: "text",
+            text: 'What happens here?\n\n[Video "clip.mp4" (0:02): attached images 1–2 are still frames from it, taken at 0.5s, 1.5s. Its audio is not included.]',
+          },
+          {
+            type: "file",
+            mime: "image/jpeg",
+            url: frames[0].dataUrl,
+            filename: "clip.mp4 frame 1.jpg",
+          },
+          {
+            type: "file",
+            mime: "image/jpeg",
+            url: frames[1].dataUrl,
+            filename: "clip.mp4 frame 2.jpg",
+          },
+        ],
+      }),
+      { throwOnError: true },
+    );
+    expect(screen.queryByText("clip.mp4")).toBeNull();
+  });
+
+  it("turns away a video that can't be decoded and a file that is neither image nor video", async () => {
+    const client = createClient();
+    videos.read.mockRejectedValueOnce(new Error("The video couldn't be decoded."));
+    const { container } = render(
+      <TestChatInput client={client} queryClient={createQueryClient()} />,
+    );
+    const fileInput = container.querySelector<HTMLInputElement>('input[type="file"]');
+    if (!fileInput) throw new Error("File input was not rendered");
+    await act(async () => {
+      fireEvent.change(fileInput, {
+        target: {
+          files: [
+            new File(["video"], "broken.mkv", { type: "" }),
+            new File(["text"], "notes.txt", { type: "text/plain" }),
+          ],
+        },
+      });
+    });
+    expect(
+      await screen.findByText("Couldn't read that video. Try an MP4 or WebM."),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByText(
+        "That file isn't an image or video. Try a PNG, JPEG, GIF, WebP, MP4, or WebM instead.",
+      ),
+    ).toBeInTheDocument();
+    expect(screen.queryByText("Reading video")).toBeNull();
+    expect(screen.queryByText("broken.mkv")).toBeNull();
+    expect(screen.getByTitle("Send")).toBeDisabled();
+  });
+
+  it("keeps the chat's last used model at the top of the picker, with a warning once another is chosen", async () => {
+    const client = createClient();
+    const qc = createQueryClient();
+    const provider = {
+      id: "anthropic",
+      name: "Anthropic",
+      env: [],
+      models: {
+        big: { id: "big", name: "Claude Big", limit: { context: 1_000_000, output: 1 } },
+        small: { id: "small", name: "Claude Small", limit: { context: 200_000, output: 1 } },
+      },
+    };
+    render(
+      <TestChatInput
+        client={client}
+        queryClient={qc}
+        prepareCache={(cache) => {
+          cache.setQueryData(qk.providers, {
+            all: [provider],
+            connected: ["anthropic"],
+            default: { anthropic: "big" },
+          });
+          cache.setQueryData(qk.config, { ...DEFAULT_APP_CONFIG, lastModel: "anthropic/big" });
+          cache.setQueryData(qk.messages("s1"), {
+            messageIds: ["reply"],
+            messagesById: {
+              reply: {
+                info: {
+                  id: "reply",
+                  sessionID: "s1",
+                  role: "assistant",
+                  providerID: "anthropic",
+                  modelID: "big",
+                  time: { created: 1, completed: 2 },
+                },
+                parts: [],
+              },
+            },
+          } as unknown as MessagesCache);
+        }}
+      />,
+    );
+    const picker = () => screen.getByRole("button", { name: /Claude (Big|Small)$/ });
+    fireEvent.click(await screen.findByRole("button", { name: "Claude Big" }));
+    // On the chat's own model there is nothing to warn about.
+    const lastUsed = await screen.findByRole("button", { name: /Last used.*Claude Big/ });
+    expect(lastUsed).toHaveAttribute("aria-pressed", "true");
+    expect(screen.queryByText(/reads the whole chat again/)).toBeNull();
+
+    // Another model, picked by accident or not, is marked on the picker and explained in it.
+    fireEvent.click(screen.getByRole("button", { name: "Claude Small" }));
+    await waitFor(() =>
+      expect(picker()).toHaveAccessibleDescription(/^This chat has been using Claude Big\./),
+    );
+    expect(picker().querySelector("[data-model-switched]")).not.toBeNull();
+    fireEvent.click(picker());
+    expect(
+      await screen.findByText(
+        /This chat has been using Claude Big\. A different model reads the whole chat again from the start, which costs more, and this one holds less \(200K against 1M tokens\), so the chat may be compacted\./,
+      ),
+    ).toBeVisible();
+
+    // One click on the card goes back.
+    fireEvent.click(screen.getByRole("button", { name: /Last used.*Claude Big/ }));
+    const back = await screen.findByRole("button", { name: "Claude Big" });
+    expect(back).not.toHaveAttribute("title");
+    expect(back.querySelector("[data-model-switched]")).toBeNull();
   });
 
   it("groups a Fast model with its standard version and keeps compatible effort when toggled", async () => {
@@ -1067,14 +1357,26 @@ describe("ChatInput", () => {
       />,
     );
     const textarea = await screen.findByRole("textbox", { name: "Message" });
-    expect(screen.getByRole("button", { name: "Queue" })).toHaveAttribute(
-      "title",
-      "Queue after the current turn (Alt+Enter)",
-    );
+    // Nothing to send into the turn yet, so the button stops it.
+    expect(screen.getByTitle("Stop")).toBeInTheDocument();
 
     await act(async () => {
       fireEvent.input(textarea, { target: { textContent: "Follow up" } });
       await Promise.resolve();
+    });
+    // With a draft the arrow takes Stop's place. Neither chord is plain Enter, so it steers.
+    expect(screen.queryByTitle("Stop")).toBeNull();
+    const arrow = screen.getByRole("button", { name: "Steer at the next step (Ctrl+Shift+Enter)" });
+    expect(screen.queryByRole("menu")).toBeNull();
+    fireEvent.mouseEnter(arrow);
+    const menu = within(screen.getByRole("menu", { name: "Send while working" }));
+    expect(menu.getByRole("menuitem", { name: /^Steer.*Ctrl\+Shift\+Enter$/ })).toBeVisible();
+    expect(menu.getByRole("menuitem", { name: /^Queue.*Alt\+Enter$/ })).toBeVisible();
+    expect(menu.getByRole("menuitem", { name: "Stop" })).toBeVisible();
+    fireEvent.mouseLeave(arrow);
+    expect(screen.queryByRole("menu")).toBeNull();
+
+    await act(async () => {
       fireEvent.keyDown(textarea, { key: "Enter", altKey: true, isComposing: true });
       fireEvent.keyDown(textarea, { key: "Enter", shiftKey: true });
       fireEvent.keyDown(textarea, { key: "Enter", ctrlKey: true });
@@ -1149,7 +1451,9 @@ describe("ChatInput", () => {
     });
     expect(await screen.findByText("reference.png")).toBeInTheDocument();
 
-    await act(async () => fireEvent.click(screen.getByRole("button", { name: "Queue" })));
+    const arrow = () => screen.getByRole("button", { name: "Steer at the next step (Enter)" });
+    fireEvent.mouseEnter(arrow());
+    await act(async () => fireEvent.click(screen.getByRole("menuitem", { name: /^Queue/ })));
     expect(client.session.promptInbox).toHaveBeenCalledExactlyOnceWith(
       {
         sessionID: "s1",
@@ -1167,7 +1471,8 @@ describe("ChatInput", () => {
       fireEvent.keyDown(textarea, { key: "Enter" });
     });
     expect(client.session.promptInbox).toHaveBeenCalledOnce();
-    expect(screen.getByRole("button", { name: "Queue" })).toBeDisabled();
+    expect(arrow()).toBeDisabled();
+    expect(screen.queryByRole("menu")).toBeNull();
     await act(async () => rejectSend(new Error("Inbox unavailable")));
 
     expect(await screen.findByText("Message not sent")).toBeInTheDocument();
@@ -1175,6 +1480,58 @@ describe("ChatInput", () => {
     expect(screen.getByText("reference.png")).toBeInTheDocument();
     expect(textarea).toHaveTextContent("Another message");
     expect(qc.getQueryData<Record<string, SessionStatus>>(qk.statuses)?.s1.type).toBe("busy");
+  });
+
+  it("only queues what is sent while the chat is being compacted", async () => {
+    const client = createClient();
+    const qc = createQueryClient();
+    render(
+      <TestChatInput
+        client={client}
+        queryClient={qc}
+        prepareCache={(cache) => {
+          cache.setQueryData(qk.statuses, { s1: { type: "busy" } });
+          cache.setQueryData(qk.messages("s1"), {
+            messageIds: ["compaction"],
+            messagesById: {
+              compaction: {
+                info: { id: "compaction", sessionID: "s1", role: "user", time: { created: 1 } },
+                parts: [
+                  {
+                    id: "compaction:compaction",
+                    sessionID: "s1",
+                    messageID: "compaction",
+                    type: "compaction",
+                    auto: false,
+                    status: "running",
+                  },
+                ],
+              },
+            },
+          } as unknown as MessagesCache);
+        }}
+      />,
+    );
+    const textarea = await screen.findByRole("textbox", { name: "Message" });
+    await act(async () => {
+      fireEvent.input(textarea, { target: { textContent: "Then add a roof" } });
+    });
+    const arrow = await screen.findByRole("button", {
+      name: "Queue until compacting is done (Enter)",
+    });
+    fireEvent.mouseEnter(arrow);
+    expect(screen.getByRole("menuitem", { name: /^Queue/ })).toHaveTextContent("After compacting");
+    expect(screen.queryByRole("menuitem", { name: /^Steer/ })).toBeNull();
+
+    // Enter steers during a turn. Here it can only queue.
+    await act(async () => {
+      fireEvent.keyDown(textarea, { key: "Enter" });
+    });
+    expect(client.session.promptInbox).toHaveBeenCalledExactlyOnceWith(
+      expect.objectContaining({ sessionID: "s1", text: "Then add a roof", delivery: "queue" }),
+      { throwOnError: true },
+    );
+    expect(client.session.promptAsync).not.toHaveBeenCalled();
   });
 
   it("attaches an image to the submitted message", async () => {

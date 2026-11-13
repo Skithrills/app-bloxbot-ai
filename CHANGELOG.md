@@ -7,6 +7,39 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+## [0.16.3] - 2026-11-14
+
+### Added
+
+- Attach videos to a message with the paperclip, by dropping them on the composer, or by pasting. BloxBot reads the video on your computer and sends up to 16 still frames from across its length, with a note telling the model when each was taken. Sound isn't sent. Up to two videos per message. The model is also told where the file is, so one with a shell can take its own frames. Click an attached video to play it, and a sent one plays in the chat while its file is still in place. Videos play in BloxBot's own player, and open in the same viewer as a message's images, with one set of previous and next controls for both. Videos start muted, and the player remembers the volume you set and whether you turned the sound on.
+- Copy any message, and edit one you sent in its own bubble. The reply under it stays until you send the edit, which restarts the chat from there with the same attachments. Escape or Cancel leaves everything as it was.
+- Rewind to a message you sent: the replies from there on are taken back, the files they changed go back to how they were, and the message returns to the composer. Changes made in Studio stay, and /redo brings it all back.
+- Drag a chat onto a project folder, or onto Other chats, to move it. The chat drags as a card that names where it will go, and BloxBot asks before moving.
+- Right-click a video to pause it and copy or save the frame it shows, or to save a copy of the video. Attachments in the composer have the same right-click menu as pictures in the chat.
+- The model picker opens with the model the chat last used at the top, one click away. Once a different model is chosen, the picker is marked and says what the change costs: the new model reads the whole chat again, and one that holds less may compact it.
+- While a chat is being compacted, what you send is queued and goes once compacting is done.
+- With Composer predictions on, an empty composer suggests the whole next message from your last message and the latest reply. The suggestion takes the placeholder's place, and Tab writes it.
+- A finished turn ends with the files it edited, the lines added and removed in each, and the changed lines under any file you open.
+- Edits show their added and removed line counts, in green and red when pointed at. Edits made one after another to the same file share a line.
+- While a model works, its steps read "Working for 12s", counting up, followed by what it says it is doing for models that share their reasoning.
+
+### Changed
+
+- While a turn runs, the send button is an arrow that sends your draft into it. Point at it to choose Steer, Queue or Stop, with their shortcuts. With an empty composer it is the Stop button.
+- Message times say how long ago, such as "11 hours ago". Point at one for the day and the 24-hour time, such as "Friday 04:05". Each day in a chat opens with one line naming it.
+- Point at a message you sent to see that the model received it, when it was sent, and Copy, Edit and Rewind.
+- Finished work is summed up as "Worked for 32s" instead of a count of tools.
+- An edit opens to its changed lines with the unchanged lines around them left uncoloured, instead of listing every old line as removed and every new line as added.
+
+### Fixed
+
+- Moving a chat to another folder no longer announces "Chat finished". Only a turn the model answered in does.
+- Compacting a chat no longer leaves an empty message from you in it. The chat shows "Compacting context…" while it runs, then "Context compacted", or why it failed.
+- A hovered folder title no longer runs into the open chat under it.
+- Steps no longer read "Working" with the time counting up after a turn has finished. A thought whose end went unrecorded was keeping them going.
+- A turn no longer waits forever when a provider's rate limit for fast mode is smaller than what the chat sends in one request. BloxBot explains the limit and offers to continue with the same model at standard speed.
+- A long command no longer squeezes the "Ran" or "Running" label in front of it down to a letter.
+
 ## [0.16.2] - 2026-11-13
 
 ### Added

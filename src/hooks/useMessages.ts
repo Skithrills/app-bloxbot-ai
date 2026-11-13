@@ -1,12 +1,12 @@
 import { hashKey, type QueryClient, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useCallback, useMemo } from "react";
 import { useSessions } from "@/hooks/useSessions";
-import { isStudioTool } from "@/lib/aiTracing";
 import { isPendingInboxMessage } from "@/lib/composerDelivery";
 import type { OpencodeClient } from "@/lib/opencode/client";
 import { hasPlaytestContext } from "@/lib/playtestPlan";
 import { qk } from "@/lib/queryKeys";
 import type { MessagesCache } from "@/lib/sseDispatch";
+import { isStudioTool } from "@/lib/studioMcp";
 import { useActiveSession } from "@/providers/ActiveSessionProvider";
 import { useOpenCodeClient } from "@/providers/OpenCodeClientProvider";
 import type { MessageWithParts } from "@/types";

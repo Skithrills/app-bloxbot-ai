@@ -1,11 +1,5 @@
-import posthog from "posthog-js/dist/module.full.no-external.js";
 import { useCallback, useEffect, useRef, useState } from "react";
 
-import {
-  analyticsProperties,
-  errorAnalyticsProperties,
-  explorerAnalyticsProperties,
-} from "@/lib/analytics";
 import { desktop } from "@/lib/desktop";
 import {
   applyExplorerUpdates,
@@ -90,11 +84,10 @@ export function useExplorerTreeSync(): ExplorerTreeSync {
   const startRef = useRef<((options: { force: boolean }) => void) | null>(null);
   const scheduleRef = useRef<() => void>(() => {});
   const wantedRef = useRef<{ force: boolean } | null>(null);
-  const telemetryRef = useRef({ firstSyncReported: false, hadFailure: false });
   // Consecutive failed syncs, which set the retry backoff.
   const failuresRef = useRef(0);
   // What Studio is doing, since when, and how many reads have found it still doing that.
-  const waitRef = useRef<{ reason: ExplorerWait; since: number; reads: number } | null>(null);
+  const waitRef = useRef<{ reason: ExplorerWait; reads: number } | null>(null);
   const unchangedRef = useRef(0);
   const watchingRef = useRef(false);
   const slowestReadRef = useRef(0);
@@ -205,11 +198,6 @@ export function useExplorerTreeSync(): ExplorerTreeSync {
       syncingRef.current = true;
       const movedOn = () => studioScopeRef.current !== studioScope;
       setSyncing(true);
-      const syncStartedAt = performance.now();
-      const isFirstSync = !telemetryRef.current.firstSyncReported;
-      if (isFirstSync && !waitRef.current) {
-        posthog.capture("sync_started", analyticsProperties("explorer", { source: "initial" }));
-      }
 
       try {
         const result = await desktop.syncExplorerTree(studioId as string, {
@@ -221,19 +209,7 @@ export function useExplorerTreeSync(): ExplorerTreeSync {
         slowestReadRef.current = result.slowestReadMs;
         if (result.waiting) {
           if (waitRef.current?.reason !== result.waiting) {
-            waitRef.current = { reason: result.waiting, since: Date.now(), reads: 0 };
-            posthog.capture(
-              "sync_waiting",
-              analyticsProperties("explorer", {
-                outcome: "waiting",
-                phase: "sync",
-                ...explorerAnalyticsProperties({
-                  duration_ms: Math.round(performance.now() - syncStartedAt),
-                  reason: result.waiting,
-                  source: treeRef.current?.roots.length ? "recovery" : "initial",
-                }),
-              }),
-            );
+            waitRef.current = { reason: result.waiting, reads: 0 };
           }
           waitRef.current.reads += 1;
           failuresRef.current = 0;
@@ -248,16 +224,6 @@ export function useExplorerTreeSync(): ExplorerTreeSync {
           throw new Error("Studio has not returned an instance tree yet");
         }
         if (waitRef.current) {
-          posthog.capture(
-            "sync_resumed",
-            analyticsProperties(
-              "explorer",
-              explorerAnalyticsProperties({
-                duration_ms: Date.now() - waitRef.current.since,
-                reason: waitRef.current.reason,
-              }),
-            ),
-          );
           waitRef.current = null;
           setWaiting(null);
         }
@@ -267,44 +233,13 @@ export function useExplorerTreeSync(): ExplorerTreeSync {
         setSyncError(null);
         setTruncated(result.truncated);
         if (objectsStaleRef.current) publishObjects();
-        if (isFirstSync || telemetryRef.current.hadFailure) {
-          posthog.capture(
-            "sync_succeeded",
-            analyticsProperties(
-              "explorer",
-              explorerAnalyticsProperties({
-                duration_ms: Math.round(performance.now() - syncStartedAt),
-                source: telemetryRef.current.hadFailure ? "recovery" : "initial",
-                root_count: current.roots.length,
-                node_count: current.byId.size,
-              }),
-            ),
-          );
-          telemetryRef.current.firstSyncReported = true;
-          telemetryRef.current.hadFailure = false;
-        }
       } catch (error) {
         // A Studio that was left behind has nothing to say about the next one.
         if (movedOn()) return;
         console.error("[explorer] sync failed", error);
-        telemetryRef.current.hadFailure = true;
         failuresRef.current += 1;
         waitRef.current = null;
         setWaiting(null);
-        // Report the first failure of a streak, not every retry.
-        if (failuresRef.current === 1)
-          posthog.capture(
-            "sync_failed",
-            errorAnalyticsProperties(
-              "explorer",
-              "sync",
-              error,
-              explorerAnalyticsProperties({
-                duration_ms: Math.round(performance.now() - syncStartedAt),
-                reason: treeRef.current ? "recovery_failed" : "initial_failed",
-              }),
-            ),
-          );
         // A tree already on screen stays as it is through one failed read, which is usually Studio
         // being busy or its helper restarting. Only a streak says something's wrong.
         if (!treeRef.current?.roots.length || failuresRef.current >= 2)

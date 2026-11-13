@@ -17,7 +17,6 @@ const REFRESH_MS = 60_000;
 const UNSUPPORTED_REFRESH_MS = 5 * REFRESH_MS;
 const PREVIOUS_AFTER_MS = 2 * REFRESH_MS;
 
-type SubscriptionAccount = Exclude<SubscriptionProvider, "codex-cli">;
 type Snapshot = Extract<SubscriptionUsageResult, { status: "available" }> & {
   source: SubscriptionProvider;
 };
@@ -27,7 +26,7 @@ type Reading = {
   usage?: Snapshot;
 };
 
-function subscriptionAccount(providerId: string | undefined): SubscriptionAccount | undefined {
+function subscriptionAccount(providerId: string | undefined): SubscriptionProvider | undefined {
   if (providerId === OPENAI_OAUTH_PROVIDER) return "codex";
   if (providerId === CLAUDE_AGENT_PROVIDER) return "claude";
 }
@@ -36,8 +35,6 @@ export function subscriptionUsageSourceLabel(source: SubscriptionProvider) {
   switch (source) {
     case "codex":
       return "BloxBot ChatGPT connection";
-    case "codex-cli":
-      return "Installed Codex CLI account";
     case "claude":
       return "Claude Code account";
   }
@@ -57,37 +54,35 @@ export function formatSubscriptionPercentLeft(usedPercent: number) {
 }
 
 async function readUsage(
-  account: SubscriptionAccount,
+  account: SubscriptionProvider,
   checkCancelled: () => void,
   previous: Snapshot | undefined,
 ): Promise<Reading> {
-  let source: SubscriptionProvider = account;
   let result: SubscriptionUsageResult;
   try {
     result = await desktop.getSubscriptionUsage(account);
-    checkCancelled();
-    if (account === "codex" && result.status === "unsupported") {
-      source = "codex-cli";
-      result = await desktop.getSubscriptionUsage(source);
-    }
   } catch {
     result = { status: "unavailable" };
   }
   checkCancelled();
   let usage: Snapshot | undefined;
-  if (result.status === "available") usage = { ...result, source };
+  if (result.status === "available") usage = { ...result, source: account };
   if (result.status === "unavailable") usage = previous;
-  return { status: result.status, source, usage };
+  return { status: result.status, source: account, usage };
 }
 
 function pollingInterval(reading: Reading | undefined) {
+  if (reading?.status === "usage_not_shared") return false;
   return reading?.status === "available" || reading?.status === "unavailable"
     ? REFRESH_MS
     : UNSUPPORTED_REFRESH_MS;
 }
 
 function cooldown(reading: Reading | undefined) {
-  return reading?.status === "available" ? MIN_REFRESH_MS : pollingInterval(reading);
+  if (reading?.status === "usage_not_shared") return Infinity;
+  return reading?.status === "available"
+    ? MIN_REFRESH_MS
+    : pollingInterval(reading) || UNSUPPORTED_REFRESH_MS;
 }
 
 function nextAutomaticReadAt(
@@ -172,7 +167,14 @@ export function useSubscriptionUsage(providerId: string | undefined, completedTu
       turn.current.id = completedTurn;
       if (completedTurn) turn.current.refreshPending = true;
     }
-    if (!account || !providerId || !turn.current.refreshPending || fetchStatus !== "idle") return;
+    if (
+      !account ||
+      !providerId ||
+      !turn.current.refreshPending ||
+      fetchStatus !== "idle" ||
+      !Number.isFinite(automaticReadAt)
+    )
+      return;
     const key = qk.subscriptionUsage(providerId);
     const timer = window.setTimeout(
       () => {
@@ -188,7 +190,8 @@ export function useSubscriptionUsage(providerId: string | undefined, completedTu
 
   const usage = data?.usage;
   const isError = data?.status === "unavailable";
-  const [now, setNow] = useState(Date.now);
+  const [clock, setNow] = useState(Date.now);
+  const now = Math.max(clock, data?.usage?.checkedAt ?? 0);
   useEffect(() => {
     if (!usage) return;
     const timer = window.setInterval(() => setNow(Date.now()), MIN_REFRESH_MS);

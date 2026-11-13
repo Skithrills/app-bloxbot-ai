@@ -2,7 +2,7 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import type { PropsWithChildren } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { SubscriptionUsage } from "@/components/SubscriptionUsage";
+import { ChatGptUsageControl, SubscriptionUsage } from "@/components/SubscriptionUsage";
 import {
   subscriptionWindowsForModel,
   useSubscriptionUsageForModel,
@@ -92,30 +92,42 @@ describe("Subscription usage", () => {
     expect(state.readUsage).not.toHaveBeenCalledWith("codex-cli");
   });
 
-  it("automatically shows the separate CLI account in one row and retains its reading on failure", async () => {
+  it("explains a token-sharing sign-in and links to the provider's usage page", async () => {
     state.connected = [OPENAI_OAUTH_PROVIDER];
-    state.readUsage
-      .mockResolvedValueOnce({ status: "unsupported" })
-      .mockResolvedValueOnce(available())
-      .mockResolvedValueOnce({ status: "unsupported" })
-      .mockResolvedValueOnce({ status: "unavailable" });
+    state.readUsage.mockResolvedValue({ status: "usage_not_shared" });
+    renderUsage(<ChatGptUsageControl />);
+    fireEvent.click(
+      await screen.findByRole("button", {
+        name: /ChatGPT subscription usage · View usage in ChatGPT/,
+      }),
+    );
+    expect(await screen.findByText(/does not share remaining quota or reset times/)).toBeVisible();
+    expect(screen.getByRole("link", { name: "Open ChatGPT Usage" })).toHaveAttribute(
+      "href",
+      "https://chatgpt.com/settings/usage",
+    );
+    expect(screen.queryByRole("button", { name: /Refresh/ })).not.toBeInTheDocument();
+    expect(state.readUsage.mock.calls).toEqual([["codex"]]);
+  });
+
+  it("shows the weekly ring and shares one reading between settings and the title bar", async () => {
+    state.connected = [OPENAI_OAUTH_PROVIDER];
+    state.readUsage.mockResolvedValue(available());
     renderUsage(
       <>
         <SubscriptionUsage />
+        <ChatGptUsageControl />
         <ModelUsage />
       </>,
     );
-    expect(await screen.findByText("85% left")).toBeInTheDocument();
-    expect(screen.getByTestId("active-model-quota")).toHaveTextContent("codex-cli");
-    expect(state.readUsage.mock.calls).toEqual([["codex"], ["codex-cli"]]);
-    expect(screen.getByText(/installed Codex CLI account/)).toBeInTheDocument();
-    expect(screen.queryByText(/does not report subscription limits/)).not.toBeInTheDocument();
-    expect(screen.getAllByRole("button", { name: /Refresh.*usage/ })).toHaveLength(1);
-
-    fireEvent.click(screen.getByRole("button", { name: "Refresh ChatGPT Subscription usage" }));
-    expect(screen.getByText("85% left")).toBeInTheDocument();
-    expect(await screen.findByText(/Refresh failed/)).toBeInTheDocument();
-    expect(screen.getByText("85% left")).toBeInTheDocument();
+    const ring = await screen.findByRole("button", {
+      name: "ChatGPT subscription usage · Weekly · 85% left",
+    });
+    expect(ring).toHaveAttribute("title", "Weekly · 85% left");
+    expect(state.readUsage.mock.calls).toEqual([["codex"]]);
+    expect(screen.getByTestId("active-model-quota")).toHaveTextContent("codex");
+    fireEvent.click(ring);
+    expect(await screen.findByRole("dialog", { name: "ChatGPT subscription usage" })).toBeVisible();
   });
 
   it("clears the old account’s cached reading when the BloxBot connection disconnects", async () => {
@@ -208,7 +220,7 @@ describe("Subscription usage", () => {
     const scoped = { ...weekly, id: "gpt-6.1-sol/secondary" };
     const unrelated = { ...weekly, id: "review/secondary" };
     expect(
-      subscriptionWindowsForModel("codex-cli", [weekly, scoped, unrelated], "gpt-6.1-sol"),
+      subscriptionWindowsForModel("codex", [weekly, scoped, unrelated], "gpt-6.1-sol"),
     ).toEqual([scoped]);
     expect(
       subscriptionWindowsForModel("codex", [weekly, scoped, unrelated], "gpt-6-astra"),

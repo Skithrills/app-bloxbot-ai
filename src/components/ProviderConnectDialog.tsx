@@ -2,11 +2,7 @@ import { Check, ChevronLeft, Copy, ExternalLink, Loader2, X } from "lucide-react
 import { useCallback, useEffect, useRef, useState } from "react";
 import ProviderLogo from "@/components/ProviderLogo";
 import { useExternalLogin } from "@/hooks/mutations/useExternalLogin";
-import {
-  captureProviderConnectFailure,
-  useCompleteOAuth,
-  useStartOAuth,
-} from "@/hooks/mutations/useOAuth";
+import { useCompleteOAuth, useStartOAuth } from "@/hooks/mutations/useOAuth";
 import { useSetApiKey } from "@/hooks/mutations/useSetApiKey";
 import { useAuthMethods, useConnectedProviders } from "@/hooks/useProviders";
 import { desktop } from "@/lib/desktop";
@@ -203,7 +199,6 @@ function ProviderConnectDialog({ provider, onClose, onConnected }: ProviderConne
       });
     } catch (err) {
       if (abandoned()) return;
-      captureProviderConnectFailure(provider.id, "oauth_start", err, option.label);
       backToMethods({
         message: authErrorMessage(err) ?? `Couldn't start “${option.title}”.`,
         ...oauthRecovery(provider.id, option, options),
@@ -235,7 +230,6 @@ function ProviderConnectDialog({ provider, onClose, onConnected }: ProviderConne
       });
       if (abandoned()) return;
       if (!success) {
-        captureProviderConnectFailure(provider.id, "oauth_complete", "rejected", option.label);
         backToMethods({
           message: `${provider.name} didn't accept the sign-in.`,
           ...oauthRecovery(provider.id, option, options),
@@ -247,7 +241,6 @@ function ProviderConnectDialog({ provider, onClose, onConnected }: ProviderConne
       }
     } catch (err) {
       if (abandoned()) return;
-      captureProviderConnectFailure(provider.id, "oauth_complete", err, option.label);
       backToMethods({
         message: authErrorMessage(err) ?? "Sign-in timed out or was cancelled.",
         ...oauthRecovery(provider.id, option, options),
@@ -266,18 +259,11 @@ function ProviderConnectDialog({ provider, onClose, onConnected }: ProviderConne
         code: oauthCodeInput.trim(),
       });
       if (!success) {
-        captureProviderConnectFailure(
-          provider.id,
-          "oauth_complete",
-          "rejected",
-          state.option.label,
-        );
         setError({ message: "That code didn't work. Copy it again and paste the whole code." });
       } else if (alreadyConnected) {
         finish();
       }
     } catch (err) {
-      captureProviderConnectFailure(provider.id, "oauth_complete", err, state.option.label);
       setError({
         message: authErrorMessage(err) ?? "That code didn't work.",
         hint: "Codes expire quickly. Start the sign-in again to get a new one.",
@@ -296,7 +282,6 @@ function ProviderConnectDialog({ provider, onClose, onConnected }: ProviderConne
       await setApiKeyMutation.mutateAsync({ providerID: provider.id, key: apiKeyInput.trim() });
       if (alreadyConnected) finish();
     } catch (err) {
-      captureProviderConnectFailure(provider.id, "api_key", err);
       setError({ message: authErrorMessage(err) ?? "Couldn't save the API key. Try again." });
     } finally {
       setSaving(false);

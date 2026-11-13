@@ -8,7 +8,6 @@ import {
   Plus,
   Settings2,
 } from "lucide-react";
-import posthog from "posthog-js/dist/module.full.no-external.js";
 import { type MouseEvent, memo, useEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { ProjectFolderDialog } from "@/components/ProjectFolderDialog";
@@ -25,7 +24,6 @@ import {
 } from "@/hooks/useProjectFolders";
 import { useSessionStatuses } from "@/hooks/useSessionStatuses";
 import { useSessions } from "@/hooks/useSessions";
-import { analyticsProperties, countBucket } from "@/lib/analytics";
 import { desktop } from "@/lib/desktop";
 import { notify } from "@/lib/notifications";
 import type { Session } from "@/lib/opencode/types";
@@ -214,10 +212,6 @@ const ChatSidebar = memo(function ChatSidebar({
     cancelDeleteRef.current?.focus();
     const handleKeyDown = (event: KeyboardEvent) => {
       if (event.key !== "Escape") return;
-      posthog.capture(
-        "permanent_delete_cancelled",
-        analyticsProperties("sessions", { confirmed: false }),
-      );
       setDeleteTarget(null);
     };
     window.addEventListener("keydown", handleKeyDown);
@@ -254,7 +248,6 @@ const ChatSidebar = memo(function ChatSidebar({
   }
 
   function handleSnoozedSelect(sessionID: string) {
-    posthog.capture("snoozed_session_opened", analyticsProperties("sessions"));
     handleSelect(sessionID);
   }
 
@@ -282,36 +275,20 @@ const ChatSidebar = memo(function ChatSidebar({
   function handleSnoozedToggle() {
     setSnoozedExpanded((expanded) => {
       const nextExpanded = !expanded;
-      posthog.capture(
-        "snoozed_section_toggled",
-        analyticsProperties("sessions", {
-          expanded: nextExpanded,
-          count_bucket: countBucket(snoozedSessions.length),
-        }),
-      );
       return nextExpanded;
     });
   }
 
   function requestDelete(session: Session) {
-    posthog.capture("permanent_delete_requested", analyticsProperties("sessions"));
     setDeleteTarget(session);
   }
 
   function cancelDelete() {
-    posthog.capture(
-      "permanent_delete_cancelled",
-      analyticsProperties("sessions", { confirmed: false }),
-    );
     setDeleteTarget(null);
   }
 
   function confirmDelete() {
     if (!deleteTarget) return;
-    posthog.capture(
-      "permanent_delete_confirmed",
-      analyticsProperties("sessions", { confirmed: true }),
-    );
     deleteSession.mutate(deleteTarget.id);
     setDeleteTarget(null);
   }

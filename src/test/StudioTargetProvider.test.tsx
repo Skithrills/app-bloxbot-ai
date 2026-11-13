@@ -7,7 +7,6 @@ const mocks = vi.hoisted(() => ({
   loadConfig: vi.fn(),
   patchConfig: vi.fn(),
   mcpStatus: vi.fn(),
-  capture: vi.fn(),
   client: {},
   session: { id: "chat" },
 }));
@@ -26,9 +25,6 @@ vi.mock("@/providers/OpenCodeClientProvider", () => ({
 }));
 vi.mock("@/providers/ActiveSessionProvider", () => ({
   useActiveSession: () => ({ activeSessionId: mocks.session.id }),
-}));
-vi.mock("posthog-js/dist/module.full.no-external.js", () => ({
-  default: { capture: mocks.capture, register: vi.fn() },
 }));
 
 import {
@@ -319,9 +315,6 @@ describe("StudioTargetProvider", () => {
       await act(() => vi.advanceTimersByTimeAsync(2_000));
       expect(context?.discoveryFailed).toBe(false);
       expect(context?.error).toBeNull();
-      expect(
-        mocks.capture.mock.calls.filter(([name]) => name === "studio_target_discovery_failed"),
-      ).toHaveLength(0);
 
       // A streak is worth saying.
       mocks.discover.mockRejectedValue(new Error("timed out"));
@@ -949,7 +942,7 @@ describe("StudioTargetProvider", () => {
     }
   });
 
-  it("keeps looking after a failed check, reporting the failure once", async () => {
+  it("keeps looking after a failed check", async () => {
     vi.useFakeTimers();
     try {
       mocks.loadConfig.mockResolvedValue({ studioTargetsBySession: {} });
@@ -963,9 +956,6 @@ describe("StudioTargetProvider", () => {
       expect(screen.getByText("status: error")).toBeInTheDocument();
 
       await act(() => vi.advanceTimersByTimeAsync(6_000));
-      expect(
-        mocks.capture.mock.calls.filter(([name]) => name === "studio_target_discovery_failed"),
-      ).toHaveLength(1);
 
       const lobby = { key: "lobby", label: "Lobby", detail: null, placeId: "2" };
       mocks.select.mockResolvedValue({ selected: lobby, verified: true });

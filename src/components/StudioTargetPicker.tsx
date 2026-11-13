@@ -1,5 +1,4 @@
 import { Monitor } from "lucide-react";
-import posthog from "posthog-js/dist/module.full.no-external.js";
 import { useEffect, useRef, useState } from "react";
 
 import { STUDIO_SETUP_STEPS } from "@/components/StudioSetup";
@@ -12,7 +11,6 @@ import {
   moveMenuFocus,
 } from "@/components/ui/menu";
 import { Popover, PopoverTrigger } from "@/components/ui/popover";
-import { analyticsProperties } from "@/lib/analytics";
 import {
   placeName,
   STUDIO_NOT_INSTALLED,
@@ -81,20 +79,6 @@ export default function StudioTargetPicker({
     setStuck(false);
   }, [hasTargets]);
 
-  // Once each time the steps are on screen, so following them always has a showing to count against.
-  const pickerStatus = studioTarget?.status;
-  const offersSteps = open && (pickerStatus === "empty" || pickerStatus === "error");
-  const stepsShown = useRef(false);
-  useEffect(() => {
-    if (!open) stepsShown.current = false;
-    if (!offersSteps || stepsShown.current) return;
-    stepsShown.current = true;
-    posthog.capture(
-      "studio_target_guidance_shown",
-      analyticsProperties("studio_target", { trigger: "empty", status: pickerStatus }),
-    );
-  }, [open, offersSteps, pickerStatus]);
-
   if (!studioTarget) return null;
   const { targets, selected, status, error, missing, withoutStudio, discover, select } =
     studioTarget;
@@ -136,10 +120,6 @@ export default function StudioTargetPicker({
     if (emptyRefreshes.current.length >= STUCK_REFRESHES && !stuckRef.current && !missing) {
       stuckRef.current = true;
       setStuck(true);
-      posthog.capture(
-        "studio_target_guidance_shown",
-        analyticsProperties("studio_target", { trigger: "repeated_refresh", status }),
-      );
     }
   };
 
@@ -147,13 +127,6 @@ export default function StudioTargetPicker({
     <button
       type="button"
       onClick={() => {
-        posthog.capture(
-          "studio_target_guidance_followed",
-          analyticsProperties("studio_target", {
-            trigger: stuck ? "repeated_refresh" : "empty",
-            status,
-          }),
-        );
         setOpen(false);
         onOpenSetup();
       }}
@@ -194,10 +167,6 @@ export default function StudioTargetPicker({
         if (next) {
           // Nothing checks in the background for a chat that isn't using Studio.
           if (withoutStudio) void discover();
-          posthog.capture(
-            "studio_target_picker_opened",
-            analyticsProperties("studio_target", { status }),
-          );
         } else {
           setChecked(false);
           // Closing it counts as moving on, so a later Refresh isn't called stuck straight away.
@@ -340,10 +309,6 @@ export default function StudioTargetPicker({
           <button
             type="button"
             onClick={() => {
-              posthog.capture(
-                "studio_target_work_without",
-                analyticsProperties("studio_target", { status, had_place: selected !== null }),
-              );
               studioTarget.workWithoutStudio();
               onWorkedWithoutStudio?.();
               setOpen(false);

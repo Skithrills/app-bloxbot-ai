@@ -13,7 +13,6 @@ import {
   Shield,
   UsersRound,
 } from "lucide-react";
-import posthog from "posthog-js/dist/module.full.no-external.js";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { FunSettings } from "@/components/AudioVisualizer";
 import PersonalisationSettings from "@/components/PersonalisationSettings";
@@ -40,8 +39,6 @@ import {
 } from "@/hooks/useProviders";
 import { useAnyChatBusy } from "@/hooks/useSessionStatuses";
 import { useUpdater } from "@/hooks/useUpdater";
-import { analyticsDeviceId, analyticsProperties } from "@/lib/analytics";
-import { appLink } from "@/lib/appLink";
 import { playChime } from "@/lib/chime";
 import {
   COMPOSER_SHORTCUTS,
@@ -552,12 +549,8 @@ function ProvidersTab() {
     !needle &&
     shouldRecommendOpenCodeGo(allProviders.filter((p) => connectedProviders.includes(p.id)));
 
-  function setUpGo(source: "recommendation" | "list") {
+  function setUpGo() {
     if (!goProvider) return;
-    posthog.capture(
-      "provider_recommendation_clicked",
-      analyticsProperties("providers", { provider: OPENCODE_GO.providerId, source }),
-    );
     setConnecting(goProvider);
   }
 
@@ -604,7 +597,7 @@ function ProvidersTab() {
               : undefined
           }
           onClick={() =>
-            provider.id === OPENCODE_GO.providerId ? setUpGo("list") : setConnecting(provider)
+            provider.id === OPENCODE_GO.providerId ? setUpGo() : setConnecting(provider)
           }
           className="shrink-0 whitespace-nowrap rounded-md bg-secondary px-3 py-1 text-xs font-medium transition-colors hover:bg-accent focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
         >
@@ -858,7 +851,7 @@ function ProvidersTab() {
               </p>
               <div className="mt-3 flex flex-wrap items-center gap-x-3 gap-y-2">
                 <button
-                  onClick={() => setUpGo("recommendation")}
+                  onClick={() => setUpGo()}
                   className="whitespace-nowrap rounded-md bg-foreground px-3 py-1.5 text-xs font-medium text-background transition-opacity hover:opacity-90 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
                 >
                   Set up OpenCode Go
@@ -1356,10 +1349,6 @@ function NotificationsTab() {
               label={label}
               checked={notifications.kinds[kind]}
               onChange={(enabled) => {
-                posthog.capture(
-                  "system_notifications_toggled",
-                  analyticsProperties("notifications", { kind, enabled }),
-                );
                 setNotificationKind(kind, enabled);
               }}
             />
@@ -1372,10 +1361,6 @@ function NotificationsTab() {
           label="Play a sound"
           checked={notifications.sound}
           onChange={(enabled) => {
-            posthog.capture(
-              "notification_sound_toggled",
-              analyticsProperties("notifications", { enabled }),
-            );
             setNotificationSound(enabled);
             if (enabled) playChime();
           }}
@@ -1407,49 +1392,13 @@ function NotificationsTab() {
 }
 
 function PrivacyTab() {
-  const { detailedAnalyticsEnabled, setDetailedAnalyticsEnabled } = usePreferences();
-
   return (
     <div className="mx-auto w-full max-w-md px-4 py-6 @xl:px-6 @xl:py-8">
       <h4 className="text-lg font-medium text-foreground">Privacy</h4>
       <p className="mt-1 text-xs text-muted-foreground">
-        We use app usage and error reports, not linked to your name, to fix bugs and improve
-        BloxBot.
+        This fork does not send app analytics or error reports. Your selected AI provider receives
+        the context needed to process your requests.
       </p>
-
-      <div className="mt-6 rounded-lg border bg-card p-3.5">
-        <div className="flex items-start justify-between gap-4">
-          <div>
-            <div className="text-sm font-medium">Share AI usage data</div>
-            <p className="mt-1 text-xs text-muted-foreground">On by default. Also sends:</p>
-            <ul className="mt-2 list-disc space-y-1 pl-4 text-xs leading-relaxed text-muted-foreground">
-              <li>Your prompts, and the AI's replies and reasoning</li>
-              <li>What the AI runs and the results</li>
-              <li>Code changes and your AGENTS.md instructions</li>
-              <li>Which AI model you use, how much and how long it takes</li>
-              <li>Roblox place names and IDs</li>
-            </ul>
-          </div>
-          <button
-            type="button"
-            role="switch"
-            aria-checked={detailedAnalyticsEnabled}
-            aria-label="Share AI usage data"
-            onClick={() => setDetailedAnalyticsEnabled(!detailedAnalyticsEnabled)}
-            className={`relative mt-0.5 inline-flex h-5 w-9 shrink-0 items-center rounded-full transition-colors ${
-              detailedAnalyticsEnabled ? "bg-foreground" : "bg-border"
-            }`}
-          >
-            <span
-              className={`inline-block h-3.5 w-3.5 rounded-full bg-background transition-transform ${
-                detailedAnalyticsEnabled ? "translate-x-4" : "translate-x-0.5"
-              }`}
-            />
-          </button>
-        </div>
-      </div>
-
-      <PrivacyDetails />
     </div>
   );
 }
@@ -1457,72 +1406,15 @@ function PrivacyTab() {
 const PRIVACY_POLICY_URL = "https://bloxbot.ai/privacy";
 const TERMS_URL = "https://bloxbot.ai/terms";
 
-function PrivacyDetails() {
-  const deviceId = analyticsDeviceId();
-
-  const copyDeviceId = async () => {
-    if (!deviceId) return;
-    try {
-      await navigator.clipboard.writeText(deviceId);
-      notify.success("Device ID copied");
-    } catch {
-      notify.error("Couldn't copy the device ID");
-    }
-  };
-
-  return (
-    <div className="mt-4 space-y-3 text-xs leading-relaxed text-muted-foreground">
-      {deviceId && (
-        <div className="flex items-center justify-between gap-3">
-          <div className="min-w-0">
-            <div className="text-foreground">Device ID</div>
-            <div className="select-text truncate font-mono">{deviceId}</div>
-          </div>
-          <button
-            type="button"
-            onClick={copyDeviceId}
-            className="shrink-0 rounded-md border bg-card px-2.5 py-1 text-foreground transition-colors hover:bg-accent"
-          >
-            Copy
-          </button>
-        </div>
-      )}
-      <p>
-        To access or delete your data, email{" "}
-        <span className="select-text text-foreground">support@bloxbot.ai</span>
-        {deviceId ? " with this ID." : "."}
-      </p>
-      <div className="flex gap-3">
-        <a
-          href={appLink(PRIVACY_POLICY_URL, "privacy")}
-          target="_blank"
-          rel="noreferrer"
-          className="underline underline-offset-2"
-        >
-          Privacy Policy
-        </a>
-        <a
-          href={appLink(TERMS_URL, "privacy")}
-          target="_blank"
-          rel="noreferrer"
-          className="underline underline-offset-2"
-        >
-          Terms of Service
-        </a>
-      </div>
-    </div>
-  );
-}
-
 // ═══════════════════════════════════════════════════════════════════════
 // About Tab
 // ═══════════════════════════════════════════════════════════════════════
 
 const ABOUT_LINKS = [
-  { name: "Paralov", url: appLink("https://paralov.com", "about"), icon: Building2 },
-  { name: "Studs.gg", url: appLink("https://studs.gg", "about"), icon: Globe },
-  { name: "Privacy Policy", url: appLink(PRIVACY_POLICY_URL, "about"), icon: Shield },
-  { name: "Terms of Service", url: appLink(TERMS_URL, "about"), icon: FileText },
+  { name: "Paralov", url: "https://paralov.com/", icon: Building2 },
+  { name: "Studs.gg", url: "https://studs.gg/", icon: Globe },
+  { name: "Privacy Policy", url: PRIVACY_POLICY_URL, icon: Shield },
+  { name: "Terms of Service", url: TERMS_URL, icon: FileText },
 ];
 
 function AboutTab({ appVersion }: { appVersion: string | null }) {
@@ -1658,7 +1550,7 @@ function AboutTab({ appVersion }: { appVersion: string | null }) {
         <div className="mb-1.5 text-xs font-medium text-muted-foreground">Links</div>
         <div className="space-y-1.5">
           <a
-            href={appLink("https://bloxbot.ai", "about")}
+            href={"https://bloxbot.ai/"}
             target="_blank"
             rel="noreferrer"
             className="flex h-9 w-full items-center gap-2 rounded-lg border bg-card px-3.5 text-xs transition-colors hover:bg-accent"

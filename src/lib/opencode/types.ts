@@ -1,5 +1,5 @@
 /**
- * The chat, provider and event model BloxBot's UI and analytics are written against. OpenCode 2's
+ * The chat, provider and event model BloxBot's UI is written against. OpenCode 2's
  * API has different shapes, and `client.ts` and `events.ts` translate at that boundary, so this file
  * is the one contract the rest of the app depends on.
  */

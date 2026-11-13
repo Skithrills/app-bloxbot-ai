@@ -1,42 +1,34 @@
 import { describe, expect, it, vi } from "vitest";
-import { claudeProtocol, codexProtocol } from "../../electron/services/SubscriptionUsage";
-import { claudeWindows, codexWindows } from "../../electron/services/subscriptionWindows";
+import { claudeProtocol, fetchChatGptUsage } from "../../electron/services/SubscriptionUsage";
+import { chatGptWindows, claudeWindows } from "../../electron/services/subscriptionWindows";
 
 describe("subscription windows", () => {
-  it("takes Codex limits from the multi-bucket view, preserving duration, reset and zero usage", () => {
+  it("uses the reported duration, including a weekly-only primary window", () => {
     expect(
-      codexWindows({
-        rateLimits: { primary: { usedPercent: 99 } },
-        rateLimitsByLimitId: {
-          codex: {
-            primary: { usedPercent: 0, windowDurationMins: 300, resetsAt: 1794416400 },
-            secondary: { usedPercent: 47, windowDurationMins: 10080, resetsAt: null },
-          },
-          code_review: {
-            limitName: "Code review",
-            primary: { usedPercent: 12.5, windowDurationMins: 15 },
-            secondary: { usedPercent: "20" },
-          },
+      chatGptWindows({
+        rate_limit: {
+          primary_window: { used_percent: 84, limit_window_seconds: 604800, reset_at: 1794416400 },
+          secondary_window: null,
         },
-        rateLimitResetCredits: { availableCount: 10 },
+        additional_rate_limits: [
+          {
+            limit_name: "Code review",
+            metered_feature: "code_review",
+            rate_limit: {
+              primary_window: { used_percent: 0, limit_window_seconds: 900, reset_at: 0 },
+              secondary_window: { used_percent: "20" },
+            },
+          },
+        ],
       }),
     ).toEqual([
-      { id: "codex/primary", label: "5-hour window", usedPercent: 0, resetsAt: 1794416400000 },
-      { id: "codex/secondary", label: "Weekly", usedPercent: 47, resetsAt: null },
+      { id: "codex/primary", label: "Weekly", usedPercent: 84, resetsAt: 1794416400000 },
       {
         id: "code_review/primary",
         label: "Code review · 15-minute window",
-        usedPercent: 12.5,
+        usedPercent: 0,
         resetsAt: null,
       },
-    ]);
-    expect(
-      codexWindows({
-        rateLimitsByLimitId: {},
-        rateLimits: { primary: null, secondary: { usedPercent: 2, resetsAt: 0 } },
-      }),
-    ).toEqual([
-      { id: "codex/secondary", label: "Secondary window", usedPercent: 2, resetsAt: null },
     ]);
   });
 
@@ -63,58 +55,63 @@ describe("subscription windows", () => {
   });
 });
 
-describe("read-only CLI probes", () => {
-  it("gates Codex rate limits on external OAuth auth and does not provide a refresh token", () => {
-    const protocol = codexProtocol("0.15.1", {
-      accessToken: "fixture-access",
-      chatgptAccountId: "fixture-workspace",
+describe("ChatGPT usage request", () => {
+  const credential = () => ({
+    methodID: "chatgpt-browser",
+    access: "fixture-access",
+    expires: Date.now() + 60_000,
+    metadata: { accountID: "fixture-workspace" },
+  });
+
+  it("does not probe an account endpoint with the token-sharing sign-in", async () => {
+    const fetchUsage = vi.fn<typeof fetch>();
+    await expect(
+      fetchChatGptUsage({ ...credential(), methodID: "chatgpt-token-sharing" }, fetchUsage),
+    ).resolves.toEqual({ status: "usage_not_shared" });
+    expect(fetchUsage).not.toHaveBeenCalled();
+  });
+
+  it("sends the active access token only to ChatGPT and returns just the windows", async () => {
+    const fetchUsage = vi.fn<typeof fetch>().mockResolvedValue(
+      Response.json({
+        rate_limit: { primary_window: { used_percent: 84, limit_window_seconds: 604800 } },
+        account_id: "fixture-private",
+      }),
+    );
+    await expect(fetchChatGptUsage(credential(), fetchUsage)).resolves.toEqual({
+      status: "available",
+      checkedAt: expect.any(Number),
+      windows: [{ id: "codex/primary", label: "Weekly", usedPercent: 84, resetsAt: null }],
     });
-    const send = vi.fn();
-    protocol.start(send);
-    protocol.read({ id: 1, result: {} }, send);
-    protocol.read({ id: 2, result: { type: "chatgptAuthTokens" } }, send);
-    expect(send.mock.calls.map(([message]) => message.method)).toEqual([
-      "initialize",
-      "initialized",
-      "account/login/start",
-      "account/rateLimits/read",
-    ]);
-    expect(send).toHaveBeenNthCalledWith(3, {
-      id: 2,
-      method: "account/login/start",
-      params: {
-        type: "chatgptAuthTokens",
-        accessToken: "fixture-access",
-        chatgptAccountId: "fixture-workspace",
+    expect(fetchUsage).toHaveBeenCalledOnce();
+    expect(fetchUsage).toHaveBeenCalledWith("https://chatgpt.com/backend-api/wham/usage", {
+      method: "GET",
+      headers: {
+        Accept: "application/json",
+        Authorization: "Bearer fixture-access",
+        "ChatGPT-Account-Id": "fixture-workspace",
       },
+      cache: "no-store",
+      credentials: "omit",
+      redirect: "error",
+      signal: expect.any(AbortSignal),
     });
-    expect(protocol.read({ method: "account/chatgptAuthTokens/refresh", id: 5 }, send)).toEqual({
-      status: "unavailable",
-    });
-    expect(send).toHaveBeenCalledTimes(4);
   });
 
-  it("reads the installed Codex CLI account without supplying credentials or forcing refresh", () => {
-    const protocol = codexProtocol("0.15.1");
-    const send = vi.fn();
-    protocol.start(send);
-    protocol.read({ id: 1, result: {} }, send);
-    expect(send).toHaveBeenLastCalledWith({
-      method: "account/read",
-      id: 2,
-      params: { refreshToken: false },
-    });
-    expect(protocol.read({ id: 2, result: { account: null } }, send)).toEqual({
-      status: "disconnected",
-    });
-    expect(protocol.read({ id: 2, result: { account: { type: "apiKey" } } }, send)).toEqual({
-      status: "unsupported",
-    });
-    expect(send).toHaveBeenCalledTimes(3);
-    protocol.read({ id: 2, result: { account: { type: "chatgpt" } } }, send);
-    expect(send).toHaveBeenLastCalledWith({ method: "account/rateLimits/read", id: 3 });
+  it("distinguishes a revoked login, a forbidden quota read, and a temporary error", async () => {
+    const fetchUsage = vi.fn<typeof fetch>();
+    for (const [code, status] of [
+      [401, "session_expired"],
+      [403, "usage_not_shared"],
+      [429, "unavailable"],
+    ] as const) {
+      fetchUsage.mockResolvedValueOnce(new Response(null, { status: code }));
+      await expect(fetchChatGptUsage(credential(), fetchUsage)).resolves.toEqual({ status });
+    }
   });
+});
 
+describe("read-only CLI probe", () => {
   it("sends Claude only control requests and handles a non-subscription response", () => {
     const send = vi.fn();
     claudeProtocol.start(send);

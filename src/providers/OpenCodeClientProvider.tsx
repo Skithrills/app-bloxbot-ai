@@ -1,8 +1,6 @@
 import { type QueryClient, useQueryClient } from "@tanstack/react-query";
-import posthog from "posthog-js/dist/module.full.no-external.js";
 import { type ReactNode, useEffect, useMemo, useRef, useState } from "react";
 import LoadingScreen, { type StartupProgress } from "@/components/LoadingScreen";
-import { aiTracer, captureDetailedAnalytics } from "@/lib/analytics";
 import { desktop } from "@/lib/desktop";
 import { notify } from "@/lib/notifications";
 import { createOpencodeClient, type OpencodeClient } from "@/lib/opencode/client";
@@ -431,17 +429,6 @@ export function OpenCodeClientProvider({
     };
   }, [ready, queryClient]);
 
-  // AI traces read session history from the local server.
-  useEffect(() => {
-    if (!client) return;
-    aiTracer.configure({
-      loadHistory: async (sessionID) =>
-        (await client.session.messages({ sessionID }, { throwOnError: true })).data,
-      loadInstructions: () => desktop.getInstructionFiles(),
-    });
-    return () => aiTracer.configure({});
-  }, [client]);
-
   // ── SSE subscription ────────────────────────────────────────────────
   useEffect(() => {
     if (!client || !ready) return;
@@ -505,18 +492,11 @@ export function OpenCodeClientProvider({
 
         for await (const event of sseResult.stream) {
           if (abortController.signal.aborted) break;
-          sseDispatch(queryClient, event, activeSessionIdRef, (usage) => {
-            captureDetailedAnalytics(posthog, "model_usage", usage);
-          });
+          sseDispatch(queryClient, event, activeSessionIdRef);
           try {
             sessionNotifier.handleEvent(queryClient, event, activeSessionIdRef);
           } catch (error) {
             console.warn("Session notification failed:", error);
-          }
-          try {
-            aiTracer.handleEvent(event);
-          } catch (error) {
-            console.warn("AI trace capture failed:", error);
           }
         }
 
@@ -545,7 +525,7 @@ export function OpenCodeClientProvider({
     };
   }, [client, ready, queryClient, activeSessionIdRef]);
 
-  // Shown on screen only, so antivirus exclusions can target it. Never sent to analytics.
+  // Shown on screen only, so antivirus exclusions can target it.
   useEffect(() => {
     if (!initError) return;
     let cancelled = false;

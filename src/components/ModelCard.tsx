@@ -1,10 +1,8 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import posthog from "posthog-js/dist/module.full.no-external.js";
 import { lazy, Suspense, useCallback, useEffect, useRef, useState } from "react";
 import { UploadChecklist } from "@/components/UploadChecklist";
 import { useSendMessage } from "@/hooks/mutations/useSendMessage";
 import { SLOWED_DOWN, useUploadAccess } from "@/hooks/useUploadAccess";
-import { analyticsProperties } from "@/lib/analytics";
 import { desktop } from "@/lib/desktop";
 import { qk } from "@/lib/queryKeys";
 import { useStudioTargetOptional } from "@/providers/StudioTargetProvider";
@@ -126,17 +124,9 @@ export function ModelCard({ url }: { url: string }) {
       uploadedTo.current = studio?.promptReference ?? null;
       setResult(null);
       setStep("uploading");
-      posthog.capture("model_upload_started", analyticsProperties("model_card"));
     },
     onSuccess: (next) => {
       setResult(next.status === "needs_setup" ? null : next);
-      posthog.capture(
-        "model_upload_finished",
-        analyticsProperties("model_card", {
-          outcome: next.status,
-          reason: next.status === "failed" ? next.reason : undefined,
-        }),
-      );
       void queryClient.invalidateQueries({ queryKey: qk.modelFile(url) });
       void refreshAccess();
     },
@@ -236,7 +226,6 @@ export function ModelCard({ url }: { url: string }) {
                 className={primary}
                 onClick={() => {
                   setAskedToFix(true);
-                  posthog.capture("model_fix_requested", analyticsProperties("model_card"));
                   sendMessage.mutate({
                     text: `I just added ${file.name} to this place at ${result.path}, as asset ${result.assetId}, from ${file.path}. Follow steps 5 to 7 of the rbx-import-asset skill: compare it with the source file, then fix its scale, rotation, textures, colours, anchoring and placement. It's already uploaded, so don't upload the model again.`,
                     studioTargetReference: uploadedTo.current,

@@ -5,13 +5,7 @@ import { describe, expect, it, vi } from "vitest";
 
 import { useCheckProvider } from "@/hooks/mutations/useCheckProvider";
 import { useDisconnectProvider, useSetApiKey } from "@/hooks/mutations/useSetApiKey";
-import { setDetailedAnalyticsEnabled } from "@/lib/analytics";
 import { qk } from "@/lib/queryKeys";
-
-const { capture } = vi.hoisted(() => ({ capture: vi.fn() }));
-vi.mock("posthog-js/dist/module.full.no-external.js", () => ({
-  default: { capture, register: vi.fn() },
-}));
 
 const client = {
   auth: { set: vi.fn(), remove: vi.fn() },
@@ -166,15 +160,12 @@ describe("useCheckProvider", () => {
     client.session.delete.mockResolvedValue({ data: true });
     client.session.prompt.mockReset();
     client.permission.list.mockResolvedValue({ data: [] });
-    capture.mockClear();
     preferences.selectedModel = null;
-    setDetailedAnalyticsEnabled(false);
     return qc;
   }
 
   it("checks the model the user picked, once", async () => {
     const qc = openaiProviders();
-    setDetailedAnalyticsEnabled(true);
     client.session.prompt.mockResolvedValue({ data: { info: {}, parts: [] } });
 
     const { result } = renderHook(() => useCheckProvider(), { wrapper: wrapper(qc) });
@@ -187,19 +178,9 @@ describe("useCheckProvider", () => {
       providerID: "openai",
       modelID: "gpt-5.6-terra",
     });
-    expect(capture).toHaveBeenCalledOnce();
-    const [event, properties] = capture.mock.calls[0];
-    expect(event).toBe("provider_checked");
-    expect(properties).toMatchObject({
-      outcome: "success",
-      model_choice: "other",
-      provider: "openai",
-      model: "gpt-5.6-terra",
-    });
-    expect(properties).not.toHaveProperty("error_message");
   });
 
-  it("reports a failure once, with the model and a scrubbed message", async () => {
+  it("reports a failure without trying another model", async () => {
     const qc = openaiProviders();
     client.session.prompt.mockResolvedValue({
       data: {
@@ -230,18 +211,6 @@ describe("useCheckProvider", () => {
     // One attempt only, even though another model could chat.
     expect(client.session.prompt).toHaveBeenCalledOnce();
     expect(client.session.delete).toHaveBeenCalledOnce();
-    const properties = capture.mock.calls[0][1];
-    expect(properties).toMatchObject({
-      outcome: "failure",
-      model_choice: "default",
-      key_rejected: false,
-      error_name: "APIError",
-    });
-    // The model an error names stays in the message, which helps tell where it
-    // came from, even with detailed analytics off; the model field stays gated.
-    expect(properties.error_message).toContain("gpt-5.6-terra-pro is not available on your plan");
-    expect(properties.error_message).not.toContain("sk-proj-abcdefghijklmnop1234");
-    expect(properties).not.toHaveProperty("model");
   });
 
   it("doesn't send a check to a model that can't chat", async () => {
@@ -253,6 +222,5 @@ describe("useCheckProvider", () => {
       result.current.mutateAsync({ providerID: "openai", modelID: "gpt-image" }),
     ).resolves.toMatchObject({ ok: false, keyRejected: false });
     expect(client.session.create).not.toHaveBeenCalled();
-    expect(capture).not.toHaveBeenCalled();
   });
 });

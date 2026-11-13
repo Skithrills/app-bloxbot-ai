@@ -5,7 +5,6 @@ import type {
   ModelUploadStep,
   AppConfig,
   DesktopApi,
-  MainErrorReport,
   OpenCodeStartupProgress,
 } from "../src/types/desktop";
 import type { ExplorerTreeUpdate } from "../src/lib/explorer";
@@ -24,7 +23,6 @@ const api: DesktopApi = {
     return () => ipcRenderer.removeListener(channels.openCodeStartupProgress, handleProgress);
   },
   getVersion: () => ipcRenderer.invoke(channels.getVersion),
-  getInstructionFiles: () => ipcRenderer.invoke(channels.getInstructionFiles),
   openUrl: (url) => ipcRenderer.invoke(channels.openUrl, url),
   loadConfig: () => ipcRenderer.invoke(channels.loadConfig),
   patchConfig: (patch: Partial<AppConfig>) => ipcRenderer.invoke(channels.patchConfig, patch),
@@ -80,14 +78,6 @@ const api: DesktopApi = {
     ipcRenderer.invoke(channels.editExplorerObject, studioId, edit),
   discoverStudioTargets: () => ipcRenderer.invoke(channels.discoverStudioTargets),
   selectStudioTarget: (targetKey) => ipcRenderer.invoke(channels.selectStudioTarget, targetKey),
-  onMainError: (listener) => {
-    const handleError = (_event: Electron.IpcRendererEvent, report: MainErrorReport) =>
-      listener(report);
-    ipcRenderer.on(channels.mainError, handleError);
-    // Errors from before the window was listening are buffered in main until this arrives.
-    ipcRenderer.send(channels.mainErrorReady);
-    return () => ipcRenderer.removeListener(channels.mainError, handleError);
-  },
 };
 
 contextBridge.exposeInMainWorld("bloxbot", api);

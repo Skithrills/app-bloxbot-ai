@@ -138,8 +138,6 @@ function seedState(qc: QueryClient, session: Session) {
     lastModel: "anthropic/claude-3.5-sonnet",
     hiddenModels: [],
     theme: "system",
-    detailedAnalytics: "disabled",
-    analyticsNoticeVersion: 2,
   });
   qc.setQueryData<MessagesCache>(qk.messages(session.id), { messageIds: [], messagesById: {} });
   qc.setQueryData(qk.todos(session.id), []);
@@ -396,7 +394,6 @@ describe("ChatInput", () => {
           });
           cache.setQueryData(qk.config, {
             ...DEFAULT_APP_CONFIG,
-            analyticsNoticeVersion: 99,
             lastModel: `${provider.id}/${id}`,
           });
         }}
@@ -471,7 +468,6 @@ describe("ChatInput", () => {
           cache.setQueryData(qk.providers, providerList);
           cache.setQueryData(qk.config, {
             ...DEFAULT_APP_CONFIG,
-            analyticsNoticeVersion: 99,
             lastModel: "opencode/test-free",
             paidDefaultModel: "openai-api/gpt-6.1-sol",
           });

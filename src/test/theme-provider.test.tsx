@@ -62,8 +62,6 @@ describe("ThemeProvider", () => {
       lastModel: null,
       hiddenModels: [],
       theme: "system",
-      detailedAnalytics: "disabled",
-      analyticsNoticeVersion: 2,
     });
 
     renderThemeProvider(queryClient);
@@ -84,7 +82,7 @@ describe("ThemeProvider", () => {
 
   it("applies the accent colour, saves it, and keeps it when other settings change", async () => {
     const queryClient = makeQueryClient();
-    queryClient.setQueryData(qk.config, { ...DEFAULT_APP_CONFIG, analyticsNoticeVersion: 2 });
+    queryClient.setQueryData(qk.config, { ...DEFAULT_APP_CONFIG });
 
     renderThemeProvider(queryClient);
     expect(screen.getByTestId("accent")).toHaveTextContent("blue");

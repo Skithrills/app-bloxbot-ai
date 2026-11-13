@@ -90,7 +90,7 @@ function hasProviderOutput(message: SessionMessageAssistant): boolean {
   );
 }
 
-// OpenCode 2 renamed these tools. The UI and analytics keep the established names.
+// OpenCode 2 renamed these tools. The UI keeps the established names.
 const TOOL_NAMES: Record<string, string> = { shell: "bash", subagent: "task" };
 
 export function toolName(name: string): string {

@@ -1,7 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
-const { toast, desktop, capture, click, playChime } = vi.hoisted(() => {
-  const capture = vi.fn();
+const { toast, desktop, click, playChime } = vi.hoisted(() => {
   const click: { listener?: (id: string) => void } = {};
   const toast = Object.assign(
     vi.fn(() => "toast-id"),
@@ -19,16 +18,12 @@ const { toast, desktop, capture, click, playChime } = vi.hoisted(() => {
       return () => {};
     }),
   };
-  return { toast, desktop, capture, click, playChime: vi.fn() };
+  return { toast, desktop, click, playChime: vi.fn() };
 });
 
 vi.mock("sonner", () => ({ toast }));
 vi.mock("@/lib/chime", () => ({ playChime }));
 vi.mock("@/lib/desktop", () => ({ desktop }));
-vi.mock("posthog-js/dist/module.full.no-external.js", () => ({ default: { capture } }));
-vi.mock("@/lib/analytics", () => ({
-  analyticsProperties: (feature: string, properties: object) => ({ feature, ...properties }),
-}));
 
 import { notify, setNotificationPreferences } from "@/lib/notifications";
 
@@ -181,17 +176,5 @@ describe("notify", () => {
     click.listener?.(id);
     click.listener?.(id);
     expect(onClick).toHaveBeenCalledOnce();
-    expect(capture).toHaveBeenCalledWith(
-      "notification_clicked",
-      expect.objectContaining({ notification: "chat_finished", output: "system", action: "open" }),
-    );
-  });
-
-  it("never sends the chat title to analytics", () => {
-    setFocused(false);
-
-    notify.attention("Chat finished", { name: "chat_finished", description: "Secret project" });
-
-    expect(JSON.stringify(capture.mock.calls)).not.toContain("Secret project");
   });
 });

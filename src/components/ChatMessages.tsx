@@ -16,7 +16,6 @@ import {
   SquareTerminal,
   Wrench,
 } from "lucide-react";
-import posthog from "posthog-js/dist/module.full.no-external.js";
 import {
   type ComponentProps,
   createContext,
@@ -49,8 +48,6 @@ import { PermissionPrompt } from "@/components/PermissionPrompt";
 import { MessageReference, ReferenceText } from "@/components/ReferenceChip";
 import { SubagentToolCard } from "@/components/SubagentToolCard";
 import type { HighlightLanguage } from "@/components/SyntaxHighlightedOutput";
-import { isStudioTool } from "@/lib/aiTracing";
-import { analyticsProperties } from "@/lib/analytics";
 import { useAudioVisualizer } from "@/lib/audioVisualizer";
 import {
   instanceReferenceLabels,
@@ -61,6 +58,7 @@ import { formatModelCost } from "@/lib/modelCost";
 import { modelLinksIn } from "@/lib/modelLinks";
 import { toAppProviderID } from "@/lib/openAiProfiles";
 import type { Part, QuestionAnswer, QuestionRequest, SessionStatus } from "@/lib/opencode/types";
+import { isStudioTool } from "@/lib/studioMcp";
 import {
   type AddComposerImage,
   imageDataUrlMime,
@@ -420,7 +418,6 @@ function InlineCode({ children }: { children?: ReactNode }) {
       type="button"
       title={`Show ${object.path} in the Explorer`}
       onClick={() => {
-        posthog.capture("chat_object_opened", analyticsProperties("explorer"));
         focusObject(object.path);
       }}
       className="cursor-pointer"
@@ -808,10 +805,6 @@ function ModelSwitchCard({
         <button
           type="button"
           onClick={() => {
-            posthog.capture(
-              "model_error_switch_clicked",
-              analyticsProperties("chat", { error_kind: presentation.kind }),
-            );
             setSelectedModel(target.key);
             setSwitchedTo(target);
           }}

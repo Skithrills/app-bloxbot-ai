@@ -17,13 +17,12 @@ import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/
 import { CallToolRequestSchema, ListToolsRequestSchema } from "@modelcontextprotocol/sdk/types.js";
 import { QueryClient } from "@tanstack/react-query";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { isStudioTool } from "@/lib/aiTracing";
-import { aiTracer } from "@/lib/analytics";
 import { isFreeUsageLimit, presentModelError } from "@/lib/modelError";
 import { createOpencodeClient, type OpencodeClient } from "@/lib/opencode/client";
 import type { Event, ToolPart } from "@/lib/opencode/types";
 import { qk } from "@/lib/queryKeys";
 import { type MessagesCache, sseDispatch } from "@/lib/sseDispatch";
+import { isStudioTool } from "@/lib/studioMcp";
 import { DEFAULT_SYSTEM_PROMPT } from "@/lib/systemPrompt";
 import { PASSWORD, shellCall, startScriptedProvider, startServer } from "@/test/support/liveServer";
 import { DEFAULT_APP_CONFIG } from "@/types/desktop";
@@ -174,7 +173,6 @@ describe.skipIf(!BIN)("OpenCode server, through BloxBot's client", () => {
         events.push(event);
         sseDispatch(queryClient, event, active);
         // The app hands the tracer the same event objects, so it runs here too.
-        aiTracer.handleEvent(event);
       }
     })().catch(() => undefined);
   }, 60_000);

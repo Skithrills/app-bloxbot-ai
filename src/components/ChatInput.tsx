@@ -1,7 +1,6 @@
 import { useIsMutating, useQuery, useQueryClient } from "@tanstack/react-query";
 import type { SerializedEditorState } from "lexical";
 import { Paperclip, Plus } from "lucide-react";
-import posthog from "posthog-js/dist/module.full.no-external.js";
 import {
   memo,
   type ReactNode,
@@ -29,7 +28,6 @@ import { useAllModels } from "@/hooks/useProviders";
 import { useSessionGoal } from "@/hooks/useSessionGoal";
 import { useIsBusy } from "@/hooks/useSessionStatuses";
 import { useTodos } from "@/hooks/useTodos";
-import { analyticsProperties } from "@/lib/analytics";
 import {
   type ComposerDelivery,
   composerShortcutLabel,
@@ -982,10 +980,6 @@ function ChatInput({
                       <MenuItem
                         role="button"
                         onClick={() => {
-                          posthog.capture(
-                            "model_picker_add_models_clicked",
-                            analyticsProperties("chat"),
-                          );
                           setShowModelPicker(false);
                           setModelSearch("");
                           onOpenSettings();

@@ -1,7 +1,5 @@
 import { useMutation, useQueryClient } from "@tanstack/react-query";
-import posthog from "posthog-js/dist/module.full.no-external.js";
 
-import { analyticsProperties, detailedAnalyticsProperties } from "@/lib/analytics";
 import { qk } from "@/lib/queryKeys";
 import { useOpenCodeClient } from "@/providers/OpenCodeClientProvider";
 
@@ -30,15 +28,6 @@ export function useSetApiKey() {
       } catch {
         await queryClient.invalidateQueries({ queryKey: qk.providers });
       }
-
-      posthog.capture(
-        "provider_connected",
-        analyticsProperties("providers", {
-          outcome: "success",
-          method: "api_key",
-          ...detailedAnalyticsProperties({ provider: providerID }),
-        }),
-      );
     },
   });
 }
@@ -69,13 +58,6 @@ export function useDisconnectProvider() {
         await queryClient.invalidateQueries({ queryKey: qk.providers });
       }
       void queryClient.resetQueries({ queryKey: qk.subscriptionUsage(providerID), exact: true });
-      posthog.capture(
-        "provider_disconnected",
-        analyticsProperties("providers", {
-          outcome: "success",
-          ...detailedAnalyticsProperties({ provider: providerID }),
-        }),
-      );
       return providerID;
     },
   });

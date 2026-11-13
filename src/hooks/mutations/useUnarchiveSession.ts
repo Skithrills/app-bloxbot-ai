@@ -1,6 +1,4 @@
 import { useMutation, useQueryClient } from "@tanstack/react-query";
-import posthog from "posthog-js/dist/module.full.no-external.js";
-import { analyticsProperties, errorAnalyticsProperties } from "@/lib/analytics";
 import type { Session } from "@/lib/opencode/types";
 import { qk } from "@/lib/queryKeys";
 import { useOpenCodeClient } from "@/providers/OpenCodeClientProvider";
@@ -24,12 +22,6 @@ export function useUnarchiveSession() {
         if (!previous) return [session];
         return previous.map((item) => (item.id === session.id ? session : item));
       });
-      posthog.capture("session_unsnoozed", analyticsProperties("sessions", { outcome: "success" }));
     },
-    onError: (error) =>
-      posthog.capture(
-        "session_unsnooze_failed",
-        errorAnalyticsProperties("sessions", "unsnooze", error),
-      ),
   });
 }

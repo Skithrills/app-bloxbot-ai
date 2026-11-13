@@ -1,6 +1,6 @@
 import { Schema } from "effect";
 
-export const SubscriptionProviderSchema = Schema.Literal("codex", "claude", "codex-cli");
+export const SubscriptionProviderSchema = Schema.Literal("codex", "claude");
 export type SubscriptionProvider = typeof SubscriptionProviderSchema.Type;
 
 const SubscriptionWindowSchema = Schema.Struct({
@@ -22,6 +22,7 @@ export const SubscriptionUsageSchema = Schema.Union(
       "disconnected",
       "cli_missing",
       "session_expired",
+      "usage_not_shared",
       "unsupported",
       "unavailable",
     ),

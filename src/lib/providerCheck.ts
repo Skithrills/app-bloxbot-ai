@@ -6,7 +6,6 @@ import { splitModelKey } from "@/lib/splitModelKey";
  * How the checked model relates to the user's setup: the model they chat
  * with, the provider's default, or another one they picked for the check.
  */
-export type CheckModelChoice = "selected" | "default" | "other";
 
 /** The models a check prefers: the user's chat model and the provider's default. */
 export type CheckPreference = { selected?: string; default?: string };
@@ -65,13 +64,6 @@ export function pickCheckModel(
   preferred: CheckPreference = {},
 ): Model | undefined {
   return checkModels(provider, preferred)[0];
-}
-
-/** How a checked model relates to the user's setup, for analytics. */
-export function checkModelChoice(modelID: string, preferred: CheckPreference): CheckModelChoice {
-  if (modelID === preferred.selected) return "selected";
-  if (modelID === preferred.default) return "default";
-  return "other";
 }
 
 export type ProviderCheckResult =

@@ -124,8 +124,6 @@ describe.skipIf(!BIN)("[no model] Workflows", () => {
       "bloxbot-config",
       JSON.stringify({
         lastModel: FREE_MODEL,
-        detailedAnalytics: "disabled",
-        analyticsNoticeVersion: 2,
         hiddenModels: [],
         theme: "dark",
       }),

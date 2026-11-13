@@ -9,9 +9,6 @@ vi.mock("@/lib/config", () => ({
   loadConfig: mocks.loadConfig,
   patchConfig: mocks.patchConfig,
 }));
-vi.mock("posthog-js/dist/module.full.no-external.js", () => ({
-  default: { capture: vi.fn(), register: vi.fn() },
-}));
 const providers = vi.hoisted(() => ({
   list: undefined as unknown,
   connected: [] as string[],
@@ -79,7 +76,6 @@ describe("the saved model", () => {
     const message = vi.spyOn(notify, "message");
     mocks.loadConfig.mockResolvedValue({
       ...DEFAULT_APP_CONFIG,
-      analyticsNoticeVersion: 99,
       lastModel: "opencode/nemotron-3-ultra-free",
     });
     const { result } = renderPreferences();
@@ -98,7 +94,6 @@ describe("the saved model", () => {
   it("doesn't bring back a model refused in the user's region", async () => {
     mocks.loadConfig.mockResolvedValue({
       ...DEFAULT_APP_CONFIG,
-      analyticsNoticeVersion: 99,
       lastModel: "opencode/crouton-alpha-free",
       unavailableModels: ["opencode/crouton-alpha-free"],
     });
@@ -114,7 +109,6 @@ describe("the saved model", () => {
     const message = vi.spyOn(notify, "message");
     mocks.loadConfig.mockResolvedValue({
       ...DEFAULT_APP_CONFIG,
-      analyticsNoticeVersion: 99,
       lastModel: "opencode/crouton-alpha-free",
     });
     const { result } = renderPreferences();
@@ -136,7 +130,6 @@ describe("the saved model", () => {
   it("drops the variant when switching to another model, as it may not have one", async () => {
     mocks.loadConfig.mockResolvedValue({
       ...DEFAULT_APP_CONFIG,
-      analyticsNoticeVersion: 99,
       lastModel: "opencode/crouton-alpha-free",
     });
     const { result } = renderPreferences();
@@ -152,7 +145,7 @@ describe("the saved model", () => {
   });
 
   it("restores two chats independently across remount and only uses supported effort", async () => {
-    const persisted = { ...DEFAULT_APP_CONFIG, analyticsNoticeVersion: 99 };
+    const persisted = { ...DEFAULT_APP_CONFIG };
     mocks.loadConfig.mockResolvedValue(persisted);
     mocks.patchConfig.mockImplementation(async (patch) => Object.assign(persisted, patch));
     const sessions = [
@@ -188,7 +181,6 @@ describe("the saved model", () => {
     const message = vi.spyOn(notify, "message");
     mocks.loadConfig.mockResolvedValue({
       ...DEFAULT_APP_CONFIG,
-      analyticsNoticeVersion: 99,
       hiddenModels: ["opencode/flash-free"],
       chatModels: { retired: { key: "opencode/retired-free", variant: "high" } },
     });
@@ -211,7 +203,6 @@ describe("reasoning effort control preference", () => {
     mocks.patchConfig.mockResolvedValue(undefined);
     mocks.loadConfig.mockResolvedValue({
       ...DEFAULT_APP_CONFIG,
-      analyticsNoticeVersion: 99,
       effortControl: "dropdown",
     });
     const { result } = renderPreferences();
@@ -226,7 +217,7 @@ describe("reasoning effort control preference", () => {
 it("uses the default busy shortcuts and persists a changed binding for each action", async () => {
   vi.clearAllMocks();
   mocks.patchConfig.mockResolvedValue(undefined);
-  mocks.loadConfig.mockResolvedValue({ ...DEFAULT_APP_CONFIG, analyticsNoticeVersion: 99 });
+  mocks.loadConfig.mockResolvedValue(DEFAULT_APP_CONFIG);
   const { result } = renderPreferences();
 
   await waitFor(() => expect(mocks.loadConfig).toHaveBeenCalled());
@@ -242,8 +233,6 @@ describe("notification preferences", () => {
     vi.clearAllMocks();
     mocks.loadConfig.mockResolvedValue({
       ...DEFAULT_APP_CONFIG,
-      analyticsNoticeVersion: 99,
-      detailedAnalytics: "enabled",
     });
   });
 

@@ -1,7 +1,5 @@
-import posthog from "posthog-js/dist/module.full.no-external.js";
 import { type ExternalToast, toast } from "sonner";
 
-import { analyticsProperties } from "@/lib/analytics";
 import { playChime } from "@/lib/chime";
 import { desktop } from "@/lib/desktop";
 import type { NotificationKinds } from "@/types/desktop";
@@ -13,9 +11,6 @@ import type { NotificationKinds } from "@/types/desktop";
  *   even when BloxBot is in the background, and it also goes to the OS while the window is unfocused.
  * - `notify.attention` is for things that happen on their own, like a chat finishing. It shows one
  *   of the two: a toast while the window is focused, otherwise an OS notification.
- *
- * Anything a user can click needs a `name`, which is how notification_shown and notification_clicked
- * tell notifications apart. Names are fixed strings: titles can hold versions and provider names.
  */
 
 type ToastId = string | number;
@@ -56,7 +51,7 @@ const ALL_KINDS: NotificationKinds = { finished: true, waiting: true, failed: tr
 let enabledKinds: NotificationKinds = ALL_KINDS;
 let soundEnabled = true;
 let nextSystemId = 0;
-let unsubscribeFromClicks: (() => void) | undefined;
+let listeningForClicks = false;
 const clickHandlers = new Map<string, () => void>();
 
 export function setNotificationPreferences(kinds: NotificationKinds, sound: boolean): void {
@@ -88,56 +83,28 @@ export function isWindowFocused(): boolean {
   return document.hasFocus();
 }
 
-type Output = "toast" | "system";
-
-function captureShown(notification: string, output: Output): void {
-  posthog.capture(
-    "notification_shown",
-    analyticsProperties("notifications", { notification, output }),
-  );
-}
-
-function captureClicked(notification: string, output: Output, action: string): void {
-  posthog.capture(
-    "notification_clicked",
-    analyticsProperties("notifications", { notification, output, action }),
-  );
-}
-
-/** Reports clicks on a toast's action or cancel button, then does what the button does. */
-function trackedButton<T extends ExternalToast["action"]>(notification: string, button: T): T {
-  if (!button || typeof button !== "object" || !("onClick" in button)) return button;
-  const { label, onClick } = button;
-  return {
-    ...button,
-    onClick: (event: Parameters<typeof onClick>[0]) => {
-      captureClicked(notification, "toast", typeof label === "string" ? label : "custom");
-      onClick(event);
-    },
-  };
-}
-
 const MAX_CLICK_HANDLERS = 50;
 
 /** Resolves to false when the OS has no notifications to offer, so a caller can use a toast. */
-function showSystem(name: string, title: string, options: SystemOptions): Promise<boolean> {
+function showSystem(title: string, options: SystemOptions): Promise<boolean> {
   const id = String(++nextSystemId);
   clickHandlers.set(id, () => {
-    captureClicked(name, "system", "open");
     options.onClick?.();
   });
   // A dismissed notification never reports back, so only recent ones stay clickable.
   if (clickHandlers.size > MAX_CLICK_HANDLERS) {
     clickHandlers.delete(clickHandlers.keys().next().value as string);
   }
-  unsubscribeFromClicks ??= desktop.onSystemNotificationClick((clickedId) => {
-    clickHandlers.get(clickedId)?.();
-    clickHandlers.delete(clickedId);
-  });
+  if (!listeningForClicks) {
+    desktop.onSystemNotificationClick((clickedId) => {
+      clickHandlers.get(clickedId)?.();
+      clickHandlers.delete(clickedId);
+    });
+    listeningForClicks = true;
+  }
   return desktop.showSystemNotification({ id, title, body: options.body ?? "" }).then(
     (shown) => {
       if (shown) {
-        captureShown(name, "system");
         // Only once the system has agreed, so a refused notification doesn't make a sound for nothing.
         if (soundEnabled) playChime();
       } else {
@@ -157,21 +124,16 @@ function withSystem(title: string, options: NotifyOptions | undefined): External
   if (!options) return undefined;
   const { name, system, ...toastOptions } = options;
   if (!name) return toastOptions;
-  captureShown(name, "toast");
   if (system && enabledKinds[kindOf(name)] && !isWindowFocused()) {
     const systemOptions = system === true ? {} : system;
-    void showSystem(name, title, {
+    void showSystem(title, {
       ...systemOptions,
       body:
         systemOptions.body ??
         (typeof options.description === "string" ? options.description : undefined),
     });
   }
-  return {
-    ...toastOptions,
-    action: trackedButton(name, options.action),
-    cancel: trackedButton(name, options.cancel),
-  };
+  return toastOptions;
 }
 
 export const notify = {
@@ -185,15 +147,14 @@ export const notify = {
     toast.loading(title, withSystem(title, options)),
   attention(title: string, { name, description, tone = "default", open }: AttentionOptions): void {
     const showToast = () => {
-      captureShown(name, "toast");
       const show = tone === "error" ? toast.error : toast;
-      show(title, { description, action: trackedButton(name, open) });
+      show(title, { description, action: open });
     };
     if (!enabledKinds[kindOf(name)] || isWindowFocused()) {
       showToast();
       return;
     }
-    void showSystem(name, title, { body: description, onClick: open?.onClick }).then((shown) => {
+    void showSystem(title, { body: description, onClick: open?.onClick }).then((shown) => {
       if (!shown) showToast();
     });
   },
@@ -202,7 +163,7 @@ export const notify = {
    * Mac, the first one is also what makes the system ask for permission.
    */
   async test(): Promise<void> {
-    const shown = await showSystem("notification_test", "BloxBot notifications are working", {
+    const shown = await showSystem("BloxBot notifications are working", {
       body: "This is how BloxBot gets your attention.",
     });
     if (shown) {

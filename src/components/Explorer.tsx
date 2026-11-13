@@ -18,7 +18,6 @@ import {
   Sparkles,
   Users,
 } from "lucide-react";
-import posthog from "posthog-js/dist/module.full.no-external.js";
 import {
   type MouseEvent,
   memo,
@@ -39,11 +38,6 @@ import {
 } from "@/components/ExplorerControls";
 import { type FieldChange, Inspector } from "@/components/ExplorerInspector";
 import { StudioClassIcon } from "@/components/StudioClassIcon";
-import {
-  analyticsProperties,
-  errorAnalyticsProperties,
-  explorerAnalyticsProperties,
-} from "@/lib/analytics";
 import { desktop } from "@/lib/desktop";
 import {
   canEditObject,
@@ -100,7 +94,6 @@ interface TreeRowProps {
   onOpenMenu: (event: MouseEvent, node: ExplorerNode) => void;
   onOpenMenuAt: (x: number, y: number, node: ExplorerNode) => void;
   onRenamed: (node: ExplorerNode, name: string | null) => void;
-  onDroppedInChat: (node: ExplorerNode) => void;
 }
 
 const CLASS_ICONS: ReadonlyArray<[RegExp, LucideIcon]> = [
@@ -139,7 +132,6 @@ const TreeRow = memo(function TreeRow({
   onOpenMenu,
   onOpenMenuAt,
   onRenamed,
-  onDroppedInChat,
 }: TreeRowProps) {
   const id = nodeId(node);
   const canExpand = node.hasChildren || node.children.length > 0;
@@ -158,10 +150,6 @@ const TreeRow = memo(function TreeRow({
         event.dataTransfer.setData(OBJECT_DRAG_NAME_TYPE, node.name);
         event.dataTransfer.setData(OBJECT_DRAG_CLASS_TYPE, node.className);
         event.dataTransfer.effectAllowed = "copy";
-      }}
-      onDragEnd={(event) => {
-        // The message box is the only place that accepts this drag.
-        if (event.dataTransfer.dropEffect !== "none") onDroppedInChat(node);
       }}
       aria-level={depth + 1}
       aria-posinset={position}
@@ -320,13 +308,6 @@ export default function Explorer({ collapsed, sessionBusy, onToggle }: ExplorerP
   latestTreeRef.current = tree;
 
   useEffect(() => {
-    posthog.capture(
-      collapsed ? "explorer_closed" : "explorer_opened",
-      analyticsProperties("explorer", { collapsed }),
-    );
-  }, [collapsed]);
-
-  useEffect(() => {
     setDemand({ open: !collapsed, busy: sessionBusy });
     // Settings takes this panel's place, and nothing there needs the tree kept up to date.
     return () => setDemand({ open: false, busy: false });
@@ -428,29 +409,11 @@ export default function Explorer({ collapsed, sessionBusy, onToggle }: ExplorerP
     setScrollTarget(null);
   }, [scrollTarget, rows, virtualizer]);
 
-  const captureReference = useCallback((node: ExplorerNode, source: "drag" | "menu") => {
-    posthog.capture(
-      "reference_added",
-      analyticsProperties(
-        "explorer",
-        explorerAnalyticsProperties({
-          class_category: iconForClass(node.className) === Box ? "generic" : "known",
-          source,
-        }),
-      ),
-    );
-  }, []);
-  const handleDroppedInChat = useCallback(
-    (node: ExplorerNode) => captureReference(node, "drag"),
-    [captureReference],
-  );
-
   const openMenu = useCallback(
     (event: MouseEvent, node: ExplorerNode) => {
       event.preventDefault();
       setSelectedId(nodeId(node));
       setMenu({ node, ...menuPosition(event) });
-      posthog.capture("object_menu_opened", analyticsProperties("explorer"));
     },
     [setSelectedId],
   );
@@ -459,7 +422,6 @@ export default function Explorer({ collapsed, sessionBusy, onToggle }: ExplorerP
     (x: number, y: number, node: ExplorerNode) => {
       setSelectedId(nodeId(node));
       setMenu({ node, ...menuPosition({ clientX: x, clientY: y }) });
-      posthog.capture("object_menu_opened", analyticsProperties("explorer"));
     },
     [setSelectedId],
   );
@@ -490,7 +452,6 @@ export default function Explorer({ collapsed, sessionBusy, onToggle }: ExplorerP
       const startedIn = selectionPlaceRef.current;
       try {
         const { name } = await desktop.editExplorerObject(studioId, request);
-        posthog.capture("object_edited", analyticsProperties("explorer", { action: edit.action }));
         // The rows are another place's by now, where the same path is a different object.
         if (selectionPlaceRef.current === startedIn) onDone(name);
         // What it's called now, except for a delete, where the old name is all there is.
@@ -500,10 +461,6 @@ export default function Explorer({ collapsed, sessionBusy, onToggle }: ExplorerP
         requestSync({ force: true });
       } catch (error) {
         console.error(`[explorer] couldn't ${edit.action} an object`, error);
-        posthog.capture(
-          "object_edit_failed",
-          errorAnalyticsProperties("explorer", edit.action, error),
-        );
         notify.error(`Couldn't ${EDIT_VERBS[edit.action]} ${node.name}`, {
           description: editErrorMessage(error),
         });
@@ -918,7 +875,6 @@ export default function Explorer({ collapsed, sessionBusy, onToggle }: ExplorerP
                 onOpenMenu={openMenu}
                 onOpenMenuAt={openMenuAt}
                 onRenamed={handleRenamed}
-                onDroppedInChat={handleDroppedInChat}
               />
             );
           })}
@@ -931,7 +887,6 @@ export default function Explorer({ collapsed, sessionBusy, onToggle }: ExplorerP
           studioId={studioId ?? null}
           onReference={(reference) => {
             referenceObject(reference);
-            captureReference(selected, "menu");
           }}
           onChange={(change, onDone) => void editObject(selected, change, onDone)}
           onRename={(name) => handleRenamed(selected, name)}
@@ -952,7 +907,6 @@ export default function Explorer({ collapsed, sessionBusy, onToggle }: ExplorerP
           <ContextMenuItem
             onClick={() => {
               referenceObject(menu.node);
-              captureReference(menu.node, "menu");
               setMenu(null);
             }}
           >

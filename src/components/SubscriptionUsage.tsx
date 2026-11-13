@@ -1,5 +1,7 @@
 import { useId } from "react";
 import ProviderLogo from "@/components/ProviderLogo";
+import { MENU_TRIGGER } from "@/components/ui/menu";
+import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import {
   formatSubscriptionPercentLeft,
   subscriptionPercentLeft,
@@ -15,6 +17,8 @@ const accounts = [
   { providerId: CLAUDE_AGENT_PROVIDER, name: "Claude Code" },
 ] as const;
 
+const CHATGPT_USAGE_URL = "https://chatgpt.com/settings/usage";
+
 const dateTime = new Intl.DateTimeFormat(undefined, {
   month: "short",
   day: "numeric",
@@ -28,24 +32,28 @@ function statusMessage(
 ) {
   switch (status) {
     case "disconnected":
-      if (provider === "codex-cli") return "The installed Codex CLI is signed out.";
       return "Connect the subscription account to view its usage.";
     case "cli_missing":
-      return `${provider === "claude" ? "Claude Code" : "Codex CLI"} is required to read this account’s limits.`;
+      return "Claude Code is required to read this account’s limits.";
     case "session_expired":
       return "The ChatGPT connection has expired. Use this subscription in a chat to refresh it.";
+    case "usage_not_shared":
+      return "This sign-in supports chats. ChatGPT does not share remaining quota or reset times with BloxBot.";
     case "unsupported":
-      if (provider === "codex-cli")
-        return "The installed CLI is using a connection without ChatGPT subscription limits.";
-      return "This connection or CLI version does not report subscription limits.";
+      return provider === "claude"
+        ? "This Claude Code connection or CLI version does not report subscription limits."
+        : "This ChatGPT connection does not report subscription limits.";
     case "unavailable":
       return "Usage is temporarily unavailable.";
   }
 }
 
-function SubscriptionAccount({ providerId, name }: (typeof accounts)[number]) {
-  const { usage, source, status, isError, isFetching, isPreviousReading, now, refresh } =
-    useSubscriptionUsage(providerId);
+function SubscriptionAccount({
+  providerId,
+  name,
+  reading,
+}: (typeof accounts)[number] & { reading: ReturnType<typeof useSubscriptionUsage> }) {
+  const { usage, source, status, isError, isFetching, isPreviousReading, now, refresh } = reading;
   const error = !status || status === "available" ? "unavailable" : status;
 
   return (
@@ -55,23 +63,20 @@ function SubscriptionAccount({ providerId, name }: (typeof accounts)[number]) {
           <ProviderLogo providerId={providerId} />
           <h6 className="text-sm font-medium">{name}</h6>
         </div>
-        <button
-          type="button"
-          aria-label={`Refresh ${name} usage`}
-          aria-disabled={isFetching}
-          onClick={() => {
-            if (!isFetching) void refresh();
-          }}
-          className="shrink-0 rounded-md border px-2 py-1 text-xs hover:bg-muted aria-disabled:opacity-50"
-        >
-          Refresh
-        </button>
+        {status !== "usage_not_shared" && (
+          <button
+            type="button"
+            aria-label={`Refresh ${name} usage`}
+            aria-disabled={isFetching}
+            onClick={() => {
+              if (!isFetching) void refresh();
+            }}
+            className="shrink-0 rounded-md border px-2 py-1 text-xs hover:bg-muted aria-disabled:opacity-50"
+          >
+            Refresh
+          </button>
+        )}
       </div>
-      {usage?.source === "codex-cli" && (
-        <p className="mt-1 text-xs text-muted-foreground">
-          Usage from the installed Codex CLI account. BloxBot has a separate sign-in.
-        </p>
-      )}
       <div className="mt-2 space-y-2.5 text-xs" aria-live="polite" aria-busy={isFetching}>
         {usage ? (
           <>
@@ -122,8 +127,85 @@ function SubscriptionAccount({ providerId, name }: (typeof accounts)[number]) {
         ) : (
           <p className="text-muted-foreground">{statusMessage(error, source)}</p>
         )}
+        {providerId === OPENAI_OAUTH_PROVIDER && (
+          <a
+            href={CHATGPT_USAGE_URL}
+            target="_blank"
+            rel="noreferrer"
+            className="inline-block text-primary underline-offset-2 hover:underline"
+          >
+            Open ChatGPT Usage
+          </a>
+        )}
       </div>
     </div>
+  );
+}
+
+function ConnectedSubscriptionAccount(account: (typeof accounts)[number]) {
+  const reading = useSubscriptionUsage(account.providerId);
+  return <SubscriptionAccount {...account} reading={reading} />;
+}
+
+export function ChatGptUsageControl() {
+  const account = accounts[0];
+  const reading = useSubscriptionUsage(account.providerId);
+  if (!reading.source) return null;
+
+  const windows = reading.usage?.windows.filter(({ id }) => id.startsWith("codex/")) ?? [];
+  const tightest = windows.reduce<(typeof windows)[number] | undefined>(
+    (lowest, item) => (!lowest || item.usedPercent > lowest.usedPercent ? item : lowest),
+    undefined,
+  );
+  const left = tightest ? subscriptionPercentLeft(tightest.usedPercent) : undefined;
+  const summary = tightest
+    ? `${tightest.label} · ${formatSubscriptionPercentLeft(tightest.usedPercent)} left${reading.isPreviousReading ? " · Previous reading" : ""}`
+    : reading.status === "usage_not_shared"
+      ? "View usage in ChatGPT"
+      : reading.isFetching
+        ? "Checking usage…"
+        : statusMessage(
+            reading.status === "available" ? "unavailable" : (reading.status ?? "unavailable"),
+            reading.source,
+          );
+
+  return (
+    <Popover>
+      <PopoverTrigger asChild>
+        <button
+          type="button"
+          aria-label={`ChatGPT subscription usage · ${summary}`}
+          title={summary}
+          className={`${MENU_TRIGGER} w-8 shrink-0 justify-center px-0`}
+        >
+          <svg width="21" height="21" viewBox="0 0 20 20" fill="none" aria-hidden="true">
+            <circle cx="10" cy="10" r="7.5" stroke="currentColor" strokeWidth="2" opacity="0.25" />
+            {left !== undefined && left > 0 && (
+              <circle
+                cx="10"
+                cy="10"
+                r="7.5"
+                pathLength="100"
+                transform="rotate(-90 10 10)"
+                stroke="currentColor"
+                strokeWidth="2"
+                strokeLinecap="round"
+                strokeDasharray={`${left} 100`}
+                className={reading.isPreviousReading ? undefined : "text-primary"}
+              />
+            )}
+            {left === undefined && <circle cx="10" cy="10" r="1.5" fill="currentColor" />}
+          </svg>
+        </button>
+      </PopoverTrigger>
+      <PopoverContent
+        align="end"
+        className="w-72 max-w-[calc(100vw-1rem)] p-0"
+        aria-label="ChatGPT subscription usage"
+      >
+        <SubscriptionAccount {...account} reading={reading} />
+      </PopoverContent>
+    </Popover>
   );
 }
 
@@ -140,7 +222,7 @@ export function SubscriptionUsage() {
       </h5>
       <div className="divide-y rounded-lg border bg-card">
         {visible.map((account) => (
-          <SubscriptionAccount key={account.providerId} {...account} />
+          <ConnectedSubscriptionAccount key={account.providerId} {...account} />
         ))}
       </div>
     </section>

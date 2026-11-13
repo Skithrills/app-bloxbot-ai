@@ -1,18 +1,8 @@
 import { useMutation, useQueryClient } from "@tanstack/react-query";
-import posthog from "posthog-js/dist/module.full.no-external.js";
-import { analyticsProperties, detailedAnalyticsProperties } from "@/lib/analytics";
-import { scrubErrorMessage } from "@/lib/errorReporting";
 import type { ProviderListResponse } from "@/lib/opencode/types";
-import {
-  canChat,
-  checkFailure,
-  checkModelChoice,
-  checkPreference,
-  type ProviderCheckResult,
-} from "@/lib/providerCheck";
+import { canChat, checkFailure, type ProviderCheckResult } from "@/lib/providerCheck";
 import { qk } from "@/lib/queryKeys";
 import { useOpenCodeClient } from "@/providers/OpenCodeClientProvider";
-import { usePreferences } from "@/providers/PreferencesProvider";
 
 export type CheckProviderInput = { providerID: string; modelID: string };
 
@@ -25,7 +15,6 @@ export type CheckProviderInput = { providerID: string; modelID: string };
 export function useCheckProvider() {
   const { client } = useOpenCodeClient();
   const queryClient = useQueryClient();
-  const { selectedModel } = usePreferences();
 
   return useMutation({
     mutationFn: async ({
@@ -62,28 +51,9 @@ export function useCheckProvider() {
           { throwOnError: true },
         );
         const error = response.data.info.error;
-        const result: ProviderCheckResult = error
+        return error
           ? { ...checkFailure(error), modelName: model.name }
           : { ok: true, modelName: model.name };
-        posthog.capture(
-          "provider_checked",
-          analyticsProperties("providers", {
-            outcome: result.ok ? "success" : "failure",
-            model_choice: checkModelChoice(
-              model.id,
-              checkPreference(providerID, selectedModel, providers?.default),
-            ),
-            ...(result.ok
-              ? {}
-              : {
-                  key_rejected: result.keyRejected,
-                  error_name: error?.name,
-                  error_message: scrubErrorMessage(result.message),
-                }),
-            ...detailedAnalyticsProperties({ provider: providerID, model: model.id }),
-          }),
-        );
-        return result;
       } finally {
         await client.session.delete({ sessionID }, { throwOnError: true }).catch(() => undefined);
       }

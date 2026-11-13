@@ -1,12 +1,10 @@
-import { describe, expect, it, vi } from "vitest";
+import { describe, expect, it } from "vitest";
 import {
   ERROR_MESSAGE_MAX_LENGTH,
   REDACTED,
   scrubErrorMessage,
   scrubErrorText,
-  scrubEventProperties,
 } from "@/lib/errorReporting";
-import { createMainErrorReporter, type MainErrorTarget } from "../../electron/errorReporter";
 
 describe("scrubErrorText", () => {
   it("replaces home directories on macOS, Linux and Windows", () => {
@@ -102,7 +100,7 @@ describe("scrubErrorText", () => {
   });
 
   it("keeps long paths that are not secrets", () => {
-    const path = "~/node_modules/.pnpm/posthog-js@1.363.1/node_modules/posthog-js/dist/module.js";
+    const path = "~/node_modules/.pnpm/lexical@0.48.0/node_modules/lexical/dist/module.js";
     expect(scrubErrorText(path)).toBe(path);
   });
 });
@@ -113,105 +111,5 @@ describe("scrubErrorMessage", () => {
     expect(message).toHaveLength(ERROR_MESSAGE_MAX_LENGTH);
     expect(message.startsWith("~/x")).toBe(true);
     expect(message.endsWith("…")).toBe(true);
-  });
-});
-
-describe("scrubEventProperties", () => {
-  it("scrubs $exception values and stack frames", () => {
-    const properties = scrubEventProperties({
-      $exception_list: [
-        {
-          type: "Error",
-          value: `Failed to read /Users/oscar/secret.txt with sk-ant-${"a".repeat(30)} ${"y".repeat(900)}`,
-          stacktrace: {
-            type: "raw",
-            frames: [
-              {
-                filename: "/Users/oscar/BloxBot/app.js",
-                abs_path: "file:///Users/oscar/BloxBot/app.js",
-                function: "load",
-                lineno: 3,
-                in_app: true,
-              },
-            ],
-          },
-        },
-      ],
-      error_message: "C:\\Users\\jdoe\\x",
-      component_stack: "at App (/home/jdoe/src/App.tsx:1:1)",
-      $exception_message: "open /Users/oscar/a",
-      feature: "chat",
-    });
-    const [exception] = properties.$exception_list as Array<Record<string, unknown>>;
-    const value = exception?.value as string;
-    expect(value.startsWith("Failed to read ~/secret.txt with [redacted]")).toBe(true);
-    expect(value.length).toBeLessThanOrEqual(ERROR_MESSAGE_MAX_LENGTH);
-    expect(JSON.stringify(properties)).not.toMatch(/oscar|jdoe/);
-    expect((exception?.stacktrace as { frames: Array<Record<string, unknown>> }).frames[0]).toEqual(
-      {
-        filename: "~/BloxBot/app.js",
-        abs_path: "file://~/BloxBot/app.js",
-        function: "load",
-        lineno: 3,
-        in_app: true,
-      },
-    );
-    expect(properties.error_message).toBe("~\\x");
-    expect(properties.feature).toBe("chat");
-  });
-
-  it("leaves events without error data unchanged", () => {
-    const properties = { feature: "app", app_version: "1.0.0" };
-    expect(scrubEventProperties(properties)).toEqual(properties);
-  });
-});
-
-function fakeTarget(): MainErrorTarget & { send: ReturnType<typeof vi.fn>; destroy(): void } {
-  let destroyed = false;
-  const listeners: Array<() => void> = [];
-  return {
-    send: vi.fn(),
-    isDestroyed: () => destroyed,
-    once: (_event, listener) => listeners.push(listener),
-    destroy() {
-      destroyed = true;
-      for (const listener of listeners) listener();
-    },
-  };
-}
-
-describe("createMainErrorReporter", () => {
-  it("bounds the buffer and de-duplicates repeats", () => {
-    let time = 0;
-    const reporter = createMainErrorReporter({ channel: "err", maxBuffered: 3, now: () => time });
-    for (let index = 0; index < 5; index += 1) reporter.report("loop", new Error(`e${index}`));
-    reporter.report("loop", new Error("e4"));
-    const target = fakeTarget();
-    reporter.attach(target);
-    expect(target.send.mock.calls.map(([, report]) => report.message)).toEqual(["e2", "e3", "e4"]);
-    reporter.report("loop", new Error("e4"));
-    expect(target.send).toHaveBeenCalledTimes(3);
-    time = 60_000;
-    reporter.report("loop", new Error("e4"));
-    expect(target.send).toHaveBeenCalledTimes(4);
-  });
-
-  it("pre-scrubs with the known home directory and username", () => {
-    const reporter = createMainErrorReporter({
-      channel: "err",
-      home: "/srv/people/oscar",
-      username: "oscar",
-    });
-    const target = fakeTarget();
-    reporter.attach(target);
-    const error = new Error("cannot open /srv/people/oscar/BloxBot as oscar");
-    reporter.report("opencode_start", error);
-    const [, report] = target.send.mock.calls[0] ?? [];
-    expect(report).toMatchObject({
-      source: "opencode_start",
-      name: "Error",
-      message: "cannot open ~/BloxBot as <user>",
-    });
-    expect(report.stack).not.toContain("oscar");
   });
 });

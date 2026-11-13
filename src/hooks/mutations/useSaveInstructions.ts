@@ -1,7 +1,5 @@
 import { useMutation, useQueryClient } from "@tanstack/react-query";
-import posthog from "posthog-js/dist/module.full.no-external.js";
 
-import { analyticsProperties } from "@/lib/analytics";
 import { desktop } from "@/lib/desktop";
 import { qk } from "@/lib/queryKeys";
 import { useOpenCodeClient } from "@/providers/OpenCodeClientProvider";
@@ -16,11 +14,7 @@ export function useSaveInstructions() {
       await desktop.saveInstructions(text);
       await client?.instance.dispose({}, { throwOnError: true });
     },
-    onSuccess: (_data, text) => {
-      posthog.capture(
-        "instructions_changed",
-        analyticsProperties("settings", { empty: !text.trim() }),
-      );
+    onSuccess: () => {
       return queryClient.invalidateQueries({ queryKey: qk.instructions });
     },
   });

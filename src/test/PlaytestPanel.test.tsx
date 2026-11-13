@@ -1,11 +1,10 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { useRef } from "react";
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import PlaytestPanel from "@/components/PlaytestPanel";
 import { ThemeProvider } from "@/components/theme-provider";
 import { Toaster } from "@/components/ui/sonner";
-import { setDetailedAnalyticsEnabled } from "@/lib/analytics";
 import type { Message, Part } from "@/lib/opencode/types";
 import { qk } from "@/lib/queryKeys";
 import type { MessagesCache } from "@/lib/sseDispatch";
@@ -13,11 +12,6 @@ import { ActiveSessionContext } from "@/providers/ActiveSessionProvider";
 import { OpenCodeClientContext } from "@/providers/OpenCodeClientProvider";
 import { PreferencesProvider } from "@/providers/PreferencesProvider";
 import type { MessageWithParts } from "@/types";
-
-const { capture } = vi.hoisted(() => ({ capture: vi.fn() }));
-vi.mock("posthog-js/dist/module.full.no-external.js", () => ({
-  default: { capture, register: vi.fn() },
-}));
 
 const CHAT: MessageWithParts[] = [
   {
@@ -52,12 +46,10 @@ function Harness({
   client,
   onClose = vi.fn(),
   messages = CHAT,
-  detailedAnalytics = "disabled",
 }: {
   client: Record<string, unknown>;
   onClose?: () => void;
   messages?: MessageWithParts[];
-  detailedAnalytics?: "enabled" | "disabled";
 }) {
   const queryClient = new QueryClient({
     defaultOptions: { queries: { retry: false, staleTime: Infinity } },
@@ -71,8 +63,6 @@ function Harness({
     lastModel: "anthropic/claude",
     hiddenModels: [],
     theme: "system",
-    detailedAnalytics,
-    analyticsNoticeVersion: 2,
   });
   queryClient.setQueryData<MessagesCache>(qk.messages("active"), {
     messageIds: messages.map((m) => m.info.id),
@@ -110,14 +100,7 @@ function Harness({
   );
 }
 
-function capturedEvents(): string[] {
-  return capture.mock.calls.map(([event]) => event as string);
-}
-
 describe("PlaytestPanel", () => {
-  beforeEach(() => capture.mockClear());
-  afterEach(() => setDetailedAnalyticsEnabled(false));
-
   it("generates through a hidden session, then sends the edited plan normally", async () => {
     const onClose = vi.fn();
     const client = plannerClient(vi.fn());
@@ -126,17 +109,7 @@ describe("PlaytestPanel", () => {
     render(<Harness client={client} onClose={onClose} />);
     expect(client.session.create).not.toHaveBeenCalled();
     fireEvent.click(screen.getByRole("button", { name: "Generate from chat" }));
-    expect(capture).toHaveBeenCalledWith("generation_started", {
-      analytics_schema_version: 1,
-      feature: "playtest",
-    });
     expect(await screen.findByDisplayValue("Test rounds")).toBeInTheDocument();
-    expect(capture).toHaveBeenCalledWith("generation_succeeded", {
-      analytics_schema_version: 1,
-      feature: "playtest",
-      attempts: 1,
-    });
-    expect(capturedEvents()).not.toContain("generation_failed");
     expect(client.session.prompt).toHaveBeenCalledOnce();
     expect(client.session.prompt.mock.calls[0][0]).toMatchObject({
       sessionID: "planner",
@@ -172,21 +145,12 @@ describe("PlaytestPanel", () => {
         },
       }),
     );
-    render(<Harness client={client} detailedAnalytics="enabled" />);
+    render(<Harness client={client} />);
     fireEvent.click(screen.getByRole("button", { name: "Generate from chat" }));
     expect(
       await screen.findByText("OpenCode's free tier can only be used from within OpenCode"),
     ).toBeInTheDocument();
     expect(screen.queryByText(/invalid test plan/)).not.toBeInTheDocument();
-    expect(capture).toHaveBeenCalledWith(
-      "generation_failed",
-      expect.objectContaining({
-        error_category: "model_error",
-        model_error_name: "APIError",
-        error_message: "OpenCode's free tier can only be used from within OpenCode",
-        attempts: 1,
-      }),
-    );
     // A provider error isn't retried.
     expect(client.session.prompt).toHaveBeenCalledOnce();
     expect(client.session.delete).toHaveBeenCalledWith({ sessionID: "planner" });
@@ -218,12 +182,6 @@ describe("PlaytestPanel", () => {
     expect(retry).toMatchObject({ sessionID: "planner", format: { type: "json_schema" } });
     expect(retry.parts[0].text).toContain("one JSON object");
     expect(retry.parts[0].text).not.toContain("CHAT HISTORY");
-    expect(capture).toHaveBeenCalledWith("generation_succeeded", {
-      analytics_schema_version: 1,
-      feature: "playtest",
-      attempts: 2,
-    });
-    expect(capturedEvents()).not.toContain("generation_failed");
   });
 
   it("turns generate off in a chat with no text and keeps manual entry", () => {
@@ -246,8 +204,6 @@ describe("PlaytestPanel", () => {
     );
     fireEvent.click(generate);
     expect(client.session.create).not.toHaveBeenCalled();
-    expect(capturedEvents()).not.toContain("generation_started");
-    expect(capturedEvents()).not.toContain("generation_failed");
 
     const manual = screen.getByRole("button", { name: "Write my own" });
     expect(manual).toBeEnabled();

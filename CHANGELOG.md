@@ -7,6 +7,21 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+## [0.16.0] - 2026-11-13
+
+### Added
+
+- The title bar shows ChatGPT subscription usage in a separate ring. Hover for the remaining quota and click for reset times.
+- Right-click in the composer for Cut, Copy, Paste, and Select All with platform shortcuts.
+
+### Fixed
+
+- ChatGPT subscription usage no longer requires Codex CLI or substitutes its account. Compatible Codex sign-ins show the windows ChatGPT reports, including weekly-only plans. Sign in with ChatGPT accounts that cannot expose quota get a link to ChatGPT Usage.
+
+### Removed
+
+- Removed PostHog, the Share AI usage data setting, and tracking parameters on About links. The fork no longer sends AI traces, app analytics, or remote crash reports through PostHog.
+
 ## [0.15.5] - 2026-11-13
 
 First shared release of the Skithrills fork. Includes the animated cat mascot, image galleries and attachments, configurable effort/fast controls, message queueing and steering, interactive subagents, project folders, resizable panels, context and subscription usage views, message rail, persistent instance chips, and fork-based updates from versions 0.15.2–0.15.4.
@@ -489,7 +504,8 @@ First shared release of the Skithrills fork. Includes the animated cat mascot, i
 - OpenCode downloads are restricted to official GitHub release assets and verified with SHA-256 digests before installation and on every cache reuse.
 - Electron runs with context isolation, renderer sandboxing, Node.js integration disabled, validated IPC payloads, and external navigation blocked.
 
-[Unreleased]: https://github.com/Skithrills/app-bloxbot-ai/compare/v0.15.5...HEAD
+[Unreleased]: https://github.com/Skithrills/app-bloxbot-ai/compare/v0.16.0...HEAD
+[0.16.0]: https://github.com/Skithrills/app-bloxbot-ai/releases/tag/v0.16.0
 [0.15.5]: https://github.com/Skithrills/app-bloxbot-ai/releases/tag/v0.15.5
 [0.15.4]: https://github.com/Skithrills/app-bloxbot-ai/releases/tag/v0.15.4
 [0.15.3]: https://github.com/Skithrills/app-bloxbot-ai/releases/tag/v0.15.3

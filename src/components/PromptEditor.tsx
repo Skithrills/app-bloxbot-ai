@@ -31,7 +31,6 @@ import {
   type SerializedLexicalNode,
 } from "lexical";
 import { SquareSlash } from "lucide-react";
-import posthog from "posthog-js/dist/module.full.no-external.js";
 import {
   type ClipboardEventHandler,
   forwardRef,
@@ -48,7 +47,6 @@ import { ReferenceChip } from "@/components/ReferenceChip";
 import { StudioClassIcon } from "@/components/StudioClassIcon";
 import { MENU_LABEL, MENU_SURFACE } from "@/components/ui/menu";
 import { useComposerPrediction } from "@/hooks/useComposerPrediction";
-import { analyticsProperties } from "@/lib/analytics";
 import { canPredictDraft } from "@/lib/composerPredictions";
 import type { ExplorerNode, ExplorerReference } from "@/lib/explorer";
 import { serializeInstanceReference } from "@/lib/instanceReferences";
@@ -387,14 +385,6 @@ function TypeaheadPlugin({
             selection.insertNodes([commandText, trailingSpace]);
           }
           trailingSpace.selectEnd();
-          posthog.capture(
-            "composer_command_inserted",
-            analyticsProperties("chat", {
-              token_kind: option.kind,
-              command: option.key.replace("command:", ""),
-              completion_method: "typeahead",
-            }),
-          );
           closeMenu();
           // Commands that act on the app take no argument, so picking one runs it.
           if (CLIENT_COMMANDS.some(({ name }) => `/${name}` === option.value)) {
@@ -417,12 +407,6 @@ function TypeaheadPlugin({
           selection.insertNodes([token, trailingSpace]);
         }
         trailingSpace.selectEnd();
-        posthog.capture(
-          "composer_object_referenced",
-          analyticsProperties("chat", {
-            token_kind: option.kind,
-          }),
-        );
         closeMenu();
       }}
       menuRenderFn={(_anchor, { selectedIndex, selectOptionAndCleanUp, setHighlightedIndex }) => {

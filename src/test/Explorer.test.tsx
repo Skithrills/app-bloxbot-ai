@@ -11,7 +11,6 @@ const mocks = vi.hoisted(() => ({
   getDetails: vi.fn(),
   editObject: vi.fn(),
   notifyError: vi.fn(),
-  capture: vi.fn(),
   // Stable, as the real providers' values are: a new one each render restarts Explorer's sync.
   client: {},
   studioTarget: { selected: { key: "studio-1" } },
@@ -23,9 +22,6 @@ const mocks = vi.hoisted(() => ({
   },
 }));
 
-vi.mock("posthog-js/dist/module.full.no-external.js", () => ({
-  default: { capture: mocks.capture },
-}));
 vi.mock("@/lib/desktop", async (importOriginal) => ({
   ...(await importOriginal<typeof import("@/lib/desktop")>()),
   desktop: {
@@ -953,19 +949,14 @@ describe("Explorer", () => {
       expect(mocks.reference.referenceObject).toHaveBeenCalledWith(part);
     });
 
-    it("drags an object by its path, and counts it once it lands", async () => {
+    it("drags an object by its path", async () => {
       await startWithPart();
       const dataTransfer = { setData: vi.fn(), effectAllowed: "", dropEffect: "none" };
 
       fireEvent.dragStart(row("Part"), { dataTransfer });
       expect(dataTransfer.setData).toHaveBeenCalledWith(OBJECT_DRAG_TYPE, part.path);
 
-      const referenced = () =>
-        mocks.capture.mock.calls.filter(([event]) => event === "reference_added");
-      fireEvent.dragEnd(row("Part"), { dataTransfer });
-      expect(referenced()).toHaveLength(0);
-      fireEvent.dragEnd(row("Part"), { dataTransfer: { ...dataTransfer, dropEffect: "copy" } });
-      expect(referenced()).toHaveLength(1);
+      expect(dataTransfer.effectAllowed).toBe("copy");
     });
 
     describe("on a property row", () => {

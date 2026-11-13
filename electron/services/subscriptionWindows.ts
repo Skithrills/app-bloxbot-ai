@@ -33,29 +33,38 @@ function usageWindow(
   ];
 }
 
-/** Prefer Codex's multi-bucket view and retain the single-bucket view for older CLI versions. */
-export function codexWindows(payload: unknown): SubscriptionWindow[] {
+/** The account can have either window, both, or extra limits for individual models. */
+export function chatGptWindows(payload: unknown): SubscriptionWindow[] {
   const response = record(payload);
-  const byId = record(response?.rateLimitsByLimitId);
-  const buckets = byId && Object.keys(byId).length > 0
-    ? Object.entries(byId)
-    : [["codex", response?.rateLimits] as const];
-
-  return buckets.flatMap(([id, value]) => {
+  const bucketWindows = (id: string, name: string, value: unknown) => {
     const bucket = record(value);
-    const name = id === "codex"
-      ? ""
-      : (typeof bucket?.limitName === "string" ? bucket.limitName.trim() : "") || id;
     return ["primary", "secondary"].flatMap((kind) => {
-      const meter = record(bucket?.[kind]);
+      const meter = record(bucket?.[`${kind}_window`]);
+      const seconds = meter?.limit_window_seconds;
       const period = displayWindow(
-        meter?.windowDurationMins,
+        typeof seconds === "number" ? seconds / 60 : undefined,
         kind === "primary" ? "Primary window" : "Secondary window",
       );
-      const reset = typeof meter?.resetsAt === "number" ? meter.resetsAt * 1_000 : 0;
-      return usageWindow(`${id}/${kind}`, name ? `${name} · ${period}` : period, meter?.usedPercent, reset);
+      const reset = typeof meter?.reset_at === "number" ? meter.reset_at * 1_000 : 0;
+      return usageWindow(`${id}/${kind}`, name ? `${name} · ${period}` : period, meter?.used_percent, reset);
     });
-  });
+  };
+  const windows = new Map(
+    bucketWindows("codex", "", response?.rate_limit).map((window) => [window.id, window]),
+  );
+  const extra = response?.additional_rate_limits;
+  if (Array.isArray(extra)) {
+    for (const value of extra) {
+      const entry = record(value);
+      const id = typeof entry?.metered_feature === "string" ? entry.metered_feature.trim() : "";
+      if (!id || id === "codex") continue;
+      const name = typeof entry?.limit_name === "string" ? entry.limit_name.trim() : "";
+      for (const window of bucketWindows(id, name || id, entry?.rate_limit)) {
+        windows.set(window.id, window);
+      }
+    }
+  }
+  return [...windows.values()];
 }
 
 /** Claude Code's get_usage percentages are already on the 0–100 scale. */

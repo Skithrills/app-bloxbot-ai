@@ -5,7 +5,6 @@ const {
   discoverStudioTargets,
   selectStudioTarget,
   patchConfig,
-  capture,
   loadConfig,
   generatePrograms,
   client,
@@ -14,7 +13,6 @@ const {
   discoverStudioTargets: vi.fn(),
   selectStudioTarget: vi.fn(),
   patchConfig: vi.fn(),
-  capture: vi.fn(),
   loadConfig: vi.fn(),
   generatePrograms: vi.fn(),
   client: {},
@@ -33,10 +31,6 @@ vi.mock("@/lib/desktop", () => ({
 vi.mock("@/providers/OpenCodeClientProvider", () => ({ useOpenCodeClient: () => ({ client }) }));
 vi.mock("@/providers/ActiveSessionProvider", () => ({
   useActiveSession: () => ({ activeSessionId: activeSession.id }),
-}));
-
-vi.mock("posthog-js/dist/module.full.no-external.js", () => ({
-  default: { capture, register: vi.fn() },
 }));
 
 import { STUDIO_SETUP_STEPS } from "@/components/StudioSetup";
@@ -59,22 +53,10 @@ function renderPicker() {
 const LOBBY = { key: "one", label: "Lobby", detail: null };
 const STUCK_HEADING = "Still no Studio. Follow these steps.";
 
-function guidanceEvents() {
-  return capture.mock.calls.filter(([event]) =>
-    String(event).startsWith("studio_target_guidance_"),
-  );
-}
-
-/** Opening the picker with nothing found shows the steps too, under a different trigger. */
-function stuckEvents() {
-  return guidanceEvents().filter(([, properties]) => properties?.trigger === "repeated_refresh");
-}
-
 describe("StudioTargetPicker", () => {
   beforeEach(() => {
     discoverStudioTargets.mockReset();
     selectStudioTarget.mockReset();
-    capture.mockReset();
     patchConfig.mockReset();
     onOpenSetup.mockReset();
     activeSession.id = "chat-session";
@@ -82,7 +64,7 @@ describe("StudioTargetPicker", () => {
     generatePrograms.mockRejectedValue(new Error("generation failed"));
   });
 
-  it("auto-selects a single Studio and reports only a count bucket", async () => {
+  it("auto-selects a single Studio", async () => {
     discoverStudioTargets.mockResolvedValue({
       targets: [{ key: "private-session-id", label: "Obby", detail: "Editing" }],
       selectedKey: null,
@@ -94,16 +76,7 @@ describe("StudioTargetPicker", () => {
     renderPicker();
 
     expect(await screen.findByRole("button", { name: /Obby/ })).toBeVisible();
-    expect(capture).toHaveBeenCalledWith("studio_target_discovery_succeeded", {
-      analytics_schema_version: 1,
-      count_bucket: "1",
-      feature: "studio_target",
-      outcome: "success",
-      selected: true,
-    });
     expect(selectStudioTarget).toHaveBeenCalledWith("private-session-id");
-    expect(JSON.stringify(capture.mock.calls)).not.toContain("private-session-id");
-    expect(JSON.stringify(capture.mock.calls)).not.toContain("Obby");
   });
 
   it("moves between Studios with the arrow keys", async () => {
@@ -178,12 +151,6 @@ describe("StudioTargetPicker", () => {
     await waitFor(() =>
       expect(screen.getByRole("button", { expanded: false })).toHaveTextContent("Dungeon"),
     );
-    expect(capture).toHaveBeenCalledWith("studio_target_verification_succeeded", {
-      analytics_schema_version: 1,
-      feature: "studio_target",
-      outcome: "success",
-      selection_mode: "manual",
-    });
   });
 
   it("handles no Studios and discovery errors", async () => {
@@ -407,22 +374,10 @@ describe("StudioTargetPicker", () => {
       await refresh();
       expect(screen.queryByText(STUCK_HEADING)).toBeNull();
       expect(screen.getByText("No Studio found")).toBeVisible();
-      expect(stuckEvents()).toEqual([]);
 
       await refresh();
       expect(screen.getByText(STUCK_HEADING)).toBeVisible();
       await refresh();
-      expect(stuckEvents()).toEqual([
-        [
-          "studio_target_guidance_shown",
-          {
-            analytics_schema_version: 1,
-            feature: "studio_target",
-            status: "empty",
-            trigger: "repeated_refresh",
-          },
-        ],
-      ]);
     });
 
     it("counts failed Refreshes as nothing connected", async () => {
@@ -447,7 +402,6 @@ describe("StudioTargetPicker", () => {
       await refresh();
 
       expect(screen.queryByText(STUCK_HEADING)).toBeNull();
-      expect(stuckEvents()).toEqual([]);
     });
 
     it("doesn't open the steps while a Studio is found", async () => {
@@ -461,7 +415,6 @@ describe("StudioTargetPicker", () => {
 
       expect(screen.queryByText(STUCK_HEADING)).toBeNull();
       expect(screen.queryByText(STUDIO_SETUP_STEPS[0].description)).toBeNull();
-      expect(guidanceEvents()).toEqual([]);
     });
 
     it("starts counting again after a Refresh finds a Studio", async () => {
@@ -480,7 +433,6 @@ describe("StudioTargetPicker", () => {
       discoverStudioTargets.mockResolvedValue({ targets: [], selectedKey: null });
       await refresh();
       await refresh();
-      expect(stuckEvents()).toEqual([]);
 
       await refresh();
       expect(screen.getByText(STUCK_HEADING)).toBeVisible();
@@ -508,7 +460,7 @@ describe("StudioTargetPicker", () => {
       expect(screen.queryByText(STUCK_HEADING)).toBeNull();
     });
 
-    it("shows every setup step without being asked, and reports following them", async () => {
+    it("shows every setup step without being asked", async () => {
       discoverStudioTargets.mockResolvedValue({ targets: [], selectedKey: null });
       await openPicker(/No Studio/);
       for (const step of STUDIO_SETUP_STEPS) {
@@ -520,16 +472,6 @@ describe("StudioTargetPicker", () => {
 
       expect(onOpenSetup).toHaveBeenCalledOnce();
       // Shown once on opening, however often it renders, so following it has a showing to match.
-      expect(guidanceEvents()).toEqual([
-        [
-          "studio_target_guidance_shown",
-          expect.objectContaining({ feature: "studio_target", trigger: "empty", status: "empty" }),
-        ],
-        [
-          "studio_target_guidance_followed",
-          expect.objectContaining({ feature: "studio_target", trigger: "empty", status: "empty" }),
-        ],
-      ]);
     });
 
     it("says following came from being stuck once it has", async () => {
@@ -540,11 +482,6 @@ describe("StudioTargetPicker", () => {
       await refresh();
 
       fireEvent.click(screen.getByRole("button", { name: "Show me how" }));
-
-      expect(guidanceEvents().at(-1)).toEqual([
-        "studio_target_guidance_followed",
-        expect.objectContaining({ trigger: "repeated_refresh" }),
-      ]);
     });
 
     it("gives one clear line, not first-time steps, when this chat's place is what's closed", async () => {

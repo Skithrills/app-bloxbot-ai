@@ -43,7 +43,6 @@ export const ACCENT_COLORS = [
 ] as const;
 export const AccentColorSchema = Schema.Literal(...ACCENT_COLORS);
 export const DEFAULT_ACCENT_COLOR: AccentColor = "blue";
-export const DetailedAnalyticsPreferenceSchema = Schema.Literal("unset", "enabled", "disabled");
 const EffortControlSchema = Schema.Literal("slider", "dropdown");
 const ContextChartSchema = Schema.Literal("bar", "pie");
 const ModelCatalogOrderSchema = Schema.Literal("name", "newest");
@@ -113,9 +112,6 @@ export const AppConfigSchema = Schema.mutable(
     composerShortcuts: ComposerShortcutsSchema,
     composerPredictions: Schema.Boolean,
     audioVisualizerEnabled: Schema.Boolean,
-    detailedAnalytics: DetailedAnalyticsPreferenceSchema,
-    // Highest analytics policy notice the user has seen; 0 predates the opt-out model.
-    analyticsNoticeVersion: Schema.Number,
     studioTargetsBySession: Schema.Record({ key: Schema.String, value: StudioTargetSchema }),
     // Chats someone chose to use for work that has nothing to do with Studio.
     chatsWithoutStudio: MutableStrings,
@@ -159,8 +155,6 @@ export const DEFAULT_APP_CONFIG: AppConfig = {
   composerShortcuts: DEFAULT_COMPOSER_SHORTCUTS,
   composerPredictions: false,
   audioVisualizerEnabled: false,
-  detailedAnalytics: "unset",
-  analyticsNoticeVersion: 0,
   studioTargetsBySession: {},
   chatsWithoutStudio: [],
   chatsWithChosenPlace: [],
@@ -199,15 +193,6 @@ export type OpenCodeStartupProgress =
   | { phase: "installing" }
   | { phase: "starting" };
 
-export const InstructionFileSchema = Schema.Struct({
-  path: Schema.String,
-  scope: Schema.Literal("global", "project"),
-  chars: Schema.Number,
-  content: Schema.String,
-});
-
-export type InstructionFile = typeof InstructionFileSchema.Type;
-
 /**
  * Whether BloxBot could start Roblox Studio's MCP helper. `not_installed` means Studio isn't on
  * this computer, `helper_missing` that Studio is but hasn't installed its helper yet, and
@@ -218,14 +203,6 @@ export const StudioMcpStatusSchema = Schema.Struct({
 });
 
 export type StudioMcpStatus = typeof StudioMcpStatusSchema.Type;
-
-/** A main-process error forwarded to the renderer, which reports it through PostHog. */
-export interface MainErrorReport {
-  source: string;
-  name: string;
-  message: string;
-  stack?: string;
-}
 
 export const SystemNotificationSchema = Schema.Struct({
   id: Schema.String,
@@ -263,7 +240,6 @@ export interface DesktopApi {
   getStudioMcpStatus(): Promise<StudioMcpStatus>;
   onOpenCodeStartupProgress(listener: (progress: OpenCodeStartupProgress) => void): () => void;
   getVersion(): Promise<string>;
-  getInstructionFiles(): Promise<readonly InstructionFile[]>;
   /** BloxBot's AGENTS.md, which is empty until the user writes something. */
   readInstructions(): Promise<string>;
   saveInstructions(text: string): Promise<void>;
@@ -308,7 +284,6 @@ export interface DesktopApi {
    * Receives errors from the main process so the renderer can report them. Subscribing
    * tells the main process the window is ready, which flushes errors buffered until then.
    */
-  onMainError(listener: (report: MainErrorReport) => void): () => void;
 }
 
 export type UploadAccessState =

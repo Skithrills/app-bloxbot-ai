@@ -1,6 +1,4 @@
 import { useMutation, useQueryClient } from "@tanstack/react-query";
-import posthog from "posthog-js/dist/module.full.no-external.js";
-import { analyticsProperties, errorAnalyticsProperties } from "@/lib/analytics";
 import type { Session } from "@/lib/opencode/types";
 import { qk } from "@/lib/queryKeys";
 import { useActiveSession } from "@/providers/ActiveSessionProvider";
@@ -30,12 +28,6 @@ export function useArchiveSession() {
       if (activeSessionId === session.id) {
         clearSession();
       }
-      posthog.capture("session_snoozed", analyticsProperties("sessions", { outcome: "success" }));
     },
-    onError: (error) =>
-      posthog.capture(
-        "session_snooze_failed",
-        errorAnalyticsProperties("sessions", "snooze", error),
-      ),
   });
 }

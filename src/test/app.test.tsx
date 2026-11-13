@@ -5,7 +5,6 @@
 
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
-import posthog from "posthog-js/dist/module.full.no-external.js";
 import { type ReactNode, useRef } from "react";
 import { toast } from "sonner";
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
@@ -264,8 +263,6 @@ function seedReadyState(
   queryClient: QueryClient,
   opts: {
     sessions?: Session[];
-    detailedAnalytics?: "unset" | "enabled" | "disabled";
-    analyticsNoticeVersion?: number;
   } = {},
 ) {
   const sessions = opts.sessions ?? [];
@@ -294,8 +291,6 @@ function seedReadyState(
     lastModel: "anthropic/claude-3.5-sonnet",
     hiddenModels: [],
     theme: "system",
-    detailedAnalytics: opts.detailedAnalytics ?? "disabled",
-    analyticsNoticeVersion: opts.analyticsNoticeVersion ?? 2,
   });
 }
 
@@ -317,106 +312,25 @@ describe("User journeys", () => {
   // Settings loads on first open, and on a slow machine that outlasts findBy's wait.
   beforeAll(() => import("@/components/Settings"), 60_000);
 
-  it("enables usage metrics by default, notifies once, and keeps opting out toggleable", async () => {
-    const client = createClient();
+  it("shows the fork privacy policy without an analytics switch", async () => {
     const queryClient = createQueryClient();
-    // An old clickaway ("disabled" without a notice version) does not carry over.
-    seedReadyState(queryClient, { detailedAnalytics: "disabled", analyticsNoticeVersion: 0 });
-
-    render(<TestApp client={client} queryClient={queryClient} />);
-
-    const noticeTitle = await screen.findByText("BloxBot shares AI usage data");
-    expect(noticeTitle).toBeVisible();
-    expect(noticeTitle.closest("[data-sonner-toast]")).toHaveClass("card-toast");
-    await expect(desktop.loadConfig()).resolves.toMatchObject({
-      detailedAnalytics: "enabled",
-      analyticsNoticeVersion: 2,
-    });
-    fireEvent.click(screen.getByRole("button", { name: "Got it" }));
+    seedReadyState(queryClient);
+    render(<TestApp client={createClient()} queryClient={queryClient} />);
 
     fireEvent.click(await screen.findByText("Settings"));
     fireEvent.click(await screen.findByRole("button", { name: "Privacy" }));
-    const analyticsSwitch = screen.getByRole("switch", {
-      name: "Share AI usage data",
-    });
-    expect(analyticsSwitch).toHaveAttribute("aria-checked", "true");
-
-    fireEvent.click(analyticsSwitch);
-
-    expect(analyticsSwitch).toHaveAttribute("aria-checked", "false");
-    await expect(desktop.loadConfig()).resolves.toMatchObject({ detailedAnalytics: "disabled" });
-  });
-
-  it("keeps an earlier opt-out without showing the AI usage notice", async () => {
-    const client = createClient();
-    const queryClient = createQueryClient();
-    seedReadyState(queryClient, { detailedAnalytics: "disabled", analyticsNoticeVersion: 1 });
-
-    render(<TestApp client={client} queryClient={queryClient} />);
-
-    await waitFor(() =>
-      expect(desktop.loadConfig()).resolves.toMatchObject({ analyticsNoticeVersion: 2 }),
-    );
-    expect(screen.queryByText("BloxBot shares AI usage data")).not.toBeInTheDocument();
-    await expect(desktop.loadConfig()).resolves.toMatchObject({
-      detailedAnalytics: "disabled",
-      analyticsNoticeVersion: 2,
-    });
-  });
-
-  it("respects a recorded opt-out without renotifying", async () => {
-    const client = createClient();
-    const queryClient = createQueryClient();
-    seedReadyState(queryClient, { detailedAnalytics: "disabled", analyticsNoticeVersion: 2 });
-
-    render(<TestApp client={client} queryClient={queryClient} />);
-
-    fireEvent.click(await screen.findByText("Settings"));
-    fireEvent.click(await screen.findByRole("button", { name: "Privacy" }));
-    expect(screen.queryByText("BloxBot shares AI usage data")).not.toBeInTheDocument();
-    expect(screen.getByRole("link", { name: "Privacy Policy" })).toHaveAttribute(
-      "href",
-      "https://bloxbot.ai/privacy?utm_source=bloxbot&utm_medium=desktop_app&utm_campaign=app_links&utm_content=privacy",
-    );
-    expect(screen.getByRole("link", { name: "Terms of Service" })).toHaveAttribute(
-      "href",
-      "https://bloxbot.ai/terms?utm_source=bloxbot&utm_medium=desktop_app&utm_campaign=app_links&utm_content=privacy",
-    );
-    expect(screen.getByRole("switch", { name: "Share AI usage data" })).toHaveAttribute(
-      "aria-checked",
-      "false",
-    );
-  });
-
-  it("shows the device ID to quote in a data request", async () => {
-    const loaded = vi.spyOn(posthog, "__loaded", "get").mockReturnValue(true);
-    const distinctId = vi.spyOn(posthog, "get_distinct_id").mockReturnValue("device-123");
-    const queryClient = createQueryClient();
-    seedReadyState(queryClient, { detailedAnalytics: "disabled", analyticsNoticeVersion: 2 });
-
-    try {
-      render(<TestApp client={createClient()} queryClient={queryClient} />);
-
-      fireEvent.click(await screen.findByText("Settings"));
-      fireEvent.click(await screen.findByRole("button", { name: "Privacy" }));
-      expect(screen.getByText("device-123")).toBeInTheDocument();
-      expect(screen.getByText("support@bloxbot.ai")).toBeInTheDocument();
-    } finally {
-      loaded.mockRestore();
-      distinctId.mockRestore();
-    }
+    expect(screen.getByText(/This fork does not send app analytics/)).toBeVisible();
+    expect(screen.queryByRole("switch", { name: "Share AI usage data" })).not.toBeInTheDocument();
   });
 
   it("links to Paralov, Studs.gg and the legal pages from About", async () => {
     const queryClient = createQueryClient();
-    seedReadyState(queryClient, { detailedAnalytics: "disabled", analyticsNoticeVersion: 2 });
+    seedReadyState(queryClient);
 
     render(<TestApp client={createClient()} queryClient={queryClient} />);
 
     fireEvent.click(await screen.findByText("Settings"));
     fireEvent.click(await screen.findByRole("button", { name: "About" }));
-    const utm =
-      "?utm_source=bloxbot&utm_medium=desktop_app&utm_campaign=app_links&utm_content=about";
     for (const [name, url] of [
       ["Website", "https://bloxbot.ai/"],
       ["Paralov", "https://paralov.com/"],
@@ -424,7 +338,7 @@ describe("User journeys", () => {
       ["Privacy Policy", "https://bloxbot.ai/privacy"],
       ["Terms of Service", "https://bloxbot.ai/terms"],
     ]) {
-      expect(screen.getByRole("link", { name })).toHaveAttribute("href", `${url}${utm}`);
+      expect(screen.getByRole("link", { name })).toHaveAttribute("href", url);
     }
   });
 
@@ -1317,7 +1231,7 @@ describe("User journeys", () => {
     expect(await screen.findByRole("complementary", { name: "Context window" })).toBeVisible();
   });
 
-  it("uses the last actual model or the selected model for the composer subscription meter", async () => {
+  it("keeps the ChatGPT quota in the title bar when switching chats and models", async () => {
     const codexChat = makeSession("codex-context", "Codex chat");
     const newChat = makeSession("new-context", "Unsent chat");
     const client = createClient({
@@ -1367,26 +1281,30 @@ describe("User journeys", () => {
           connected: [...providers.connected, "openai-oauth"],
         },
     );
-    render(<TestApp client={client} queryClient={queryClient} />);
+    render(
+      <TestApp client={client} queryClient={queryClient}>
+        <div id="titlebar-actions" />
+      </TestApp>,
+    );
 
     fireEvent.click(await screen.findByText(codexChat.title));
     const quota = await screen.findByRole("button", {
-      name: /BloxBot ChatGPT connection.*Weekly.*65% left/,
+      name: "ChatGPT subscription usage · Weekly · 65% left",
     });
     expect(readUsage).toHaveBeenCalledWith("codex");
     fireEvent.click(quota);
-    const panel = within(await screen.findByRole("complementary", { name: "Context window" }));
+    const panel = within(await screen.findByRole("dialog", { name: "ChatGPT subscription usage" }));
     expect(panel.getByText("85% left")).toBeVisible();
     expect(panel.getByText("65% left")).toBeVisible();
 
     fireEvent.click(screen.getByText(newChat.title));
     expect(await screen.findByRole("button", { name: "Context and usage" })).toBeVisible();
-    expect(screen.queryByRole("button", { name: /65% left/ })).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /Weekly.*65% left/ })).toBeVisible();
 
     fireEvent.click(screen.getByRole("button", { name: /Claude 3\.5 Sonnet/ }));
     fireEvent.click(await screen.findByRole("button", { name: /GPT-6\.1 Sol/ }));
     expect(
-      await screen.findByRole("button", { name: /BloxBot ChatGPT connection.*65% left/ }),
+      await screen.findByRole("button", { name: /ChatGPT subscription usage.*65% left/ }),
     ).toBeVisible();
   });
 

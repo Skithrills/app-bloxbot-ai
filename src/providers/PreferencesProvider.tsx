@@ -12,10 +12,6 @@ import {
 import { useSaveModelSettings } from "@/hooks/mutations/useSaveModelSettings";
 import { useProviderList } from "@/hooks/useProviders";
 import { useSessions } from "@/hooks/useSessions";
-import {
-  ANALYTICS_NOTICE_VERSION,
-  setDetailedAnalyticsEnabled as setDetailedAnalyticsCollection,
-} from "@/lib/analytics";
 import { type ComposerShortcuts, DEFAULT_COMPOSER_SHORTCUTS } from "@/lib/composerDelivery";
 import { type AppConfig, loadConfig, patchConfig } from "@/lib/config";
 import {
@@ -65,7 +61,6 @@ interface PreferencesContextValue {
   paidDefaultModel: string | null;
   /** Models refused in the user's region. */
   unavailableModels: Set<string>;
-  detailedAnalyticsEnabled: boolean;
   setSelectedModel: (modelID: string, variant?: string | null) => void;
   setSelectedVariant: (variant: string | null) => void;
   setModelCatalogOrder: (order: ModelCatalogOrder) => void;
@@ -76,7 +71,6 @@ interface PreferencesContextValue {
   setPaidDefaultModel: (key: string | null) => void;
   toggleModelVisibility: (modelKey: string) => void;
   markModelUnavailable: (modelKey: string) => void;
-  setDetailedAnalyticsEnabled: (enabled: boolean) => void;
   notifications: NotificationPreferences;
   setNotificationKind: (kind: keyof NotificationKinds, enabled: boolean) => void;
   setNotificationSound: (enabled: boolean) => void;
@@ -131,8 +125,6 @@ export function PreferencesProvider({ children }: { children: ReactNode }) {
   // The regional error card lets the user switch during this launch.
   const recentlyUnavailable = useRef(new Set<string>());
   const reportedReplacement = useRef(new Map<string | null, string>());
-  const [detailedAnalyticsEnabled, setDetailedAnalyticsEnabledState] = useState(false);
-  const detailedAnalyticsEnabledRef = useRef(false);
 
   const [notifications, setNotifications] = useState<NotificationPreferences>(() => ({
     kinds: kindsFromConfig(null),
@@ -252,67 +244,12 @@ export function PreferencesProvider({ children }: { children: ReactNode }) {
     [saveNotifications],
   );
 
-  const setDetailedAnalyticsEnabled = useCallback((enabled: boolean) => {
-    const previous = detailedAnalyticsEnabledRef.current;
-    detailedAnalyticsEnabledRef.current = enabled;
-    setDetailedAnalyticsEnabledState(enabled);
-    setDetailedAnalyticsCollection(enabled);
-    patchConfig({ detailedAnalytics: enabled ? "enabled" : "disabled" }).catch(() => {
-      detailedAnalyticsEnabledRef.current = previous;
-      setDetailedAnalyticsEnabledState(previous);
-      setDetailedAnalyticsCollection(previous);
-    });
-  }, []);
-
-  // Initialize from config data when it arrives and notify once about opt-out metrics.
   useEffect(() => {
     if (!configData) return;
     const loaded = { kinds: kindsFromConfig(configData), sound: configData.notificationSound };
     notificationsRef.current = loaded;
     applyNotifications(loaded);
-
-    // Model usage metrics moved from opt-in to opt-out in notice version 1. Choices
-    // recorded under the old consent prompt (including clickaways) do not carry
-    // over; opt-outs made since then do and skip the notice, since nothing is sent.
-    // The notice stays short; Settings → Privacy lists everything that is shared.
-    if (configData.analyticsNoticeVersion < ANALYTICS_NOTICE_VERSION) {
-      const enabled =
-        configData.analyticsNoticeVersion < 1 || configData.detailedAnalytics !== "disabled";
-      detailedAnalyticsEnabledRef.current = enabled;
-      setDetailedAnalyticsEnabledState(enabled);
-      setDetailedAnalyticsCollection(enabled);
-      if (enabled) {
-        notify.message("BloxBot shares AI usage data", {
-          name: "analytics_notice",
-          id: "analytics-optout-notice",
-          className: "card-toast",
-          description:
-            "Your chats and tool activity help improve BloxBot. Details in Settings → Privacy.",
-          duration: Number.POSITIVE_INFINITY,
-          action: {
-            label: "Got it",
-            onClick: () => {},
-          },
-          cancel: {
-            label: "Disable",
-            onClick: () => setDetailedAnalyticsEnabled(false),
-          },
-        });
-      }
-      // Persist only after the notice is on screen, so a failure to show it
-      // leaves the version behind and the notice fires again next launch.
-      patchConfig({
-        detailedAnalytics: enabled ? "enabled" : "disabled",
-        analyticsNoticeVersion: ANALYTICS_NOTICE_VERSION,
-      }).catch(() => {});
-      return;
-    }
-
-    const detailedEnabled = configData.detailedAnalytics !== "disabled";
-    detailedAnalyticsEnabledRef.current = detailedEnabled;
-    setDetailedAnalyticsEnabledState(detailedEnabled);
-    setDetailedAnalyticsCollection(detailedEnabled);
-  }, [applyNotifications, configData, setDetailedAnalyticsEnabled]);
+  }, [applyNotifications, configData]);
 
   const saveModelChoice = useCallback(
     (sessionID: string | null, choice: ChatModelSelection, updateDefault: boolean) => {
@@ -472,7 +409,6 @@ export function PreferencesProvider({ children }: { children: ReactNode }) {
       savingModelSettings,
       paidDefaultModel,
       unavailableModels,
-      detailedAnalyticsEnabled,
       notifications,
       setSelectedModel,
       setSelectedVariant,
@@ -484,7 +420,6 @@ export function PreferencesProvider({ children }: { children: ReactNode }) {
       setPaidDefaultModel,
       toggleModelVisibility,
       markModelUnavailable,
-      setDetailedAnalyticsEnabled,
       setNotificationKind,
       setNotificationSound,
     }),
@@ -501,7 +436,6 @@ export function PreferencesProvider({ children }: { children: ReactNode }) {
       savingModelSettings,
       paidDefaultModel,
       unavailableModels,
-      detailedAnalyticsEnabled,
       notifications,
       setSelectedModel,
       setSelectedVariant,
@@ -513,7 +447,6 @@ export function PreferencesProvider({ children }: { children: ReactNode }) {
       setPaidDefaultModel,
       toggleModelVisibility,
       markModelUnavailable,
-      setDetailedAnalyticsEnabled,
       setNotificationKind,
       setNotificationSound,
     ],

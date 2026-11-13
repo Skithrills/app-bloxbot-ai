@@ -1,5 +1,4 @@
 import { Bot, Boxes, ChartPie, Play } from "lucide-react";
-import posthog from "posthog-js/dist/module.full.no-external.js";
 import {
   type CSSProperties,
   lazy,
@@ -36,6 +35,7 @@ import SubagentDrawer, {
   SUBAGENT_LIST_TITLE_ID,
   SUBAGENT_ROW_ID_PREFIX,
 } from "@/components/SubagentDrawer";
+import { ChatGptUsageControl } from "@/components/SubscriptionUsage";
 import { MENU_TRIGGER } from "@/components/ui/menu";
 import { useCreateSession } from "@/hooks/mutations/useCreateSession";
 import { useChatContext } from "@/hooks/useChatContext";
@@ -44,7 +44,6 @@ import { useChatStudioUse } from "@/hooks/useMessages";
 import { useSessionStatus } from "@/hooks/useSessionStatuses";
 import { useSessions } from "@/hooks/useSessions";
 import { useStudioConnection } from "@/hooks/useStudioConnection";
-import { analyticsProperties, POSTHOG_PROJECT_TOKEN } from "@/lib/analytics";
 import { desktop } from "@/lib/desktop";
 import { setChatOnScreen, setSessionOpener } from "@/lib/sessionNotifications";
 import { subagentsForSession } from "@/lib/sessionVisibility";
@@ -260,7 +259,6 @@ function Chat() {
     setFocusComposer(true);
     startFirstChat();
     focusWhatsNext();
-    posthog.capture("studio_setup_skipped", analyticsProperties("studio_target"));
     void desktop.patchConfig({ studioSetupSkipped: true });
   }, [focusWhatsNext, startFirstChat]);
   // Setup is for getting started. Once connected, Studio closing mustn't take over someone's chat.
@@ -312,19 +310,6 @@ function Chat() {
             : activeSessionId
               ? "chat"
               : "home";
-
-  useEffect(() => {
-    if (!import.meta.env.PROD || !POSTHOG_PROJECT_TOKEN) return;
-
-    const screenProperties = {
-      $current_url: `bloxbot://app/${appScreen}`,
-      $host: "app",
-      $pathname: `/${appScreen}`,
-      app_screen: appScreen,
-    };
-    posthog.register(screenProperties);
-    posthog.capture("$pageview", analyticsProperties("navigation", screenProperties));
-  }, [appScreen]);
 
   useEffect(() => {
     setChatOnScreen(appScreen === "chat");
@@ -447,7 +432,6 @@ function Chat() {
   }, [renderedSidePanel, sidePanelExiting]);
   const handleToggleExplorer = useCallback(() => {
     if (showPlaytest) {
-      posthog.capture("playtest_closed", analyticsProperties("playtest"));
       setShowPlaytest(false);
       explorerOpenedByHand.current = true;
       setExplorerChoice(true);
@@ -465,13 +449,11 @@ function Chat() {
   }, [showPlaytest, subagentsOpen, setSubagentsOpen, explorerCollapsed, setExplorerChoice]);
   const handleOpenPlaytest = useCallback(() => {
     if (!hasStudioTarget) return;
-    posthog.capture("playtest_opened", analyticsProperties("playtest"));
     setContextSessionID(null);
     setSubagentsOpen(false);
     setShowPlaytest(true);
   }, [hasStudioTarget, setSubagentsOpen]);
   const handleClosePlaytest = useCallback(() => {
-    posthog.capture("playtest_closed", analyticsProperties("playtest"));
     setShowPlaytest(false);
   }, []);
   const handleCloseContext = useCallback(() => {
@@ -644,6 +626,7 @@ function Chat() {
                 <ChartPie aria-hidden="true" size={14} />
                 <span className="max-[680px]:sr-only">Context</span>
               </button>
+              <ChatGptUsageControl />
             </>,
             titlebarActions,
           )

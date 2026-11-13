@@ -5,7 +5,6 @@ import { MENU_TRIGGER } from "@/components/ui/menu";
 import type { ChatContext } from "@/hooks/useChatContext";
 import {
   formatSubscriptionPercentLeft,
-  subscriptionPercentLeft,
   subscriptionUsageSourceLabel,
 } from "@/hooks/useSubscriptionUsage";
 import { type AppConfig, loadConfig, patchConfig } from "@/lib/config";
@@ -158,24 +157,13 @@ export function ContextControl({
   expanded: boolean;
   onToggle: MouseEventHandler<HTMLButtonElement>;
 }) {
-  const { context, limit, subscription } = value;
-  const windows = subscription.usage?.windows ?? [];
-  const tightestWindow = windows.reduce<(typeof windows)[number] | undefined>(
-    (lowest, reading) => (!lowest || reading.usedPercent > lowest.usedPercent ? reading : lowest),
-    undefined,
-  );
+  const { context, limit } = value;
   const count = contextSegments(context.data).reduce((sum, segment) => sum + segment.count, 0);
-  const ratio = tightestWindow
-    ? subscriptionPercentLeft(tightestWindow.usedPercent) / 100
-    : limit && count > 0
-      ? count / limit
-      : undefined;
+  const ratio = limit && count > 0 ? count / limit : undefined;
   const usageLabel =
-    tightestWindow && subscription.usage
-      ? `${subscriptionUsageSourceLabel(subscription.usage.source)} · ${tightestWindow.label} · ${formatSubscriptionPercentLeft(tightestWindow.usedPercent)} left${subscription.isPreviousReading ? " · Previous reading" : ""}`
-      : ratio === undefined
-        ? "Context window"
-        : `Context window · ${percent.format(ratio)} used${context.isError ? " · Previous reading" : ""}`;
+    ratio === undefined
+      ? "Context window"
+      : `Context window · ${percent.format(ratio)} used${context.isError ? " · Previous reading" : ""}`;
   return (
     <button
       type="button"
@@ -202,9 +190,6 @@ export function ContextControl({
             strokeLinecap="round"
             strokeDasharray={`${Math.min(1, Math.max(0, ratio)) * 100} 100`}
             strokeOpacity={ratio > 0 ? 1 : 0}
-            className={
-              tightestWindow && !subscription.isPreviousReading ? "text-primary" : undefined
-            }
           />
         )}
       </svg>

@@ -1,10 +1,8 @@
 import { useQueryClient } from "@tanstack/react-query";
-import posthog from "posthog-js/dist/module.full.no-external.js";
 import { useMemo } from "react";
 import { useCreateSession } from "@/hooks/mutations/useCreateSession";
 import { useCommands } from "@/hooks/useCommands";
 import { fetchMessages } from "@/hooks/useMessages";
-import { analyticsProperties } from "@/lib/analytics";
 import { notify } from "@/lib/notifications";
 import type { Session } from "@/lib/opencode/types";
 import { CLIENT_COMMANDS, mergeCommands, parseSlashCommand } from "@/lib/promptSuggestions";
@@ -16,8 +14,6 @@ import { useActiveSession } from "@/providers/ActiveSessionProvider";
 import { useOpenCodeClient } from "@/providers/OpenCodeClientProvider";
 import { usePreferences } from "@/providers/PreferencesProvider";
 import { useStudioTargetOptional } from "@/providers/StudioTargetProvider";
-
-const BUILT_IN = new Set(["init", "review", "goal", ...CLIENT_COMMANDS.map(({ name }) => name)]);
 
 /** Failed commands report status too, like what a bare /goal says about the current goal. */
 function isCommandReport(error: unknown): error is Error {
@@ -208,13 +204,6 @@ export function useComposerCommands(actions: {
     const isClient = CLIENT_COMMANDS.some(({ name }) => name === parsed.name);
     if (!isClient && !catalog.some(({ name }) => name === parsed.name)) return false;
 
-    posthog.capture(
-      "composer_command_run",
-      analyticsProperties("chat", {
-        command: BUILT_IN.has(parsed.name) ? parsed.name : "custom",
-        runs_in: isClient ? "client" : "server",
-      }),
-    );
     const running = isClient
       ? runClientCommand(parsed.name, activeSessionId)
       : runServerCommand(

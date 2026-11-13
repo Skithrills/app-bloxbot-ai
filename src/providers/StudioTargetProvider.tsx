@@ -1,4 +1,3 @@
-import posthog from "posthog-js/dist/module.full.no-external.js";
 import {
   createContext,
   type ReactNode,
@@ -9,12 +8,6 @@ import {
   useRef,
   useState,
 } from "react";
-import {
-  analyticsProperties,
-  detailedAnalyticsProperties,
-  errorAnalyticsProperties,
-  setStudioAnalyticsContext,
-} from "@/lib/analytics";
 import { desktop } from "@/lib/desktop";
 import { useActiveSession } from "@/providers/ActiveSessionProvider";
 import { useOpenCodeClient } from "@/providers/OpenCodeClientProvider";
@@ -95,17 +88,6 @@ interface StudioTargetContextValue {
 }
 
 const StudioTargetContext = createContext<StudioTargetContextValue | null>(null);
-
-function countBucket(count: number): "0" | "1" | "2-4" | "5+" {
-  if (count === 0) return "0";
-  if (count === 1) return "1";
-  if (count < 5) return "2-4";
-  return "5+";
-}
-
-function discoveredPlaceIds(targets: readonly StudioTarget[]): string[] {
-  return [...new Set(targets.flatMap((target) => (target.placeId ? [target.placeId] : [])))];
-}
 
 /**
  * How long a selected Studio can be missing from the list before it counts as closed. Studio's
@@ -198,7 +180,6 @@ export function StudioTargetProvider({ children }: { children: ReactNode }) {
   const verifiedKeyRef = useRef<string | null>(null);
   // Only what discovery itself got wrong clears when discovery next works.
   const errorSourceRef = useRef<"discovery" | "select" | null>(null);
-  const lastDiscoveryReportRef = useRef<string | null>(null);
   const targetsBySessionRef = useRef<Record<string, StudioTarget>>({});
   const recordedTarget = useCallback(
     (sessionID: string) =>
@@ -318,11 +299,6 @@ export function StudioTargetProvider({ children }: { children: ReactNode }) {
       goneRef.current = null;
       setReconnecting(false);
       showTargets();
-      const selectionMode = nextSelected
-        ? nextSelected.key === remembered?.key
-          ? "session_id_match"
-          : "place_id_match"
-        : "automatic";
       // Once is enough for a Studio this run of the app has already checked: this runs every few
       // seconds, and repeating it would keep disabling the picker and rewriting the config.
       if (
@@ -346,19 +322,11 @@ export function StudioTargetProvider({ children }: { children: ReactNode }) {
         const onlyTarget = result.targets[0];
         selectedRef.current = onlyTarget;
         setSelectingKey(onlyTarget.key);
-        posthog.capture("studio_target_selected", analyticsProperties("studio_target"));
         const selection = await desktop.selectStudioTarget(onlyTarget.key);
         if (operation !== operationRef.current) return;
         if (!selection.verified) throw new Error("Target verification failed");
         nextSelected = selection.selected;
         verifiedKeyRef.current = nextSelected.key;
-        posthog.capture(
-          "studio_target_verification_succeeded",
-          analyticsProperties("studio_target", {
-            outcome: "success",
-            selection_mode: selectionMode,
-          }),
-        );
         setSelectingKey(null);
       }
       // Kept current, since a place can be renamed or published while it's open, and the next reopen
@@ -379,26 +347,6 @@ export function StudioTargetProvider({ children }: { children: ReactNode }) {
       setStatus(result.targets.length === 0 ? "empty" : "ready");
       // A selection this replaced was left mid-way, and nothing else will finish it.
       if (!selectingRef.current) setSelectingKey(null);
-      // This runs every few seconds, so only a change is worth reporting.
-      const discoveryReport = JSON.stringify([
-        nextSelected?.key ?? null,
-        result.targets.map((target) => [target.key, target.placeId ?? null]),
-      ]);
-      if (discoveryReport === lastDiscoveryReportRef.current) return;
-      lastDiscoveryReportRef.current = discoveryReport;
-      posthog.capture(
-        "studio_target_discovery_succeeded",
-        analyticsProperties("studio_target", {
-          outcome: "success",
-          count_bucket: countBucket(result.targets.length),
-          selected: nextSelected !== null,
-          ...detailedAnalyticsProperties({
-            roblox_place_id: nextSelected?.placeId ?? undefined,
-            roblox_discovered_place_ids: discoveredPlaceIds(result.targets),
-            roblox_studio_count: result.targets.length,
-          }),
-        }),
-      );
     },
     [activeSessionId, rememberTarget],
   );
@@ -429,16 +377,10 @@ export function StudioTargetProvider({ children }: { children: ReactNode }) {
           // With a Studio in use, one check that didn't get through is usually a blip that the next
           // one gets past, so it takes two in a row to warn about it.
           const blip = discoveryFailuresRef.current < 2 && selectedRef.current !== null;
-          const alreadyReported = errorSourceRef.current === "discovery";
           if (!blip) {
             errorSourceRef.current = "discovery";
             setError(message);
           }
-          if (!blip && !alreadyReported)
-            posthog.capture(
-              "studio_target_discovery_failed",
-              errorAnalyticsProperties("studio_target", "discovery", discoveryError),
-            );
         }
       }
       return targetsRef.current.length;
@@ -457,10 +399,6 @@ export function StudioTargetProvider({ children }: { children: ReactNode }) {
       setSelectingKey(target.key);
       errorSourceRef.current = null;
       setError(null);
-      posthog.capture(
-        "studio_target_selected",
-        analyticsProperties("studio_target", { selection_mode: "manual" }),
-      );
       try {
         const result = await desktop.selectStudioTarget(target.key);
         if (!result.verified) throw new Error("Target verification failed");
@@ -490,21 +428,11 @@ export function StudioTargetProvider({ children }: { children: ReactNode }) {
             : [...current, result.selected],
         );
         setStatus("ready");
-        posthog.capture(
-          "studio_target_verification_succeeded",
-          analyticsProperties("studio_target", { outcome: "success", selection_mode: "manual" }),
-        );
         return true;
-      } catch (error) {
+      } catch {
         if (operation !== operationRef.current) return false;
         errorSourceRef.current = "select";
         setError("That Studio window is no longer available. Refresh and choose another.");
-        posthog.capture(
-          "studio_target_verification_failed",
-          errorAnalyticsProperties("studio_target", "verification", error, {
-            selection_mode: "manual",
-          }),
-        );
         return false;
       } finally {
         // By the latest selection, not the latest operation: switching chats starts a newer one,
@@ -626,20 +554,6 @@ export function StudioTargetProvider({ children }: { children: ReactNode }) {
     },
     [activeSessionId, discover, rememberTarget],
   );
-
-  // AI traces attach the Studio place the prompt was routed to.
-  useEffect(() => {
-    setStudioAnalyticsContext(
-      selected || targets.length > 0
-        ? {
-            placeId: selected?.placeId ?? null,
-            placeName: selected?.label ?? null,
-            discoveredPlaceIds: discoveredPlaceIds(targets),
-            discoveredCount: targets.length,
-          }
-        : null,
-    );
-  }, [selected, targets]);
 
   useEffect(() => {
     if (!client || !activeSessionId) {

@@ -1,37 +1,14 @@
-import posthog from "posthog-js/dist/module.full.no-external.js";
 import { useState } from "react";
 import { useGeneratePlaytestPlan } from "@/hooks/mutations/useGeneratePlaytestPlan";
 import { useSendMessage } from "@/hooks/mutations/useSendMessage";
 import { useHasPlaytestContext } from "@/hooks/useMessages";
-import {
-  analyticsProperties,
-  detailedAnalyticsProperties,
-  errorAnalyticsProperties,
-} from "@/lib/analytics";
 import { notify } from "@/lib/notifications";
 import {
   formatPlaytestPrompt,
-  InvalidPlaytestPlanError,
   NoPlaytestContextError,
   type PlaytestPlan,
-  PlaytestPlannerError,
-  PlaytestRequestError,
 } from "@/lib/playtestPlan";
-import { splitModelKey } from "@/lib/splitModelKey";
-import { usePreferences } from "@/providers/PreferencesProvider";
 import { useStudioTargetOptional } from "@/providers/StudioTargetProvider";
-
-function generationErrorCategory(error: unknown): string {
-  if (!(error instanceof Error)) return "unknown";
-  if (error instanceof PlaytestPlannerError) return "model_error";
-  if (error instanceof NoPlaytestContextError) return "no_chat_context";
-  if (error instanceof InvalidPlaytestPlanError) return "invalid_plan";
-  if (error.message.includes("invalid") || error.message.includes("incomplete")) {
-    return "invalid_plan";
-  }
-  if (error.message.includes("start")) return "planner_start_failed";
-  return "generation_failed";
-}
 
 function ListEditor({
   label,
@@ -85,68 +62,25 @@ export default function PlaytestPanel({ onClose }: { onClose: () => void }) {
   const generate = useGeneratePlaytestPlan();
   const studioTarget = useStudioTargetOptional();
   const sendMessage = useSendMessage();
-  const { selectedModel } = usePreferences();
   const [plan, setPlan] = useState<PlaytestPlan | null>(null);
   // Undefined while the chat's messages load: generate stays off without the note.
   const hasContext = useHasPlaytestContext();
   const canGenerate = hasContext === true;
 
-  const [provider, model] = selectedModel ? splitModelKey(selectedModel) : [undefined, undefined];
-
   function writeOwnPlan() {
-    posthog.capture("manual_entry_selected", analyticsProperties("playtest"));
     setPlan({ goal: "", steps: [""], watchFor: [""], successCriteria: [""] });
   }
 
   async function generatePlan() {
     if (!canGenerate) return;
-    const startedAt = performance.now();
-    posthog.capture(
-      "generation_started",
-      analyticsProperties("playtest", detailedAnalyticsProperties({ provider, model })),
-    );
     try {
-      const { plan: generatedPlan, attempts } = await generate.mutateAsync();
+      const { plan: generatedPlan } = await generate.mutateAsync();
       setPlan(generatedPlan);
-      posthog.capture(
-        "generation_succeeded",
-        analyticsProperties("playtest", {
-          attempts,
-          ...detailedAnalyticsProperties({
-            outcome: "success",
-            provider,
-            model,
-            duration_ms: Math.round(performance.now() - startedAt),
-            step_count: generatedPlan.steps.length,
-            watch_for_count: generatedPlan.watchFor.length,
-            success_criteria_count: generatedPlan.successCriteria.length,
-          }),
-        }),
-      );
     } catch (error) {
       if (error instanceof NoPlaytestContextError) {
         notify.error("Couldn't create a playtest plan", { description: error.message });
         return;
       }
-      posthog.capture(
-        "generation_failed",
-        errorAnalyticsProperties("playtest", "plan_generation", error, {
-          ...(error instanceof PlaytestPlannerError ||
-          error instanceof InvalidPlaytestPlanError ||
-          error instanceof PlaytestRequestError
-            ? { attempts: error.attempts }
-            : {}),
-          ...detailedAnalyticsProperties({
-            provider,
-            model,
-            duration_ms: Math.round(performance.now() - startedAt),
-            error_category: generationErrorCategory(error),
-            ...(error instanceof PlaytestPlannerError
-              ? { model_error_name: error.modelErrorName }
-              : {}),
-          }),
-        }),
-      );
       notify.error("Couldn't create a playtest plan", {
         description: error instanceof Error ? error.message : "Try again.",
       });
@@ -168,19 +102,6 @@ export default function PlaytestPanel({ onClose }: { onClose: () => void }) {
       notify.error(studioTarget.sendBlock ?? "Choose a Studio first.");
       return;
     }
-    posthog.capture(
-      "playtest_started",
-      analyticsProperties(
-        "playtest",
-        detailedAnalyticsProperties({
-          provider,
-          model,
-          step_count: plan.steps.length,
-          watch_for_count: plan.watchFor.length,
-          success_criteria_count: plan.successCriteria.length,
-        }),
-      ),
-    );
     studioTarget?.noteRouted?.();
     sendMessage.mutate(
       {

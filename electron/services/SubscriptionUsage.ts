@@ -1,7 +1,6 @@
 import { spawn } from "node:child_process";
 import { constants } from "node:fs";
-import { access, mkdtemp, rm, stat } from "node:fs/promises";
-import { tmpdir } from "node:os";
+import { access, stat } from "node:fs/promises";
 import { delimiter, isAbsolute, join } from "node:path";
 import { createInterface } from "node:readline";
 import { OpenCode, type OpenCodeClient } from "@opencode/client";
@@ -13,12 +12,13 @@ import type {
   SubscriptionWindow,
 } from "../../src/types/subscriptionUsage";
 import { loadShellPath } from "../shellEnv";
-import { claudeWindows, codexWindows, record } from "./subscriptionWindows";
+import { chatGptWindows, claudeWindows, record } from "./subscriptionWindows";
 
 const CLAUDE_INTEGRATION = "claude-agent";
 const PROBE_TIMEOUT_MS = 25_000;
 const PROBE_OUTPUT_BYTES = 512 * 1024;
 const ENGINE_TIMEOUT_MS = 8_000;
+type UsageFetch = (url: string, init: RequestInit) => Promise<Response>;
 
 const unavailable = { status: "unavailable" } as const;
 const unsupported = { status: "unsupported" } as const;
@@ -109,58 +109,6 @@ function probeCli(
   });
 }
 
-export function codexProtocol(
-  version: string,
-  externalAuth?: { accessToken: string; chatgptAccountId: string },
-): UsageProtocol {
-  return {
-    start(send) {
-      send({
-        method: "initialize",
-        id: 1,
-        params: {
-          clientInfo: { name: "bloxbot", title: "BloxBot", version },
-          ...(externalAuth ? { capabilities: { experimentalApi: true } } : {}),
-        },
-      });
-    },
-    read(message, send) {
-      switch (message.id) {
-        case 1:
-          if (!record(message.result)) return unsupported;
-          send({ method: "initialized", params: {} });
-          if (externalAuth) {
-            send({
-              method: "account/login/start",
-              id: 2,
-              params: { type: "chatgptAuthTokens", ...externalAuth },
-            });
-          } else {
-            send({ method: "account/read", id: 2, params: { refreshToken: false } });
-          }
-          return;
-        case 2: {
-          const reply = record(message.result);
-          if (!reply) return unavailable;
-          if (externalAuth) {
-            if (reply.type !== "chatgptAuthTokens") return unavailable;
-          } else {
-            if (reply.account === null) return disconnected;
-            if (record(reply.account)?.type !== "chatgpt") return unsupported;
-          }
-          send({ method: "account/rateLimits/read", id: 3 });
-          return;
-        }
-        case 3:
-          return checked(codexWindows(message.result));
-        default:
-          // Reject refresh requests without ever reading or forwarding a refresh token.
-          if (message.method === "account/chatgptAuthTokens/refresh") return unavailable;
-      }
-    },
-  };
-}
-
 export const claudeProtocol: UsageProtocol = {
   start(send) {
     send({ type: "control_request", request_id: "init", request: { subtype: "initialize" } });
@@ -186,19 +134,6 @@ export const claudeProtocol: UsageProtocol = {
   },
 };
 
-const codexArgs = ["app-server", "-c", 'cli_auth_credentials_store="ephemeral"'];
-
-function codexEnv(path: string | undefined): NodeJS.ProcessEnv {
-  return {
-    ...process.env,
-    PATH: path,
-    CODEX_ACCESS_TOKEN: undefined,
-    CODEX_API_KEY: undefined,
-    OPENAI_API_KEY: undefined,
-    RUST_LOG: "off",
-  };
-}
-
 const claudeArgs = [
   "--print",
   "--input-format",
@@ -216,71 +151,80 @@ const claudeArgs = [
   "",
 ];
 
-/** Use the same engine workspace and active integration that serves the chat. */
-export function createSubscriptionUsageReader(getEngine: () => Promise<OpenCodeInfo>, version: string) {
-  async function readInstalledCodex(): Promise<SubscriptionUsageResult> {
-    const path = (await loadShellPath()) || process.env.PATH;
-    const executable = await findExecutable("codex", path);
-    if (!executable) return missing;
-    // Keep the CLI's configured profile and let app-server load its own existing account.
-    return probeCli(executable, ["app-server"], tmpdir(), codexEnv(path), codexProtocol(version));
+/** Keep OAuth tokens in the main process and send them only to the ChatGPT usage endpoint. */
+export async function fetchChatGptUsage(
+  credential: {
+    methodID: string;
+    access: string;
+    expires: number;
+    metadata?: Record<string, unknown>;
+  },
+  fetchUsage: UsageFetch,
+): Promise<SubscriptionUsageResult> {
+  // Sign in with ChatGPT grants inference through the Responses API, not access
+  // to Codex's account quota endpoint. Keep that sign-in available for chats.
+  if (credential.methodID === "chatgpt-token-sharing") return { status: "usage_not_shared" };
+  if (!credential.access) return disconnected;
+  if (credential.expires <= Date.now()) return { status: "session_expired" };
+  const accountId = credential.metadata?.accountID;
+  try {
+    const response = await fetchUsage("https://chatgpt.com/backend-api/wham/usage", {
+      method: "GET",
+      headers: {
+        Accept: "application/json",
+        Authorization: `Bearer ${credential.access}`,
+        ...(typeof accountId === "string" && accountId ? { "ChatGPT-Account-Id": accountId } : {}),
+      },
+      redirect: "error",
+      credentials: "omit",
+      cache: "no-store",
+      signal: AbortSignal.timeout(ENGINE_TIMEOUT_MS),
+    });
+    if (response.status === 401) return { status: "session_expired" };
+    if (response.status === 403) return { status: "usage_not_shared" };
+    if (!response.ok) return unavailable;
+    return checked(chatGptWindows(await response.json()));
+  } catch {
+    return unavailable;
   }
+}
 
-  async function readConnected(
-    provider: Exclude<SubscriptionProvider, "codex-cli">,
-    workspace: string,
-    api: OpenCodeClient,
-    credentialId: string,
-  ): Promise<SubscriptionUsageResult> {
+/** Use the same engine workspace and active integration that serves the chat. */
+export function createSubscriptionUsageReader(
+  getEngine: () => Promise<OpenCodeInfo>,
+  fetchUsage: UsageFetch,
+) {
+  async function readClaude(workspace: string): Promise<SubscriptionUsageResult> {
     const shellPath = await loadShellPath();
     const path = shellPath || process.env.PATH;
-    if (provider === "claude") {
-      const executable = await findExecutable(process.env.OPENCODE_CLAUDE_PATH || "claude", path);
-      if (!executable) return missing;
-      return probeCli(
-        executable,
-        claudeArgs,
-        workspace,
-        {
-          ...process.env,
-          PATH: path,
-          CLAUDE_CODE_SIMPLE: undefined,
-          CLAUDE_CODE_DISABLE_CLAUDE_MDS: "1",
-          CLAUDE_CODE_DISABLE_AUTO_MEMORY: "1",
-          CLAUDE_CODE_AUTO_CONNECT_IDE: "0",
-          CLAUDE_CODE_IDE_SKIP_AUTO_INSTALL: "1",
-          ENABLE_CLAUDEAI_MCP_SERVERS: "false",
-        },
-        claudeProtocol,
-      );
-    }
-
-    const executable = await findExecutable("codex", path);
+    const executable = await findExecutable(process.env.OPENCODE_CLAUDE_PATH || "claude", path);
     if (!executable) return missing;
+    return probeCli(
+      executable,
+      claudeArgs,
+      workspace,
+      {
+        ...process.env,
+        PATH: path,
+        CLAUDE_CODE_SIMPLE: undefined,
+        CLAUDE_CODE_DISABLE_CLAUDE_MDS: "1",
+        CLAUDE_CODE_DISABLE_AUTO_MEMORY: "1",
+        CLAUDE_CODE_AUTO_CONNECT_IDE: "0",
+        CLAUDE_CODE_IDE_SKIP_AUTO_INSTALL: "1",
+        ENABLE_CLAUDEAI_MCP_SERVERS: "false",
+      },
+      claudeProtocol,
+    );
+  }
+
+  async function readChatGpt(api: OpenCodeClient, credentialId: string): Promise<SubscriptionUsageResult> {
     const entries = await api.credential.list({ signal: AbortSignal.timeout(ENGINE_TIMEOUT_MS) });
     const credential = entries.find(
       (entry) =>
         entry.id === credentialId && entry.integrationID === OPENAI_ENGINE_OAUTH_PROVIDER && entry.active,
     )?.value;
     if (credential?.type !== "oauth") return disconnected;
-    const accountId = credential.metadata?.accountID;
-    if (typeof accountId !== "string" || !accountId || !credential.access) return unsupported;
-    if (credential.expires <= Date.now()) return { status: "session_expired" };
-
-    // External auth stays in memory. A separate home also avoids loading local Codex
-    // configuration or querying a different account if Codex already has a login.
-    const home = await mkdtemp(join(tmpdir(), "bloxbot-codex-usage-"));
-    try {
-      return await probeCli(
-        executable,
-        codexArgs,
-        home,
-        { ...codexEnv(path), CODEX_HOME: home },
-        codexProtocol(version, { accessToken: credential.access, chatgptAccountId: accountId }),
-      );
-    } finally {
-      await rm(home, { recursive: true, force: true }).catch(() => undefined);
-    }
+    return fetchChatGptUsage(credential, fetchUsage);
   }
 
   const pending = new Map<string, Promise<SubscriptionUsageResult>>();
@@ -293,7 +237,6 @@ export function createSubscriptionUsageReader(getEngine: () => Promise<OpenCodeI
   }
 
   async function read(provider: SubscriptionProvider): Promise<SubscriptionUsageResult> {
-    if (provider === "codex-cli") return share(provider, readInstalledCodex);
     const engine = await getEngine();
     const api = OpenCode.make({
       baseUrl: `http://127.0.0.1:${engine.port}`,
@@ -307,17 +250,19 @@ export function createSubscriptionUsageReader(getEngine: () => Promise<OpenCodeI
         { integrationID, location },
         { signal: AbortSignal.timeout(ENGINE_TIMEOUT_MS) },
       );
-      const connection = data.connections[0];
-      if (connection?.type === "credential" && connection.method === method && !connection.status) {
-        return connection.id;
-      }
+      const connection = data.connections.find(
+        (entry) => entry.type === "credential" && entry.method === method && !entry.status,
+      );
+      return connection?.type === "credential" ? connection.id : undefined;
     };
     const credentialId = await activeCredential();
     if (!credentialId) return disconnected;
 
     const key = JSON.stringify([engine.port, provider, credentialId]);
     return share(key, async () => {
-      const result = await readConnected(provider, engine.workspace, api, credentialId);
+      const result = provider === "codex"
+        ? await readChatGpt(api, credentialId)
+        : await readClaude(engine.workspace);
       return result.status === "available" && (await activeCredential()) !== credentialId
         ? disconnected
         : result;

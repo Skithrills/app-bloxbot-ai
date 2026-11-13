@@ -1,7 +1,5 @@
 import { useMutation, useQueryClient } from "@tanstack/react-query";
-import posthog from "posthog-js/dist/module.full.no-external.js";
 import { findProjectFolder } from "@/hooks/useProjectFolders";
-import { analyticsProperties, errorAnalyticsProperties } from "@/lib/analytics";
 import { trackBlankChat } from "@/lib/blankChats";
 import { notify } from "@/lib/notifications";
 import type { Session } from "@/lib/opencode/types";
@@ -59,14 +57,9 @@ export function useCreateSession() {
       queryClient.setQueryData(qk.permissions(newSession.id), null);
 
       selectSession(newSession.id);
-      posthog.capture("session_created", analyticsProperties("sessions", { outcome: "success" }));
     },
-    onError: (error) => {
+    onError: () => {
       notify.error("Couldn't create the chat.");
-      posthog.capture(
-        "session_creation_failed",
-        errorAnalyticsProperties("sessions", "creation", error),
-      );
     },
   });
 }

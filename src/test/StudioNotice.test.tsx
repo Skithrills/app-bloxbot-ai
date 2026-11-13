@@ -1,14 +1,11 @@
 import { fireEvent, render, screen } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
-const mocks = vi.hoisted(() => ({ studioTarget: null as unknown, capture: vi.fn() }));
+const mocks = vi.hoisted(() => ({ studioTarget: null as unknown }));
 
 vi.mock("@/providers/StudioTargetProvider", async (importOriginal) => ({
   ...(await importOriginal<typeof import("@/providers/StudioTargetProvider")>()),
   useStudioTargetOptional: () => mocks.studioTarget,
-}));
-vi.mock("posthog-js/dist/module.full.no-external.js", () => ({
-  default: { capture: mocks.capture, register: vi.fn() },
 }));
 
 import StudioNotice from "@/components/StudioNotice";
@@ -52,22 +49,6 @@ describe("StudioNotice", () => {
     fireEvent.click(screen.getByRole("button", { name: "Show me how" }));
 
     expect(onOpenSetup).toHaveBeenCalledOnce();
-    expect(
-      mocks.capture.mock.calls.filter(([name]) =>
-        String(name).startsWith("studio_target_guidance"),
-      ),
-    ).toEqual([
-      ["studio_target_guidance_shown", expect.objectContaining({ trigger: "notice" })],
-      ["studio_target_guidance_followed", expect.objectContaining({ trigger: "notice" })],
-    ]);
-  });
-
-  it("doesn't count a showing when the notice offers the picker instead of the steps", () => {
-    show({ targets: [LOBBY, DUNGEON] });
-    expect(mocks.capture).not.toHaveBeenCalledWith(
-      "studio_target_guidance_shown",
-      expect.anything(),
-    );
   });
 
   it("names the place this chat is missing, and leads to the picker when others are open", () => {

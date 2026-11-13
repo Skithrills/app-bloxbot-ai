@@ -1,7 +1,5 @@
-import posthog from "posthog-js/dist/module.full.no-external.js";
 import { useEffect, useRef, useState } from "react";
 
-import { analyticsProperties } from "@/lib/analytics";
 import { placeName, useStudioTargetOptional } from "@/providers/StudioTargetProvider";
 
 const LINK = "shrink-0 text-foreground underline underline-offset-2 hover:opacity-80";
@@ -82,27 +80,7 @@ export default function StudioNotice({
                 ? "Several Studios are open."
                 : "No Studio connected.";
 
-  // Once each time Show me how appears, so following it always has a showing to count against.
-  const offersSteps = message !== null && !canChoose;
-  const stepsShown = useRef(false);
-  useEffect(() => {
-    if (!offersSteps) {
-      stepsShown.current = false;
-      return;
-    }
-    if (stepsShown.current) return;
-    stepsShown.current = true;
-    posthog.capture(
-      "studio_target_guidance_shown",
-      analyticsProperties("studio_target", { trigger: "notice", status }),
-    );
-  }, [offersSteps, status]);
-
   const openSetup = () => {
-    posthog.capture(
-      "studio_target_guidance_followed",
-      analyticsProperties("studio_target", { trigger: "notice", status }),
-    );
     onOpenSetup();
   };
   const useMatch = () => {
@@ -113,10 +91,6 @@ export default function StudioNotice({
     });
   };
   const workWithoutStudio = () => {
-    posthog.capture(
-      "studio_target_work_without",
-      analyticsProperties("studio_target", { status, had_place: place !== null }),
-    );
     studioTarget?.workWithoutStudio();
     setReturned("Working without Studio.");
     onWorkedWithoutStudio?.();

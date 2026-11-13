@@ -18,8 +18,6 @@ import {
   type BlenderToolsState,
   DEFAULT_APP_CONFIG,
   type DesktopApi,
-  type InstructionFile,
-  InstructionFileSchema,
   type ModelFileInfo,
   type ModelSettingsPatch,
   type ModelUploadResult,
@@ -73,7 +71,6 @@ interface DesktopEffects {
   ) => Effect.Effect<SubscriptionUsageResult, DesktopError>;
   readonly getStudioMcpStatus: Effect.Effect<StudioMcpStatus, DesktopError>;
   readonly getVersion: Effect.Effect<string, DesktopError>;
-  readonly getInstructionFiles: Effect.Effect<readonly InstructionFile[], DesktopError>;
   readonly openUrl: (url: string) => Effect.Effect<void, DesktopError>;
   readonly showSystemNotification: (
     notification: SystemNotification,
@@ -148,7 +145,6 @@ const browserEffects: DesktopEffects = {
   getSubscriptionUsage: () => Effect.succeed({ status: "unavailable" }),
   getStudioMcpStatus: Effect.succeed({ state: "starting" }),
   getVersion: Effect.succeed("0.5.2"),
-  getInstructionFiles: Effect.succeed([]),
   openUrl: (url) =>
     Effect.sync(() => window.open(url, "_blank", "noopener,noreferrer")).pipe(Effect.asVoid),
   showSystemNotification: () => Effect.succeed(false),
@@ -272,9 +268,6 @@ function makeBridgeEffects(api: DesktopApi): DesktopEffects {
     getVersion: invoke("Failed to get the app version", () => api.getVersion()).pipe(
       decodeBridgeValue("Desktop app version is invalid", Schema.String),
     ),
-    getInstructionFiles: invoke("Failed to read instruction files", () =>
-      api.getInstructionFiles(),
-    ).pipe(decodeBridgeValue("Instruction files are invalid", Schema.Array(InstructionFileSchema))),
     openUrl: (url) => invoke("Failed to open the URL", () => api.openUrl(url)),
     showSystemNotification: (notification) =>
       invoke("Failed to show a system notification", () =>
@@ -360,7 +353,6 @@ export const desktop: DesktopApi = {
   onOpenCodeStartupProgress: (listener: StartupProgressListener) =>
     window.bloxbot?.onOpenCodeStartupProgress(listener) ?? (() => {}),
   getVersion: () => runPromise(desktopEffects.getVersion),
-  getInstructionFiles: () => runPromise(desktopEffects.getInstructionFiles),
   openUrl: (url) => runPromise(desktopEffects.openUrl(url)),
   showSystemNotification: (notification) =>
     runPromise(desktopEffects.showSystemNotification(notification)),
@@ -390,5 +382,4 @@ export const desktop: DesktopApi = {
     window.bloxbot?.onBlenderSetupProgress(listener) ?? (() => {}),
   discoverStudioTargets: () => runPromise(desktopEffects.discoverStudioTargets),
   selectStudioTarget: (targetKey) => runPromise(desktopEffects.selectStudioTarget(targetKey)),
-  onMainError: (listener) => window.bloxbot?.onMainError(listener) ?? (() => {}),
 };

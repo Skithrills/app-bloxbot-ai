@@ -590,7 +590,7 @@ describe("toModelError", () => {
     expect(toModelError({ type: "provider", message: "Nope", status: 500 }).name).toBe("APIError");
   });
 
-  it("keeps the free limit's reset delay and OpenCode's reason for the card and analytics", () => {
+  it("keeps the free limit's reset delay and OpenCode's reason for the card", () => {
     expect(
       toModelError({
         type: "provider.free-limit",

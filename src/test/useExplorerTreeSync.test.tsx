@@ -5,7 +5,6 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 const mocks = vi.hoisted(() => ({
   listeners: new Set<(update: unknown) => void>(),
   sync: vi.fn(),
-  capture: vi.fn(),
   discover: vi.fn(),
   studio: { selected: { key: "a" } } as {
     selected: { key: string } | null;
@@ -14,9 +13,6 @@ const mocks = vi.hoisted(() => ({
   client: {},
 }));
 
-vi.mock("posthog-js/dist/module.full.no-external.js", () => ({
-  default: { capture: mocks.capture },
-}));
 vi.mock("@/lib/desktop", () => ({
   desktop: {
     syncExplorerTree: mocks.sync,
@@ -169,10 +165,6 @@ describe("useExplorerTreeSync", () => {
 
   describe("while Studio's state gets in the way", () => {
     const waiting = (reason: string) => ({ ...answer(false), complete: false, waiting: reason });
-    const captured = (event: string) =>
-      mocks.capture.mock.calls
-        .filter(([name]) => name === event)
-        .map(([, properties]) => properties);
     const started = () => {
       const hook = renderHook(() => useExplorerTreeSync(), { wrapper });
       act(() => hook.result.current.setDemand({ open: true, busy: false }));
@@ -189,7 +181,7 @@ describe("useExplorerTreeSync", () => {
       vi.useRealTimers();
     });
 
-    it("reports waiting rather than a failure, once per reason, and when it ends", async () => {
+    it("shows waiting until a Studio read succeeds", async () => {
       mocks.sync.mockResolvedValueOnce(waiting("mode_changed"));
       mocks.sync.mockResolvedValueOnce(waiting("mode_changed"));
       mocks.sync.mockImplementationOnce(async () => {
@@ -203,37 +195,20 @@ describe("useExplorerTreeSync", () => {
 
       act(() => result.current.requestSync());
       await settle();
-      expect(captured("sync_waiting")).toHaveLength(1);
-      expect(captured("sync_waiting")[0]).toMatchObject({
-        feature: "explorer",
-        outcome: "waiting",
-        phase: "sync",
-        reason: "mode_changed",
-        source: "initial",
-      });
 
       act(() => result.current.requestSync());
       await settle();
       expect(result.current.waiting).toBeNull();
-      expect(captured("sync_failed")).toHaveLength(0);
-      expect(captured("sync_resumed")).toEqual([
-        expect.objectContaining({ reason: "mode_changed", duration_ms: expect.any(Number) }),
-      ]);
-      // A place that was simply still loading isn't a recovery from anything.
-      expect(captured("sync_succeeded")[0]).toMatchObject({ source: "initial" });
     });
 
-    it("reports a new reason when Studio moves on to something else", async () => {
+    it("updates the reason when Studio enters a different wait", async () => {
       mocks.sync.mockResolvedValueOnce(waiting("no_place"));
       mocks.sync.mockResolvedValueOnce(waiting("mode_changed"));
       const { result } = started();
       await settle();
       act(() => result.current.requestSync());
       await settle();
-      expect(captured("sync_waiting").map(({ reason }) => reason)).toEqual([
-        "no_place",
-        "mode_changed",
-      ]);
+      expect(result.current.waiting).toBe("mode_changed");
     });
 
     it("keeps real failures as failures, and ends the wait they interrupt", async () => {
@@ -246,7 +221,6 @@ describe("useExplorerTreeSync", () => {
 
       expect(result.current.waiting).toBeNull();
       expect(result.current.syncError).toMatch(/MCP call failed/);
-      expect(captured("sync_failed")).toHaveLength(1);
     });
 
     it("looks for what replaced a closed Studio, without showing a loading screen", async () => {
@@ -329,15 +303,6 @@ describe("useExplorerTreeSync", () => {
       expect(mocks.sync).toHaveBeenCalledTimes(2);
     });
 
-    it("counts one start for a first read that has to wait", async () => {
-      mocks.sync.mockResolvedValue(waiting("no_place"));
-      const { result } = started();
-      await settle();
-      act(() => result.current.requestSync());
-      await settle();
-      expect(captured("sync_started")).toHaveLength(1);
-    });
-
     it("forgets the wait when the Studio changes", async () => {
       mocks.sync.mockResolvedValueOnce(waiting("studio_closed"));
       const { result, rerender } = started();
@@ -353,7 +318,6 @@ describe("useExplorerTreeSync", () => {
       await settle();
       expect(result.current.waiting).toBeNull();
       // A different Studio answering says nothing about whether the closed one came back.
-      expect(captured("sync_resumed")).toHaveLength(0);
     });
   });
 });

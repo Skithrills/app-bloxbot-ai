@@ -1,10 +1,8 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Box, type LucideIcon, Upload } from "lucide-react";
-import posthog from "posthog-js/dist/module.full.no-external.js";
 import { type ReactNode, useEffect, useRef, useState } from "react";
 import { UploadChecklist } from "@/components/UploadChecklist";
 import { SLOWED_DOWN, useUploadAccess } from "@/hooks/useUploadAccess";
-import { analyticsProperties } from "@/lib/analytics";
 import { desktop } from "@/lib/desktop";
 import { notify } from "@/lib/notifications";
 import { qk } from "@/lib/queryKeys";
@@ -125,10 +123,8 @@ function BlenderRow() {
       stoppedRef.current = false;
       setFailure(null);
       setProgress(null);
-      posthog.capture("blender_setup_started", analyticsProperties("three_d_tools"));
     },
     onSuccess: (reloaded) => {
-      posthog.capture("blender_setup_finished", analyticsProperties("three_d_tools"));
       notify.success(
         "Blender is ready",
         reloaded ? undefined : { description: "Restart BloxBot so the AI can use it." },
@@ -139,10 +135,6 @@ function BlenderRow() {
       if (stoppedRef.current) return;
       const reason = failureReason(error);
       setFailure(FAILURES[reason]);
-      posthog.capture(
-        "blender_setup_failed",
-        analyticsProperties("three_d_tools", { outcome: "error", reason }),
-      );
     },
     onSettled: refresh,
   });
@@ -160,14 +152,12 @@ function BlenderRow() {
       }
       await client?.instance.dispose({}, { throwOnError: true });
     },
-    onSuccess: () => posthog.capture("blender_removed", analyticsProperties("three_d_tools")),
     onError: () =>
       notify.error("Couldn't remove Blender", { description: "Close Blender, then try again." }),
     onSettled: refresh,
   });
   const open = useMutation<void, Error>({
     mutationFn: () => desktop.openBlender(),
-    onSuccess: () => posthog.capture("blender_opened", analyticsProperties("three_d_tools")),
     onError: () =>
       notify.error("Couldn't open Blender", { description: "Set it up again from here." }),
   });

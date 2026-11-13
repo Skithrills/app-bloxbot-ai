@@ -20,11 +20,6 @@ import { PreferencesProvider } from "@/providers/PreferencesProvider";
 import { StudioTargetProvider } from "@/providers/StudioTargetProvider";
 import type { ProjectFolder } from "@/types/desktop";
 
-const { capture } = vi.hoisted(() => ({ capture: vi.fn() }));
-vi.mock("posthog-js/dist/module.full.no-external.js", () => ({
-  default: { capture, register: vi.fn() },
-}));
-
 // ── Helpers ──────────────────────────────────────────────────────────
 
 function makeSession(
@@ -90,8 +85,6 @@ function seedState(qc: QueryClient, opts: { sessions?: Session[] } = {}) {
     lastModel: null,
     hiddenModels: [],
     theme: "system",
-    detailedAnalytics: "disabled",
-    analyticsNoticeVersion: 2,
   });
 }
 
@@ -273,11 +266,6 @@ describe("ChatSidebar", () => {
     await waitFor(() => {
       expect(screen.getByText("Snoozed")).toBeInTheDocument();
     });
-    expect(capture).toHaveBeenCalledWith("session_snoozed", {
-      analytics_schema_version: 1,
-      feature: "sessions",
-      outcome: "success",
-    });
   });
 
   it("does not snooze a busy session", async () => {
@@ -303,21 +291,11 @@ describe("ChatSidebar", () => {
 
     render(<TestSidebar client={client} queryClient={qc} onSessionSelect={onSessionSelect} />);
     fireEvent.click(await screen.findByText("Snoozed"));
-    expect(capture).toHaveBeenCalledWith("snoozed_section_toggled", {
-      analytics_schema_version: 1,
-      expanded: true,
-      count_bucket: "1",
-      feature: "sessions",
-    });
     await act(async () => {
       fireEvent.click(screen.getByTitle(`Open snoozed session ${snoozed.title}`));
     });
 
     expect(onSessionSelect).toHaveBeenCalled();
-    expect(capture).toHaveBeenCalledWith("snoozed_session_opened", {
-      analytics_schema_version: 1,
-      feature: "sessions",
-    });
     expect(client.session.update).not.toHaveBeenCalled();
     expect(screen.getByText("Snoozed")).toBeInTheDocument();
   });
@@ -338,24 +316,10 @@ describe("ChatSidebar", () => {
     expect(screen.getByText("Delete chat?")).toBeInTheDocument();
     fireEvent.click(screen.getByText("Cancel"));
     expect(client.session.delete).not.toHaveBeenCalled();
-    expect(capture).toHaveBeenCalledWith("permanent_delete_requested", {
-      analytics_schema_version: 1,
-      feature: "sessions",
-    });
-    expect(capture).toHaveBeenCalledWith("permanent_delete_cancelled", {
-      analytics_schema_version: 1,
-      confirmed: false,
-      feature: "sessions",
-    });
 
     fireEvent.contextMenu(screen.getByTitle(`Open snoozed session ${snoozed.title}`));
     fireEvent.click(screen.getByText("Delete"));
     await act(async () => fireEvent.click(screen.getByRole("button", { name: "Delete" })));
-    expect(capture).toHaveBeenCalledWith("permanent_delete_confirmed", {
-      analytics_schema_version: 1,
-      confirmed: true,
-      feature: "sessions",
-    });
     expect(client.session.delete).toHaveBeenCalledWith({ sessionID: "s1" }, { throwOnError: true });
   });
 

@@ -3,10 +3,7 @@
 // carrying personal paths, usernames, or credentials. No runtime imports: the Electron
 // main process uses this module too.
 
-import type { MainErrorReport } from "../types/desktop";
-
 export const ERROR_MESSAGE_MAX_LENGTH = 500;
-export const ERROR_STACK_MAX_LENGTH = 4000;
 
 export const REDACTED = "[redacted]";
 
@@ -122,57 +119,6 @@ export function scrubErrorMessage(
   return truncateText(scrubErrorText(truncateText(text, maxLength * 4), options), maxLength);
 }
 
-function scrubDeep(value: unknown, depth: number): unknown {
-  if (typeof value === "string") return scrubErrorMessage(value, ERROR_STACK_MAX_LENGTH);
-  if (depth > 8 || value === null || typeof value !== "object") return value;
-  if (Array.isArray(value)) return value.map((item) => scrubDeep(item, depth + 1));
-  return Object.fromEntries(
-    Object.entries(value).map(([key, item]) => [key, scrubDeep(item, depth + 1)]),
-  );
-}
-
-// Our own error properties and PostHog's flattened exception properties.
-const MESSAGE_PROPERTIES = ["error_message", "$exception_message"] as const;
-const LONG_TEXT_PROPERTIES = ["component_stack", "$exception_values"] as const;
-
-interface ExceptionEntry {
-  value?: unknown;
-  [key: string]: unknown;
-}
-
-/**
- * Scrubs every property of a PostHog event that can carry error text: the
- * `$exception_list` of `$exception` events (messages and stack frames) and our own
- * `error_message`/`component_stack` properties. Returns the same shape.
- */
-export function scrubEventProperties<P extends Record<string, unknown>>(properties: P): P {
-  const scrubbed: Record<string, unknown> = { ...properties };
-  const exceptionList = scrubbed.$exception_list;
-  if (Array.isArray(exceptionList)) {
-    scrubbed.$exception_list = exceptionList.map((entry: unknown) => {
-      const clean = scrubDeep(entry, 0);
-      if (
-        clean &&
-        typeof clean === "object" &&
-        typeof (clean as ExceptionEntry).value === "string"
-      ) {
-        return {
-          ...(clean as ExceptionEntry),
-          value: truncateText((clean as ExceptionEntry).value as string, ERROR_MESSAGE_MAX_LENGTH),
-        };
-      }
-      return clean;
-    });
-  }
-  for (const key of MESSAGE_PROPERTIES) {
-    if (typeof scrubbed[key] === "string") scrubbed[key] = scrubErrorMessage(scrubbed[key]);
-  }
-  for (const key of LONG_TEXT_PROPERTIES) {
-    if (key in scrubbed) scrubbed[key] = scrubDeep(scrubbed[key], 0);
-  }
-  return scrubbed as P;
-}
-
 /**
  * Extracts a type name and message from anything thrown, including SDK error bodies. A
  * wrapping error's `cause` is appended, since wrappers usually say what failed and the
@@ -215,32 +161,4 @@ function describeOne(error: unknown): { type: string; message: string | null } {
     return { type, message };
   }
   return { type: typeof error, message: null };
-}
-
-/** Rebuilds an Error from a forwarded report so PostHog can parse its stack. */
-export function errorFromMainReport(report: MainErrorReport): Error {
-  const error = new Error(report.message);
-  error.name = report.name || "Error";
-  error.stack = report.stack ?? `${error.name}: ${report.message}`;
-  return error;
-}
-
-/**
- * Returns a predicate that accepts a key at most once per window, so a failure in a loop
- * becomes one report instead of hundreds.
- */
-export function createErrorDeduper(windowMs: number, now: () => number = Date.now) {
-  const lastSeen = new Map<string, number>();
-  return (key: string): boolean => {
-    const time = now();
-    const previous = lastSeen.get(key);
-    if (previous !== undefined && time - previous < windowMs) return false;
-    lastSeen.set(key, time);
-    if (lastSeen.size > 200) {
-      for (const [entry, seen] of lastSeen) {
-        if (time - seen >= windowMs) lastSeen.delete(entry);
-      }
-    }
-    return true;
-  };
 }

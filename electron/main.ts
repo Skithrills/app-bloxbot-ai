@@ -17,7 +17,6 @@ import {
   openBlender,
   removeBlenderTools,
 } from "./services/BlenderTools";
-import { userInfo } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
@@ -64,14 +63,13 @@ import {
 import { handleLastWindowClosed } from "./appLifecycle";
 import { checkForAppUpdate, installAppUpdate } from "./appUpdater";
 import { blenderToolsFolder, engineFolder } from "./machineFolders";
-import { createMainErrorReporter } from "./errorReporter";
 import { syncExplorerTree } from "./explorerTree";
 import {
   createStudioIconResolver,
   STUDIO_ICON_SCHEME,
   studioIconProtocolHandler,
 } from "./studioIconResolver";
-import { findInstructionFiles, readInstructions, saveInstructions } from "./instructionFiles";
+import { readInstructions, saveInstructions } from "./instructionFiles";
 import { defaultSkillSources, importSkills, listImportableSkills } from "./skillImport";
 import {
   type CallStudioTool,
@@ -115,32 +113,13 @@ const showSystemNotification = createSystemNotifier({
   },
 });
 
-function currentUsername(): string | undefined {
-  try {
-    return userInfo().username;
-  } catch {
-    return undefined;
-  }
-}
-
-const mainErrorReporter = createMainErrorReporter({
-  channel: channels.mainError,
-  home: app.getPath("home"),
-  username: currentUsername(),
-});
-
-/** Sends a main-process error to the renderer, which reports it if analytics is on. */
 function reportMainError(source: string, error: unknown): void {
-  mainErrorReporter.report(source, error);
+  console.error(`[${source}]`, error);
 }
 
 // A monitor observes without replacing Electron's own uncaught-exception handling.
 process.on("uncaughtExceptionMonitor", (error) => reportMainError("main_uncaught_exception", error));
-// Electron only warns about unhandled rejections; keep that log line and report it.
-process.on("unhandledRejection", (reason) => {
-  console.error("Unhandled promise rejection in the main process:", reason);
-  reportMainError("main_unhandled_rejection", reason);
-});
+process.on("unhandledRejection", (reason) => reportMainError("main_unhandled_rejection", reason));
 
 const reportLayerFailure = (source: string) => (cause: Cause.Cause<unknown>) =>
   Effect.sync(() => {
@@ -360,13 +339,12 @@ const queryStudio = <A>(query: (callTool: CallStudioTool) => Promise<A>) =>
   );
 
 const registerIpcHandlers = Effect.sync(() => {
-  ipcMain.on(channels.mainErrorReady, (event) => mainErrorReporter.attach(event.sender));
   const getOpenCodeInfo = () =>
     openCodeRuntime.runPromise(
       OpenCode.pipe(Effect.flatMap((service) => service.info)),
     );
   ipcMain.handle(channels.getOpenCodeInfo, getOpenCodeInfo);
-  const readSubscriptionUsage = createSubscriptionUsageReader(getOpenCodeInfo, app.getVersion());
+  const readSubscriptionUsage = createSubscriptionUsageReader(getOpenCodeInfo, (url, options) => net.fetch(url, options));
   ipcMain.handle(channels.getSubscriptionUsage, (_event, provider: unknown) =>
     Schema.decodeUnknownPromise(SubscriptionProviderSchema)(provider).then(readSubscriptionUsage),
   );
@@ -386,12 +364,6 @@ const registerIpcHandlers = Effect.sync(() => {
     openCodeRuntime.runPromise(StudioMcpBroker.pipe(Effect.flatMap((broker) => broker.status))),
   );
   ipcMain.handle(channels.getVersion, () => runMain(Effect.sync(() => app.getVersion())));
-  ipcMain.handle(channels.getInstructionFiles, () =>
-    findInstructionFiles({
-      globalConfigDirectory: openCodeConfigDirectory(),
-      home: app.getPath("home"),
-    }),
-  );
   ipcMain.handle(channels.readInstructions, () => readInstructions(openCodeConfigDirectory()));
   ipcMain.handle(channels.saveInstructions, (_event, text: unknown) =>
     Schema.decodeUnknownPromise(Schema.String)(text).then((value) =>
@@ -810,6 +782,16 @@ function createWindow(): Effect.Effect<void, DesktopMainError> {
       window.webContents.setUserAgent(
         `${window.webContents.getUserAgent()} BloxBot/${app.getVersion()}`,
       );
+      window.webContents.on("context-menu", (_event, { isEditable, editFlags }) => {
+        if (!isEditable) return;
+        Menu.buildFromTemplate([
+          { role: "cut", accelerator: "CommandOrControl+X", enabled: editFlags.canCut },
+          { role: "copy", accelerator: "CommandOrControl+C", enabled: editFlags.canCopy },
+          { role: "paste", accelerator: "CommandOrControl+V", enabled: editFlags.canPaste },
+          { type: "separator" },
+          { role: "selectAll", accelerator: "CommandOrControl+A", enabled: editFlags.canSelectAll },
+        ]).popup({ window });
+      });
       window.webContents.setWindowOpenHandler(({ url }) => {
         Effect.runFork(
           parseExternalUrl(url).pipe(

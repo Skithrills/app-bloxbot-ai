@@ -7,6 +7,12 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+## [0.16.1] - 2026-11-13
+
+### Fixed
+
+- The effort slider holds the chosen stop when a click or drag ends and no longer jumps to an intermediate stop when grabbed mid-animation.
+
 ## [0.16.0] - 2026-11-13
 
 ### Added
@@ -504,7 +510,8 @@ First shared release of the Skithrills fork. Includes the animated cat mascot, i
 - OpenCode downloads are restricted to official GitHub release assets and verified with SHA-256 digests before installation and on every cache reuse.
 - Electron runs with context isolation, renderer sandboxing, Node.js integration disabled, validated IPC payloads, and external navigation blocked.
 
-[Unreleased]: https://github.com/Skithrills/app-bloxbot-ai/compare/v0.16.0...HEAD
+[Unreleased]: https://github.com/Skithrills/app-bloxbot-ai/compare/v0.16.1...HEAD
+[0.16.1]: https://github.com/Skithrills/app-bloxbot-ai/releases/tag/v0.16.1
 [0.16.0]: https://github.com/Skithrills/app-bloxbot-ai/releases/tag/v0.16.0
 [0.15.5]: https://github.com/Skithrills/app-bloxbot-ai/releases/tag/v0.15.5
 [0.15.4]: https://github.com/Skithrills/app-bloxbot-ai/releases/tag/v0.15.4

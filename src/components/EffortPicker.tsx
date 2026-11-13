@@ -14,7 +14,8 @@ import type { EffortControl } from "@/types/desktop";
 import "./EffortPicker.css";
 
 type EffortStop = { id: string | null; label: string };
-type EffortDrag = { pointerId: number; left: number; width: number; offset: number };
+type EffortDrag = { pointerId: number; offset: number };
+type EffortCommit = { previous: string | null; next: string | null };
 type FastControl = { enabled: boolean; onToggle: () => void };
 type DisplayEffort = { text: string; stop: number; peak: boolean };
 
@@ -97,7 +98,7 @@ function FastModeSwitch({ enabled, onToggle }: FastControl) {
   );
 }
 
-function pointerStop(clientX: number, { left, width, offset }: EffortDrag, lastStop: number) {
+function pointerStop(clientX: number, { left, width }: DOMRect, offset: number, lastStop: number) {
   const progress = Math.min(1, Math.max(0, (clientX - left - offset) / width));
   return Math.round(progress * lastStop);
 }
@@ -161,35 +162,49 @@ function EffortSlider({
   const thumb = useRef<HTMLDivElement>(null);
   const drag = useRef<EffortDrag | null>(null);
   const [dragStop, setDragStop] = useState<number | null>(null);
+  const [commit, setCommit] = useState<EffortCommit | null>(null);
   const [showHelp, setShowHelp] = useState(false);
   const helpId = useId();
   const lastStop = stops.length - 1;
-  const selected = stops.findIndex((stop) => stop.id === value);
+  const pending = commit?.previous === value ? commit : null;
+  if (commit && !pending) setCommit(null);
+  const selected = stops.findIndex((stop) => stop.id === (pending ? pending.next : value));
   const preview = dragStop ?? selected;
   const progress = Math.max(0, preview) / lastStop;
   const highest = preview === lastStop;
   const previewStop = stops[preview];
   const label = previewStop?.label ?? effortLabel(value);
 
+  function commitStop(index: number) {
+    const next = stops[index]?.id;
+    if (next === undefined || next === (pending ? pending.next : value)) return;
+    setCommit(next === value ? null : { previous: value, next });
+    onChange(next);
+  }
+
   function startDrag(event: PointerEvent<HTMLDivElement>) {
     if (event.button !== 0) return;
     event.preventDefault();
     if (drag.current || !travel.current || !thumb.current) return;
 
-    const { left, width } = travel.current.getBoundingClientRect();
-    if (width <= 0) return;
+    const track = travel.current.getBoundingClientRect();
+    if (track.width <= 0) return;
     const bounds = thumb.current.getBoundingClientRect();
     const { clientX, currentTarget, pointerId } = event;
-    // Keep the grab point inside the thumb, including when regrabbing during a snap.
-    const offset =
-      clientX >= bounds.left && clientX <= bounds.right
-        ? clientX - (bounds.left + bounds.width / 2)
-        : 0;
-    const gesture = { pointerId, left, width, offset };
+    const onThumb = clientX >= bounds.left && clientX <= bounds.right;
+    // Anchor to the selected stop when the moving thumb is grabbed mid-snap.
+    const offset = onThumb ? clientX - (track.left + progress * track.width) : 0;
     currentTarget.setPointerCapture(pointerId);
     input.current?.focus({ preventScroll: true });
-    drag.current = gesture;
-    setDragStop(pointerStop(clientX, gesture, lastStop));
+    drag.current = { pointerId, offset };
+    setDragStop(pointerStop(clientX, track, offset, lastStop));
+  }
+
+  function stopAtPointer(clientX: number, active: EffortDrag) {
+    const track = travel.current?.getBoundingClientRect();
+    return track && track.width > 0
+      ? pointerStop(clientX, track, active.offset, lastStop)
+      : dragStop;
   }
 
   function clearDrag() {
@@ -205,11 +220,11 @@ function EffortSlider({
   function endDrag(event: PointerEvent<HTMLDivElement>) {
     const active = drag.current;
     if (!active || active.pointerId !== event.pointerId) return;
-    clearDrag();
     if (event.type === "pointerup") {
-      const next = pointerStop(event.clientX, active, lastStop);
-      if (stops[next].id !== value) onChange(stops[next].id);
+      const next = stopAtPointer(event.clientX, active);
+      if (next !== null) commitStop(next);
     }
+    clearDrag();
   }
 
   return (
@@ -258,7 +273,7 @@ function EffortSlider({
         onPointerMove={(event) => {
           const active = drag.current;
           if (active?.pointerId === event.pointerId) {
-            setDragStop(pointerStop(event.clientX, active, lastStop));
+            setDragStop(stopAtPointer(event.clientX, active));
           }
         }}
         onPointerUp={endDrag}
@@ -307,7 +322,7 @@ function EffortSlider({
           }}
           onChange={(event) => {
             clearDrag();
-            onChange(stops[event.currentTarget.valueAsNumber].id);
+            commitStop(event.currentTarget.valueAsNumber);
           }}
         />
       </div>

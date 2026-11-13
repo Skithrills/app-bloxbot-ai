@@ -122,6 +122,47 @@ describe("composer reasoning effort picker", () => {
     expect(onChange).toHaveBeenCalledExactlyOnceWith("low");
   });
 
+  it("holds the released stop while the saved effort catches up", () => {
+    const variants = ["low", "high", "max"];
+    const onChange = vi.fn();
+    const { rerender } = render(
+      <EffortPicker variants={variants} value={null} onChange={onChange} />,
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Auto effort" }));
+    const slider = screen.getByRole("slider");
+    const track = slider.parentElement as HTMLDivElement;
+    const travel = track.querySelector(".effort-slider-travel") as HTMLDivElement;
+    const thumb = track.querySelector(".effort-slider-thumb") as HTMLDivElement;
+    vi.spyOn(travel, "getBoundingClientRect").mockReturnValue(new DOMRect(30, 0, 180, 28));
+    const thumbBounds = vi.spyOn(thumb, "getBoundingClientRect");
+    thumbBounds.mockReturnValue(new DOMRect(18, 0, 24, 28));
+    Object.assign(track, {
+      setPointerCapture: vi.fn(),
+      hasPointerCapture: () => true,
+      releasePointerCapture: vi.fn(),
+    });
+
+    fireEvent.pointerDown(track, { pointerId: 1, clientX: 210 });
+    fireEvent.pointerUp(track, { pointerId: 1, clientX: 210 });
+    expect(onChange).toHaveBeenCalledExactlyOnceWith("max");
+    expect(slider).toHaveAttribute("aria-valuetext", "Max");
+
+    // Grab the thumb halfway through its animation. Holding it should not select that stop.
+    thumbBounds.mockReturnValue(new DOMRect(138, 0, 24, 28));
+    fireEvent.pointerDown(track, { pointerId: 2, clientX: 150 });
+    expect(slider).toHaveAttribute("aria-valuetext", "Max");
+    fireEvent.pointerMove(track, { pointerId: 2, clientX: 90 });
+    fireEvent.pointerUp(track, { pointerId: 2, clientX: 90 });
+    expect(onChange).toHaveBeenLastCalledWith("high");
+    expect(slider).toHaveAttribute("aria-valuetext", "High");
+    expect(track).not.toHaveAttribute("data-dragging");
+
+    rerender(<EffortPicker variants={variants} value="high" onChange={onChange} />);
+    expect(slider).toHaveAttribute("aria-valuetext", "High");
+    rerender(<EffortPicker variants={variants} value="low" onChange={onChange} />);
+    expect(slider).toHaveAttribute("aria-valuetext", "Low");
+  });
+
   it("fills the Fast icon and animates the gradient only at the highest stop", () => {
     renderPicker(["low", "max"], "slider", true);
     fireEvent.click(screen.getByRole("button", { name: "Auto effort" }));

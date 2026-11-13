@@ -45,12 +45,15 @@ import { useSessionStatus } from "@/hooks/useSessionStatuses";
 import { useSessions } from "@/hooks/useSessions";
 import { useStudioConnection } from "@/hooks/useStudioConnection";
 import { desktop } from "@/lib/desktop";
+import { OPENAI_OAUTH_PROVIDER } from "@/lib/openAiProfiles";
 import { setChatOnScreen, setSessionOpener } from "@/lib/sessionNotifications";
 import { subagentsForSession } from "@/lib/sessionVisibility";
+import { splitModelKey } from "@/lib/splitModelKey";
 import type { AddComposerImage } from "@/lib/toolImages";
 import { useActiveSession } from "@/providers/ActiveSessionProvider";
 import { useExplorerReference } from "@/providers/ExplorerReferenceProvider";
 import { useOpenCodeClient } from "@/providers/OpenCodeClientProvider";
+import { usePreferences } from "@/providers/PreferencesProvider";
 import { useStudioTargetOptional } from "@/providers/StudioTargetProvider";
 
 const loadSettings = () => import("@/components/Settings");
@@ -69,6 +72,9 @@ const MAX_SUBAGENT_WIDTH = 680;
 
 function Chat() {
   const { ready, initError } = useOpenCodeClient();
+  const { selectedModel } = usePreferences();
+  const showUsageMeters =
+    !!selectedModel && splitModelKey(selectedModel)[0] === OPENAI_OAUTH_PROVIDER;
   const { activeSessionId, clearSession, selectSession } = useActiveSession();
   const attachImageRef = useRef<AddComposerImage>(null);
   const sessionStatus = useSessionStatus(activeSessionId);
@@ -626,7 +632,7 @@ function Chat() {
                 <ChartPie aria-hidden="true" size={14} />
                 <span className="max-[680px]:sr-only">Context</span>
               </button>
-              <ChatGptUsageControl />
+              {showUsageMeters && <ChatGptUsageControl />}
             </>,
             titlebarActions,
           )
@@ -741,11 +747,13 @@ function Chat() {
               focusOnMount={focusComposer}
               attachImageRef={attachImageRef}
               contextControl={
-                <ContextControl
-                  value={chatContext}
-                  expanded={showContext}
-                  onToggle={handleToggleContext}
-                />
+                showUsageMeters && (
+                  <ContextControl
+                    value={chatContext}
+                    expanded={showContext}
+                    onToggle={handleToggleContext}
+                  />
+                )
               }
             />
           </>

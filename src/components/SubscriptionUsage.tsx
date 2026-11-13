@@ -32,14 +32,17 @@ function statusMessage(
 ) {
   switch (status) {
     case "disconnected":
+      if (provider === "codex-cli") return "The installed Codex CLI is signed out.";
       return "Connect the subscription account to view its usage.";
     case "cli_missing":
-      return "Claude Code is required to read this account’s limits.";
+      return `${provider === "claude" ? "Claude Code" : "Codex CLI"} is required to read this account’s limits.`;
     case "session_expired":
       return "The ChatGPT connection has expired. Use this subscription in a chat to refresh it.";
     case "usage_not_shared":
       return "This sign-in supports chats. ChatGPT does not share remaining quota or reset times with BloxBot.";
     case "unsupported":
+      if (provider === "codex-cli")
+        return "The installed Codex CLI connection does not report subscription limits.";
       return provider === "claude"
         ? "This Claude Code connection or CLI version does not report subscription limits."
         : "This ChatGPT connection does not report subscription limits.";
@@ -53,20 +56,33 @@ function SubscriptionAccount({
   name,
   reading,
 }: (typeof accounts)[number] & { reading: ReturnType<typeof useSubscriptionUsage> }) {
-  const { usage, source, status, isError, isFetching, isPreviousReading, now, refresh } = reading;
+  const {
+    usage,
+    source,
+    status,
+    isError,
+    isFetching,
+    isPreviousReading,
+    now,
+    refresh,
+    useCodexCli,
+    setUseCodexCli,
+  } = reading;
   const error = !status || status === "available" ? "unavailable" : status;
+  const cliSource = providerId === OPENAI_OAUTH_PROVIDER && useCodexCli;
+  const accountName = cliSource ? "Codex CLI account" : name;
 
   return (
     <div className="px-3.5 py-2.5">
       <div className="flex items-center justify-between gap-3">
         <div className="flex min-w-0 items-center gap-2">
           <ProviderLogo providerId={providerId} />
-          <h6 className="text-sm font-medium">{name}</h6>
+          <h6 className="text-sm font-medium">{accountName}</h6>
         </div>
         {status !== "usage_not_shared" && (
           <button
             type="button"
-            aria-label={`Refresh ${name} usage`}
+            aria-label={`Refresh ${accountName} usage`}
             aria-disabled={isFetching}
             onClick={() => {
               if (!isFetching) void refresh();
@@ -77,6 +93,12 @@ function SubscriptionAccount({
           </button>
         )}
       </div>
+      {cliSource && (
+        <p className="mt-1 text-xs text-muted-foreground">
+          Uses the installed Codex CLI’s separate sign-in, which may differ from BloxBot’s ChatGPT
+          account.
+        </p>
+      )}
       <div className="mt-2 space-y-2.5 text-xs" aria-live="polite" aria-busy={isFetching}>
         {usage ? (
           <>
@@ -91,7 +113,7 @@ function SubscriptionAccount({
                 <div
                   className="mt-1 h-1.5 overflow-hidden rounded-full bg-muted"
                   role="progressbar"
-                  aria-label={`${name} ${meter.label} remaining`}
+                  aria-label={`${accountName} ${meter.label} remaining`}
                   aria-valuenow={subscriptionPercentLeft(meter.usedPercent)}
                   aria-valuetext={`${formatSubscriptionPercentLeft(meter.usedPercent)} left`}
                 >
@@ -128,14 +150,28 @@ function SubscriptionAccount({
           <p className="text-muted-foreground">{statusMessage(error, source)}</p>
         )}
         {providerId === OPENAI_OAUTH_PROVIDER && (
-          <a
-            href={CHATGPT_USAGE_URL}
-            target="_blank"
-            rel="noreferrer"
-            className="inline-block text-primary underline-offset-2 hover:underline"
-          >
-            Open ChatGPT Usage
-          </a>
+          <div className="space-y-2">
+            <button
+              type="button"
+              onClick={() => void setUseCodexCli(!useCodexCli)}
+              className="rounded-md border px-2 py-1 hover:bg-muted"
+            >
+              {useCodexCli ? "Stop reading Codex CLI usage" : "Read Codex CLI usage"}
+            </button>
+            {!useCodexCli && (
+              <p className="text-muted-foreground">
+                Reads the CLI’s separate sign-in and refreshes automatically.
+              </p>
+            )}
+            <a
+              href={CHATGPT_USAGE_URL}
+              target="_blank"
+              rel="noreferrer"
+              className="inline-block text-primary underline-offset-2 hover:underline"
+            >
+              Open ChatGPT Usage
+            </a>
+          </div>
         )}
       </div>
     </div>
@@ -158,7 +194,7 @@ export function ChatGptUsageControl() {
     undefined,
   );
   const left = tightest ? subscriptionPercentLeft(tightest.usedPercent) : undefined;
-  const summary = tightest
+  const detail = tightest
     ? `${tightest.label} · ${formatSubscriptionPercentLeft(tightest.usedPercent)} left${reading.isPreviousReading ? " · Previous reading" : ""}`
     : reading.status === "usage_not_shared"
       ? "View usage in ChatGPT"
@@ -168,6 +204,7 @@ export function ChatGptUsageControl() {
             reading.status === "available" ? "unavailable" : (reading.status ?? "unavailable"),
             reading.source,
           );
+  const summary = reading.source === "codex-cli" ? `Codex CLI · ${detail}` : detail;
 
   return (
     <Popover>

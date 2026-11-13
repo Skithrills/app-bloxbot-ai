@@ -1104,14 +1104,19 @@ describe("User journeys", () => {
     seedReadyState(queryClient, { sessions: [chat] });
 
     try {
-      render(<TestApp client={client} queryClient={queryClient} withStudioTargets />);
+      render(
+        <TestApp client={client} queryClient={queryClient} withStudioTargets>
+          <div id="titlebar-actions" />
+        </TestApp>,
+      );
       fireEvent.click(await screen.findByText(chat.title));
       const explorerToggle = await screen.findByRole("button", { name: "Explorer" });
       fireEvent.click(explorerToggle);
       const search = await screen.findByRole("searchbox", { name: "Search Explorer" });
       await waitFor(() => expect(search).toHaveFocus());
 
-      const radial = screen.getByRole("button", { name: "Context and usage" });
+      expect(screen.queryByRole("button", { name: /Context and usage/ })).toBeNull();
+      const radial = screen.getByRole("button", { name: "Context" });
       fireEvent.click(radial);
       const panel = await screen.findByRole("complementary", { name: "Context window" });
       expect(explorerToggle).toHaveAttribute("aria-pressed", "true");
@@ -1163,7 +1168,8 @@ describe("User journeys", () => {
       </TestApp>,
     );
     fireEvent.click(await screen.findByText(chat.title));
-    const radial = await screen.findByRole("button", { name: /Context and usage.*20% used/ });
+    expect(screen.queryByRole("button", { name: /Context and usage/ })).toBeNull();
+    const radial = await screen.findByRole("button", { name: "Context" });
     fireEvent.click(radial);
     let panel = within(await screen.findByRole("complementary", { name: "Context window" }));
     expect(panel.getByRole("heading", { name: "Context window" })).toHaveFocus();
@@ -1231,7 +1237,7 @@ describe("User journeys", () => {
     expect(await screen.findByRole("complementary", { name: "Context window" })).toBeVisible();
   });
 
-  it("keeps the ChatGPT quota in the title bar when switching chats and models", async () => {
+  it("shows radial meters only for the selected ChatGPT-plan model across chats", async () => {
     const codexChat = makeSession("codex-context", "Codex chat");
     const newChat = makeSession("new-context", "Unsent chat");
     const client = createClient({
@@ -1265,6 +1271,12 @@ describe("User journeys", () => {
     });
     const queryClient = createQueryClient();
     seedReadyState(queryClient, { sessions: [codexChat, newChat] });
+    queryClient.setQueryData(qk.config, {
+      lastModel: "anthropic/claude-3.5-sonnet",
+      hiddenModels: [],
+      theme: "system",
+      chatModels: { [codexChat.id]: { key: "openai-oauth/gpt-6.1-sol", variant: null } },
+    });
     queryClient.setQueryData<{ all: unknown[]; connected: string[] }>(
       qk.providers,
       (providers) =>
@@ -1277,8 +1289,13 @@ describe("User journeys", () => {
               name: "OpenAI",
               models: { "gpt-6.1-sol": { id: "gpt-6.1-sol", name: "GPT-6.1 Sol" } },
             },
+            {
+              id: "openai-api",
+              name: "OpenAI API",
+              models: { "gpt-6.1-sol": { id: "gpt-6.1-sol", name: "GPT API" } },
+            },
           ],
-          connected: [...providers.connected, "openai-oauth"],
+          connected: [...providers.connected, "openai-oauth", "openai-api"],
         },
     );
     render(
@@ -1298,14 +1315,37 @@ describe("User journeys", () => {
     expect(panel.getByText("65% left")).toBeVisible();
 
     fireEvent.click(screen.getByText(newChat.title));
-    expect(await screen.findByRole("button", { name: "Context and usage" })).toBeVisible();
-    expect(screen.getByRole("button", { name: /Weekly.*65% left/ })).toBeVisible();
+    await waitFor(() => {
+      expect(screen.queryByRole("button", { name: /Context and usage/ })).toBeNull();
+      expect(screen.queryByRole("button", { name: /ChatGPT subscription usage/ })).toBeNull();
+    });
 
     fireEvent.click(screen.getByRole("button", { name: /Claude 3\.5 Sonnet/ }));
     fireEvent.click(await screen.findByRole("button", { name: /GPT-6\.1 Sol/ }));
     expect(
       await screen.findByRole("button", { name: /ChatGPT subscription usage.*65% left/ }),
     ).toBeVisible();
+    expect(screen.getByRole("button", { name: "Context and usage" })).toBeVisible();
+
+    fireEvent.click(screen.getByRole("button", { name: /GPT-6\.1 Sol/ }));
+    fireEvent.click(await screen.findByRole("button", { name: /GPT API/ }));
+    await waitFor(() => {
+      expect(screen.queryByRole("button", { name: /Context and usage/ })).toBeNull();
+      expect(screen.queryByRole("button", { name: /ChatGPT subscription usage/ })).toBeNull();
+    });
+    expect(screen.getByRole("button", { name: "Context" })).toBeVisible();
+
+    fireEvent.click(screen.getByText(codexChat.title));
+    expect(await screen.findByRole("button", { name: /ChatGPT subscription usage/ })).toBeVisible();
+    expect(screen.getByRole("button", { name: "Context and usage" })).toBeVisible();
+
+    // A previous plan-model reply must not keep its meter visible after choosing API billing.
+    fireEvent.click(screen.getByRole("button", { name: /GPT-6\.1 Sol/ }));
+    fireEvent.click(await screen.findByRole("button", { name: /GPT API/ }));
+    await waitFor(() => {
+      expect(screen.queryByRole("button", { name: /Context and usage/ })).toBeNull();
+      expect(screen.queryByRole("button", { name: /ChatGPT subscription usage/ })).toBeNull();
+    });
   });
 
   it("wraps long user messages and shows saved Studio references as chips", async () => {

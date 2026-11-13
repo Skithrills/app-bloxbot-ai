@@ -15,6 +15,7 @@ import {
 } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { FunSettings } from "@/components/AudioVisualizer";
+import { BloxBotMascot } from "@/components/BloxBotMascot";
 import PersonalisationSettings from "@/components/PersonalisationSettings";
 import ProviderCheckPopover from "@/components/ProviderCheckPopover";
 import ProviderConnectDialog from "@/components/ProviderConnectDialog";
@@ -1394,6 +1395,9 @@ function NotificationsTab() {
 function PrivacyTab() {
   return (
     <div className="mx-auto w-full max-w-md px-4 py-6 @xl:px-6 @xl:py-8">
+      <div className="mb-5 flex justify-center">
+        <BloxBotMascot size={96} animated />
+      </div>
       <h4 className="text-lg font-medium text-foreground">Privacy</h4>
       <p className="mt-1 text-xs text-muted-foreground">
         This fork does not send app analytics or error reports. Your selected AI provider receives

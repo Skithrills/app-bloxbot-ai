@@ -1,4 +1,4 @@
-import { fireEvent, render, screen } from "@testing-library/react";
+import { fireEvent, render, screen, within } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { MessageText } from "@/components/ChatMessages";
 import { ReferenceText } from "@/components/ReferenceChip";
@@ -93,6 +93,53 @@ describe("references in a sent message", () => {
     );
     expect(screen.getByText("Part.Enemy")).toHaveAttribute("title", "Tag on game.Workspace.Part");
     expect(screen.queryByText(/<Instance/)).not.toBeInTheDocument();
+  });
+
+  it("keeps assistant instance chips inline with all Markdown table rows", () => {
+    const references = ["MCPTest", "TestPart", "TestScript"].map((name) =>
+      serializeInstanceReference({ path: `game.Workspace.${name}`, label: name }),
+    );
+    render(
+      <ExplorerReferenceProvider>
+        <MessageText
+          text={[
+            "| Call | Result |",
+            "| --- | --- |",
+            `| \`search_game_tree\` | Returned **${references[0]}**, ${references[1]}, and ${references[2]} |`,
+            "| `inspect_instance` | Inspected properties |",
+            "",
+            "Done.",
+          ].join("\n")}
+        />
+      </ExplorerReferenceProvider>,
+    );
+
+    const rows = within(screen.getByRole("table")).getAllByRole("row");
+    expect(rows).toHaveLength(3);
+    const [call, result] = within(rows[1]).getAllByRole("cell");
+    expect(call).toHaveTextContent("search_game_tree");
+    expect(result).toHaveTextContent("Returned MCPTest, TestPart, and TestScript");
+    expect(
+      within(result).getByRole("button", { name: "MCPTest" }).closest("strong"),
+    ).not.toBeNull();
+    const chip = within(result).getByRole("button", { name: "TestPart" });
+    fireEvent.click(chip);
+    expect(within(result).getByRole("button", { expanded: true }).textContent).toBe(references[1]);
+    expect(rows[2]).toHaveTextContent("inspect_instance");
+    expect(rows[2]).toHaveTextContent("Inspected properties");
+    expect(screen.getByText("Done.")).toBeVisible();
+  });
+
+  it("keeps literal reference markup in inline and fenced code", () => {
+    const { container } = render(
+      <ExplorerReferenceProvider>
+        <MessageText text={[`Inline: \`${legacy}\``, "", "```", legacy, "```"].join("\n")} />
+      </ExplorerReferenceProvider>,
+    );
+
+    expect(screen.queryByRole("button", { name: object.name })).not.toBeInTheDocument();
+    expect(container.querySelector("code")).toHaveTextContent(legacy);
+    expect(container.querySelector("pre code")).toHaveTextContent(legacy);
   });
 
   it("restores the icon and exact markup from stored text without Studio", () => {

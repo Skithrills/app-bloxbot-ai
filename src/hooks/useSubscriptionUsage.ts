@@ -1,7 +1,9 @@
 import { type QueryState, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useEffect, useRef, useState } from "react";
 import { useConnectedProviders } from "@/hooks/useProviders";
+import { type AppConfig, loadConfig, patchConfig } from "@/lib/config";
 import { desktop } from "@/lib/desktop";
+import { notify } from "@/lib/notifications";
 import { OPENAI_OAUTH_PROVIDER } from "@/lib/openAiProfiles";
 import { CLAUDE_AGENT_PROVIDER } from "@/lib/providerAuth";
 import { qk } from "@/lib/queryKeys";
@@ -35,6 +37,8 @@ export function subscriptionUsageSourceLabel(source: SubscriptionProvider) {
   switch (source) {
     case "codex":
       return "BloxBot ChatGPT connection";
+    case "codex-cli":
+      return "Codex CLI account (separate sign-in)";
     case "claude":
       return "Claude Code account";
   }
@@ -120,11 +124,18 @@ export function useConnectedSubscriptionProviders() {
 /** Settings and the active model observe the same reading and share in-flight requests. */
 export function useSubscriptionUsage(providerId: string | undefined, completedTurn?: string) {
   const connected = useConnectedSubscriptionProviders();
+  const { data: useCodexCli = false } = useQuery({
+    queryKey: qk.config,
+    queryFn: loadConfig,
+    select: (config) => config.codexCliUsageEnabled === true,
+  });
   const account = connected.includes(providerId ?? "")
-    ? subscriptionAccount(providerId)
+    ? providerId === OPENAI_OAUTH_PROVIDER && useCodexCli
+      ? "codex-cli"
+      : subscriptionAccount(providerId)
     : undefined;
   const queryClient = useQueryClient();
-  const queryKey = qk.subscriptionUsage(account ? providerId : undefined);
+  const queryKey = [...qk.subscriptionUsage(account ? providerId : undefined), account];
   const query = useQuery({
     queryKey,
     queryFn: (context) => {
@@ -150,7 +161,10 @@ export function useSubscriptionUsage(providerId: string | undefined, completedTu
   useEffect(() => {
     if (!account || !providerId) return;
     const onFocus = () => {
-      const state = queryClient.getQueryState<Reading>(qk.subscriptionUsage(providerId));
+      const state = queryClient.getQueryState<Reading>([
+        ...qk.subscriptionUsage(providerId),
+        account,
+      ]);
       if (state?.fetchStatus === "idle" && nextAutomaticReadAt(state) <= Date.now()) {
         void refetch({ cancelRefetch: false });
       }
@@ -175,7 +189,7 @@ export function useSubscriptionUsage(providerId: string | undefined, completedTu
       !Number.isFinite(automaticReadAt)
     )
       return;
-    const key = qk.subscriptionUsage(providerId);
+    const key = [...qk.subscriptionUsage(providerId), account];
     const timer = window.setTimeout(
       () => {
         const state = queryClient.getQueryState<Reading>(key);
@@ -206,6 +220,17 @@ export function useSubscriptionUsage(providerId: string | undefined, completedTu
     isPreviousReading: isPreviousUsage(usage, isError, now),
     now,
     refresh: () => refetch({ cancelRefetch: false }),
+    useCodexCli,
+    setUseCodexCli: async (enabled: boolean) => {
+      try {
+        await patchConfig({ codexCliUsageEnabled: enabled });
+        queryClient.setQueryData<AppConfig>(qk.config, (config) =>
+          config ? { ...config, codexCliUsageEnabled: enabled } : config,
+        );
+      } catch {
+        notify.error("Couldn't save the usage source.");
+      }
+    },
   };
 }
 

@@ -16,6 +16,7 @@ import {
   SquareTerminal,
   Wrench,
 } from "lucide-react";
+import type { fromMarkdown } from "mdast-util-from-markdown";
 import {
   type ComponentProps,
   createContext,
@@ -438,6 +439,45 @@ const keepFileLinks: UrlTransform = (url, key) =>
     ? url
     : defaultUrlTransform(url);
 
+type MarkdownTree = ReturnType<typeof fromMarkdown>;
+type MarkdownParent = { children: MarkdownTree["children"] };
+
+function remarkInstanceReferences() {
+  return (tree: MarkdownTree, file: { toString(): string }) => {
+    const text = file.toString();
+    if (!text.includes("<Instance")) return;
+
+    const replaceReferences = ({ children }: MarkdownParent) => {
+      for (let index = 0; index < children.length; index += 1) {
+        const child = children[index];
+        if ("children" in child) replaceReferences(child as MarkdownParent);
+        if (child.type !== "html" || child.value !== "</Instance>") continue;
+
+        // Markdown parses an inline reference as separate opening, label, and closing nodes.
+        // Read the original slice so a chip's label and raw action retain the exact source.
+        for (let start = index - 1; start >= 0; start -= 1) {
+          const opening = children[start];
+          if (opening.type !== "html") continue;
+          if (!opening.value.startsWith("<Instance")) break;
+          const raw = text.slice(opening.position?.start.offset, child.position?.end.offset);
+          const [reference, rest] = splitInstanceReferences(raw);
+          if (reference?.type !== "instance" || rest) break;
+          children.splice(start, index - start + 1, {
+            type: "text",
+            value: "",
+            data: { hName: "span", hProperties: { dataInstanceReference: raw } },
+          });
+          index = start;
+          break;
+        }
+      }
+    };
+    replaceReferences(tree);
+  };
+}
+
+const MESSAGE_REMARK_PLUGINS = [...REMARK_PLUGINS, remarkInstanceReferences];
+
 const markdownComponents: Components = {
   p({ children }) {
     return <p className="mb-2 last:mb-0">{children}</p>;
@@ -547,6 +587,15 @@ export function MessageText({
 }) {
   const components: Components = {
     ...markdownComponents,
+    span({ node, children }) {
+      const raw = node?.properties.dataInstanceReference;
+      const [reference] = typeof raw === "string" ? splitInstanceReferences(raw) : [];
+      return reference?.type === "instance" ? (
+        <MessageReference reference={reference} action="explorer" source={source} />
+      ) : (
+        <span>{children}</span>
+      );
+    },
     img({ node: _node, src, alt, ...props }) {
       if (typeof src === "string" && src.startsWith("capture:")) {
         const image = captures?.get(src.slice(8));
@@ -555,24 +604,14 @@ export function MessageText({
       return src ? <img {...props} src={src} alt={alt ?? ""} /> : (alt ?? null);
     },
   };
-  return splitInstanceReferences(text).map((part, index) =>
-    part.type === "instance" ? (
-      <MessageReference
-        key={`${part.path}:${index}`}
-        reference={part}
-        action="explorer"
-        source={source}
-      />
-    ) : (
-      <Markdown
-        key={index}
-        remarkPlugins={REMARK_PLUGINS}
-        components={components}
-        urlTransform={keepFileLinks}
-      >
-        {part.value}
-      </Markdown>
-    ),
+  return (
+    <Markdown
+      remarkPlugins={MESSAGE_REMARK_PLUGINS}
+      components={components}
+      urlTransform={keepFileLinks}
+    >
+      {text}
+    </Markdown>
   );
 }
 

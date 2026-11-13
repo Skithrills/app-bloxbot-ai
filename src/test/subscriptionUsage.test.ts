@@ -1,6 +1,16 @@
+import { Schema } from "effect";
 import { describe, expect, it, vi } from "vitest";
-import { claudeProtocol, fetchChatGptUsage } from "../../electron/services/SubscriptionUsage";
-import { chatGptWindows, claudeWindows } from "../../electron/services/subscriptionWindows";
+import {
+  claudeProtocol,
+  codexProtocol,
+  fetchChatGptUsage,
+} from "../../electron/services/SubscriptionUsage";
+import {
+  chatGptWindows,
+  claudeWindows,
+  codexWindows,
+} from "../../electron/services/subscriptionWindows";
+import { SubscriptionProviderSchema } from "../types/subscriptionUsage";
 
 describe("subscription windows", () => {
   it("uses the reported duration, including a weekly-only primary window", () => {
@@ -51,6 +61,40 @@ describe("subscription windows", () => {
       { id: "five_hour", label: "5-hour window", usedPercent: 0, resetsAt: null },
       { id: "seven_day", label: "Weekly", usedPercent: 24.5, resetsAt: Date.parse(resetsAt) },
       { id: "model/Opus", label: "Weekly · Opus", usedPercent: 31, resetsAt: null },
+    ]);
+  });
+
+  it("reads Codex CLI usage from current and legacy replies", () => {
+    const rateLimits = {
+      primary: { usedPercent: 84, windowDurationMins: 10_080, resetsAt: 1794416400 },
+      secondary: null,
+    };
+    const weekly = {
+      id: "codex/primary",
+      label: "Weekly",
+      usedPercent: 84,
+      resetsAt: 1794416400000,
+    };
+    expect(codexWindows({ rateLimits })).toEqual([weekly]);
+    expect(
+      codexWindows({
+        rateLimitsByLimitId: {
+          codex: rateLimits,
+          review: {
+            limitName: "Code review",
+            primary: { usedPercent: 0, windowDurationMins: 300, resetsAt: 0 },
+            secondary: { usedPercent: -1 },
+          },
+        },
+      }),
+    ).toEqual([
+      weekly,
+      {
+        id: "review/primary",
+        label: "Code review · 5-hour window",
+        usedPercent: 0,
+        resetsAt: null,
+      },
     ]);
   });
 });
@@ -112,6 +156,53 @@ describe("ChatGPT usage request", () => {
 });
 
 describe("read-only CLI probe", () => {
+  it("reads usage for the installed CLI's ChatGPT account with no login request", () => {
+    expect(Schema.decodeUnknownSync(SubscriptionProviderSchema)("codex-cli")).toBe("codex-cli");
+    const protocol = codexProtocol("1.2.3");
+    const send = vi.fn();
+    protocol.start(send);
+    protocol.read({ id: 1, result: {} }, send);
+    protocol.read(
+      { id: 2, result: { account: { type: "chatgpt", email: "fixture@example.com" } } },
+      send,
+    );
+    expect(send.mock.calls.map(([message]) => message)).toEqual([
+      {
+        method: "initialize",
+        id: 1,
+        params: { clientInfo: { name: "bloxbot", title: "BloxBot", version: "1.2.3" } },
+      },
+      { method: "initialized", params: {} },
+      { method: "account/read", id: 2, params: { refreshToken: false } },
+      { method: "account/rateLimits/read", id: 3 },
+    ]);
+    expect(
+      protocol.read(
+        {
+          id: 3,
+          result: { rateLimits: { primary: { usedPercent: 84, windowDurationMins: 10_080 } } },
+        },
+        send,
+      ),
+    ).toEqual({
+      status: "available",
+      checkedAt: expect.any(Number),
+      windows: [{ id: "codex/primary", label: "Weekly", usedPercent: 84, resetsAt: null }],
+    });
+  });
+
+  it("skips the quota request when Codex CLI has no subscription account", () => {
+    const protocol = codexProtocol("1.2.3");
+    const send = vi.fn();
+    expect(protocol.read({ id: 2, result: { account: null } }, send)).toEqual({
+      status: "disconnected",
+    });
+    expect(protocol.read({ id: 2, result: { account: { type: "apiKey" } } }, send)).toEqual({
+      status: "unsupported",
+    });
+    expect(send).not.toHaveBeenCalled();
+  });
+
   it("sends Claude only control requests and handles a non-subscription response", () => {
     const send = vi.fn();
     claudeProtocol.start(send);

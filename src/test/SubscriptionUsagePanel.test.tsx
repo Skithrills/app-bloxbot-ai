@@ -9,9 +9,20 @@ import {
 } from "@/hooks/useSubscriptionUsage";
 import { OPENAI_API_PROVIDER, OPENAI_OAUTH_PROVIDER } from "@/lib/openAiProfiles";
 import { qk } from "@/lib/queryKeys";
+import { type AppConfig, DEFAULT_APP_CONFIG } from "@/types/desktop";
 import type { SubscriptionWindow } from "@/types/subscriptionUsage";
 
-const state = vi.hoisted(() => ({ connected: [] as string[], readUsage: vi.fn() }));
+const state = vi.hoisted(() => ({
+  connected: [] as string[],
+  readUsage: vi.fn(),
+  config: {} as AppConfig,
+}));
+vi.mock("@/lib/config", () => ({
+  loadConfig: async () => state.config,
+  patchConfig: async (patch: Partial<AppConfig>) => {
+    state.config = { ...state.config, ...patch };
+  },
+}));
 vi.mock("@/hooks/useProviders", () => ({
   useConnectedProviders: () => state.connected,
 }));
@@ -21,6 +32,8 @@ vi.mock("@/lib/desktop", () => ({
 
 function renderUsage(ui = <SubscriptionUsage />) {
   const client = new QueryClient();
+  client.setQueryDefaults(qk.config, { staleTime: Infinity });
+  client.setQueryData(qk.config, state.config);
   function wrapper({ children }: PropsWithChildren) {
     return <QueryClientProvider client={client}>{children}</QueryClientProvider>;
   }
@@ -52,6 +65,7 @@ describe("Subscription usage", () => {
   beforeEach(() => {
     state.readUsage.mockReset();
     state.connected = [];
+    state.config = { ...DEFAULT_APP_CONFIG };
   });
   afterEach(() => vi.useRealTimers());
 
@@ -130,6 +144,56 @@ describe("Subscription usage", () => {
     expect(await screen.findByRole("dialog", { name: "ChatGPT subscription usage" })).toBeVisible();
   });
 
+  it("opts in to a separately labelled CLI account, remembers it, and stops on opt-out", async () => {
+    state.connected = [OPENAI_OAUTH_PROVIDER];
+    state.readUsage.mockImplementation(async (source: string) =>
+      source === "codex-cli" ? available() : { status: "usage_not_shared" },
+    );
+    const { unmount } = renderUsage(
+      <>
+        <SubscriptionUsage />
+        <ChatGptUsageControl />
+        <ModelUsage />
+      </>,
+    );
+    expect(await screen.findByText(/does not share remaining quota/)).toBeVisible();
+    expect(state.readUsage).not.toHaveBeenCalledWith("codex-cli");
+    fireEvent.click(screen.getByRole("button", { name: "Read Codex CLI usage" }));
+    expect(await screen.findByText("85% left")).toBeVisible();
+    expect(screen.getByRole("heading", { name: "Codex CLI account" })).toBeVisible();
+    expect(screen.getByText(/may differ from BloxBot/)).toBeVisible();
+    expect(screen.getByTestId("active-model-quota")).toHaveTextContent("codex-cli");
+    expect(
+      screen.getByRole("button", {
+        name: /ChatGPT subscription usage · Codex CLI · Weekly · 85% left/,
+      }),
+    ).toBeVisible();
+    expect(state.readUsage.mock.calls).toEqual([["codex"], ["codex-cli"]]);
+    expect(state.config.codexCliUsageEnabled).toBe(true);
+    unmount();
+
+    renderUsage();
+    expect(await screen.findByText("85% left")).toBeVisible();
+    fireEvent.click(screen.getByRole("button", { name: "Stop reading Codex CLI usage" }));
+    expect(await screen.findByText(/does not share remaining quota/)).toBeVisible();
+    expect(screen.queryByText("85% left")).toBeNull();
+    expect(state.config.codexCliUsageEnabled).toBe(false);
+  });
+
+  it("refreshes an opted-in CLI reading automatically and shows missing-CLI guidance", async () => {
+    vi.useFakeTimers();
+    state.connected = [OPENAI_OAUTH_PROVIDER];
+    state.config.codexCliUsageEnabled = true;
+    state.readUsage.mockResolvedValueOnce(available()).mockResolvedValue({ status: "cli_missing" });
+    renderUsage();
+    await tick(1);
+    expect(state.readUsage.mock.calls).toEqual([["codex-cli"]]);
+    await tick(60_000);
+    expect(state.readUsage.mock.calls).toEqual([["codex-cli"], ["codex-cli"]]);
+    expect(screen.getByText(/Codex CLI is required/)).toBeVisible();
+    expect(screen.queryByText("85% left")).toBeNull();
+  });
+
   it("clears the old account’s cached reading when the BloxBot connection disconnects", async () => {
     state.connected = [OPENAI_OAUTH_PROVIDER];
     state.readUsage
@@ -140,7 +204,9 @@ describe("Subscription usage", () => {
     state.connected = [];
     rerender(<SubscriptionUsage />);
     await waitFor(() =>
-      expect(client.getQueryState(qk.subscriptionUsage(OPENAI_OAUTH_PROVIDER))).toBeUndefined(),
+      expect(
+        client.getQueryCache().findAll({ queryKey: qk.subscriptionUsage(OPENAI_OAUTH_PROVIDER) }),
+      ).toHaveLength(0),
     );
     state.connected = [OPENAI_OAUTH_PROVIDER];
     rerender(<SubscriptionUsage />);

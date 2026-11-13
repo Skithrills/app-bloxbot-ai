@@ -111,6 +111,8 @@ export const AppConfigSchema = Schema.mutable(
     contextChart: ContextChartSchema,
     composerShortcuts: ComposerShortcutsSchema,
     composerPredictions: Schema.Boolean,
+    // Explicit opt-in to reading the separately signed-in Codex CLI account.
+    codexCliUsageEnabled: Schema.Boolean,
     audioVisualizerEnabled: Schema.Boolean,
     studioTargetsBySession: Schema.Record({ key: Schema.String, value: StudioTargetSchema }),
     // Chats someone chose to use for work that has nothing to do with Studio.
@@ -154,6 +156,7 @@ export const DEFAULT_APP_CONFIG: AppConfig = {
   contextChart: "bar",
   composerShortcuts: DEFAULT_COMPOSER_SHORTCUTS,
   composerPredictions: false,
+  codexCliUsageEnabled: false,
   audioVisualizerEnabled: false,
   studioTargetsBySession: {},
   chatsWithoutStudio: [],

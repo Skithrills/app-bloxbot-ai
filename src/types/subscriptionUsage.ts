@@ -1,6 +1,6 @@
 import { Schema } from "effect";
 
-export const SubscriptionProviderSchema = Schema.Literal("codex", "claude");
+export const SubscriptionProviderSchema = Schema.Literal("codex", "claude", "codex-cli");
 export type SubscriptionProvider = typeof SubscriptionProviderSchema.Type;
 
 const SubscriptionWindowSchema = Schema.Struct({

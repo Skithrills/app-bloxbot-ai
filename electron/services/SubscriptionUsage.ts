@@ -1,6 +1,7 @@
 import { spawn } from "node:child_process";
 import { constants } from "node:fs";
 import { access, stat } from "node:fs/promises";
+import { tmpdir } from "node:os";
 import { delimiter, isAbsolute, join } from "node:path";
 import { createInterface } from "node:readline";
 import { OpenCode, type OpenCodeClient } from "@opencode/client";
@@ -12,7 +13,7 @@ import type {
   SubscriptionWindow,
 } from "../../src/types/subscriptionUsage";
 import { loadShellPath } from "../shellEnv";
-import { chatGptWindows, claudeWindows, record } from "./subscriptionWindows";
+import { chatGptWindows, claudeWindows, codexWindows, record } from "./subscriptionWindows";
 
 const CLAUDE_INTEGRATION = "claude-agent";
 const PROBE_TIMEOUT_MS = 25_000;
@@ -109,6 +110,37 @@ function probeCli(
   });
 }
 
+export function codexProtocol(version: string): UsageProtocol {
+  return {
+    start(send) {
+      send({
+        method: "initialize",
+        id: 1,
+        params: { clientInfo: { name: "bloxbot", title: "BloxBot", version } },
+      });
+    },
+    read(message, send) {
+      switch (message.id) {
+        case 1:
+          if (!record(message.result)) return unsupported;
+          send({ method: "initialized", params: {} });
+          send({ method: "account/read", id: 2, params: { refreshToken: false } });
+          return;
+        case 2: {
+          const reply = record(message.result);
+          if (!reply) return unavailable;
+          if (reply.account === null) return disconnected;
+          if (record(reply.account)?.type !== "chatgpt") return unsupported;
+          send({ method: "account/rateLimits/read", id: 3 });
+          return;
+        }
+        case 3:
+          return checked(codexWindows(message.result));
+      }
+    },
+  };
+}
+
 export const claudeProtocol: UsageProtocol = {
   start(send) {
     send({ type: "control_request", request_id: "init", request: { subtype: "initialize" } });
@@ -189,11 +221,33 @@ export async function fetchChatGptUsage(
   }
 }
 
-/** Use the same engine workspace and active integration that serves the chat. */
+/** Read connected accounts through their active integration, or the explicitly selected CLI account. */
 export function createSubscriptionUsageReader(
   getEngine: () => Promise<OpenCodeInfo>,
   fetchUsage: UsageFetch,
+  clientVersion = "0.0.0",
 ) {
+  async function readInstalledCodex(): Promise<SubscriptionUsageResult> {
+    const path = (await loadShellPath()) || process.env.PATH;
+    const executable = await findExecutable("codex", path);
+    if (!executable) return missing;
+    // Keep the CLI's configured profile and let it load its own existing account.
+    return probeCli(
+      executable,
+      ["app-server"],
+      tmpdir(),
+      {
+        ...process.env,
+        PATH: path,
+        CODEX_ACCESS_TOKEN: undefined,
+        CODEX_API_KEY: undefined,
+        OPENAI_API_KEY: undefined,
+        RUST_LOG: "off",
+      },
+      codexProtocol(clientVersion),
+    );
+  }
+
   async function readClaude(workspace: string): Promise<SubscriptionUsageResult> {
     const shellPath = await loadShellPath();
     const path = shellPath || process.env.PATH;
@@ -237,6 +291,7 @@ export function createSubscriptionUsageReader(
   }
 
   async function read(provider: SubscriptionProvider): Promise<SubscriptionUsageResult> {
+    if (provider === "codex-cli") return share(provider, readInstalledCodex);
     const engine = await getEngine();
     const api = OpenCode.make({
       baseUrl: `http://127.0.0.1:${engine.port}`,

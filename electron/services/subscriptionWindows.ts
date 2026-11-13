@@ -67,6 +67,31 @@ export function chatGptWindows(payload: unknown): SubscriptionWindow[] {
   return [...windows.values()];
 }
 
+/** Prefer Codex's multi-bucket view and retain the single-bucket view for older CLI versions. */
+export function codexWindows(payload: unknown): SubscriptionWindow[] {
+  const response = record(payload);
+  const byId = record(response?.rateLimitsByLimitId);
+  const buckets = byId && Object.keys(byId).length > 0
+    ? Object.entries(byId)
+    : [["codex", response?.rateLimits] as const];
+
+  return buckets.flatMap(([id, value]) => {
+    const bucket = record(value);
+    const name = id === "codex"
+      ? ""
+      : (typeof bucket?.limitName === "string" ? bucket.limitName.trim() : "") || id;
+    return ["primary", "secondary"].flatMap((kind) => {
+      const meter = record(bucket?.[kind]);
+      const period = displayWindow(
+        meter?.windowDurationMins,
+        kind === "primary" ? "Primary window" : "Secondary window",
+      );
+      const reset = typeof meter?.resetsAt === "number" ? meter.resetsAt * 1_000 : 0;
+      return usageWindow(`${id}/${kind}`, name ? `${name} · ${period}` : period, meter?.usedPercent, reset);
+    });
+  });
+}
+
 /** Claude Code's get_usage percentages are already on the 0–100 scale. */
 export function claudeWindows(payload: unknown): SubscriptionWindow[] {
   const limits = record(record(payload)?.rate_limits);

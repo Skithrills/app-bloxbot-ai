@@ -31,6 +31,7 @@ import {
   net,
   Notification,
   protocol,
+  screen,
   shell,
 } from "electron";
 import { autoUpdater } from "electron-updater";
@@ -84,6 +85,7 @@ import { makeOpenCodeLayer, OpenCode } from "./services/OpenCode";
 import { createSubscriptionUsageReader } from "./services/SubscriptionUsage";
 import { createSystemNotifier, notificationSettingsUrl } from "./systemNotifications";
 import { makeStudioMcpBrokerLayer, StudioMcpBroker } from "./services/StudioMcpBroker";
+import { loadWindowState, minimumWindowSize, saveWindowState, type WindowMode } from "./windowState";
 
 protocol.registerSchemesAsPrivileged([
   { scheme: STUDIO_ICON_SCHEME, privileges: { standard: true, secure: true } },
@@ -344,7 +346,11 @@ const registerIpcHandlers = Effect.sync(() => {
       OpenCode.pipe(Effect.flatMap((service) => service.info)),
     );
   ipcMain.handle(channels.getOpenCodeInfo, getOpenCodeInfo);
-  const readSubscriptionUsage = createSubscriptionUsageReader(getOpenCodeInfo, (url, options) => net.fetch(url, options));
+  const readSubscriptionUsage = createSubscriptionUsageReader(
+    getOpenCodeInfo,
+    (url, options) => net.fetch(url, options),
+    app.getVersion(),
+  );
   ipcMain.handle(channels.getSubscriptionUsage, (_event, provider: unknown) =>
     Schema.decodeUnknownPromise(SubscriptionProviderSchema)(provider).then(readSubscriptionUsage),
   );
@@ -736,15 +742,20 @@ const registerIpcHandlers = Effect.sync(() => {
 
 function createWindow(): Effect.Effect<void, DesktopMainError> {
   return Effect.gen(function* () {
+    const statePath = join(app.getPath("userData"), "window-state.json");
+    const state = loadWindowState(
+      statePath,
+      screen.getPrimaryDisplay().workArea,
+      screen.getAllDisplays().map((display) => display.workArea),
+    );
     const window = yield* Effect.try({
       try: () =>
         new BrowserWindow({
           title: "BloxBot",
           icon: join(app.getAppPath(), app.isPackaged ? "dist" : "public", "bloxbot-icon.png"),
-          width: 920,
-          height: 600,
-          minWidth: 520,
-          minHeight: 400,
+          ...state.bounds,
+          minWidth: Math.min(minimumWindowSize.width, state.bounds.width),
+          minHeight: Math.min(minimumWindowSize.height, state.bounds.height),
           backgroundColor: "#ffffff",
           titleBarStyle: "hiddenInset",
           show: false,
@@ -811,7 +822,29 @@ function createWindow(): Effect.Effect<void, DesktopMainError> {
         );
         if (shouldBlock) event.preventDefault();
       });
-      window.once("ready-to-show", () => Effect.runSync(Effect.sync(() => window.show())));
+      let lastMode = state.mode;
+      const currentMode = (): WindowMode =>
+        window.isFullScreen() ? "fullscreen" : window.isMaximized() ? "maximized" : "normal";
+      const rememberMode = () => {
+        if (!window.isMinimized()) lastMode = currentMode();
+      };
+      window.on("maximize", rememberMode);
+      window.on("unmaximize", rememberMode);
+      window.on("enter-full-screen", rememberMode);
+      window.on("leave-full-screen", rememberMode);
+      window.once("ready-to-show", () => {
+        if (state.mode === "maximized") window.maximize();
+        window.show();
+        if (state.mode === "fullscreen") window.setFullScreen(true);
+      });
+      window.on("close", () => {
+        rememberMode();
+        try {
+          saveWindowState(statePath, { bounds: window.getNormalBounds(), mode: lastMode });
+        } catch (cause) {
+          Effect.runSync(Effect.logWarning("Failed to save window state", cause));
+        }
+      });
       window.on("closed", () =>
         Effect.runSync(
           Effect.sync(() => {

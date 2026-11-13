@@ -7,6 +7,19 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+## [0.16.2] - 2026-11-13
+
+### Added
+
+- The Privacy tab shows the animated cat mascot.
+
+### Fixed
+
+- Restore the last window size, position and maximized/fullscreen state on launch; new installations start maximized.
+- Keep instance chips inline within Markdown tables instead of splitting the table into separate text blocks.
+- Restored **Read Codex CLI usage** in subscription settings and the usage popover. The opt-in is saved, refreshes automatically, and clearly labels the CLI's separate account instead of silently substituting it for BloxBot's ChatGPT sign-in.
+- Usage rings now appear only when the selected model uses the ChatGPT plan. The Context button remains available for other providers.
+
 ## [0.16.1] - 2026-11-13
 
 ### Fixed

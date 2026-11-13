@@ -55,6 +55,7 @@ export function useExternalLogin() {
       } finally {
         // The connection is saved by now, even if the user has left the dialog.
         await queryClient.invalidateQueries({ queryKey: qk.providers });
+        void queryClient.resetQueries({ queryKey: qk.subscriptionUsage(providerID), exact: true });
       }
     },
     [client, queryClient],

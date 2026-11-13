@@ -10,10 +10,29 @@ import {
   type SessionStructuredError,
   type PermissionRequest as V2PermissionRequest,
 } from "@opencode/client";
+import {
+  canPredictDraft,
+  composerPredictionPrompt,
+  composerPredictionSuffix,
+  isComposerPredictionModel,
+  isZeroCost,
+} from "../composerPredictions";
+import { isKnownFreeModelKey } from "../freeModels";
+import { freeLimitEndsAt, isFreeUsageLimit } from "../modelError";
 
+import {
+  OPENAI_API_PROVIDER,
+  OPENAI_OAUTH_PROVIDER,
+  toAppProviderID,
+  toEngineProviderID,
+} from "../openAiProfiles";
+import { lastCompaction, summarizeSessionContext } from "../sessionContext";
+import { withDelegationRouting } from "../subagentProfiles";
 import { EventTranslator } from "./events";
 import {
   historyToMessages,
+  INBOX_DELIVERY_KEY,
+  pendingUserMessage,
   todosFromHistory,
   toFormAnswer,
   toModelError,
@@ -25,6 +44,7 @@ import type {
   AssistantMessage,
   Command,
   Event,
+  InboxDelivery,
   McpStatus,
   Model,
   PermissionRequest,
@@ -54,6 +74,7 @@ type TextPromptPart = { type: "text"; text: string };
 export interface PromptInput {
   sessionID: string;
   model?: { providerID: string; modelID: string };
+  requirePaidModel?: boolean;
   variant?: string;
   system?: string;
   parts: ReadonlyArray<TextPromptPart | FilePromptPart | { type: string; [key: string]: unknown }>;
@@ -65,7 +86,10 @@ export interface PromptResult {
   parts: [];
 }
 
+type TurnModel = Pick<PromptInput, "sessionID" | "model" | "variant" | "requirePaidModel">;
+
 const INSTRUCTIONS_KEY = "bloxbot.prompt";
+const PREDICTION_SESSION = "bloxbotComposerPrediction";
 const OAUTH_POLL_MS = 1000;
 const PAGE_SIZE = 200;
 
@@ -166,8 +190,8 @@ function toModel(model: ModelInfo): Model {
   });
   const { capabilities } = model;
   return {
-    id: model.modelID,
-    providerID: model.providerID,
+    id: model.id,
+    providerID: toAppProviderID(model.providerID),
     api: { id: model.modelID, url: "", npm: model.package ?? "" },
     name: model.name,
     family: model.family,
@@ -187,9 +211,10 @@ function toModel(model: ModelInfo): Model {
     },
     limit: model.limit,
     status: model.status,
+    serviceTier: typeof model.body?.service_tier === "string" ? model.body.service_tier : undefined,
     options: {},
     headers: {},
-    release_date: "",
+    releasedAt: model.time?.released,
     variants:
       model.variants.length > 0
         ? Object.fromEntries(
@@ -215,6 +240,35 @@ function externalLoginProblem(integration: IntegrationInfo) {
   return undefined;
 }
 
+function toAppIntegration(integration: IntegrationInfo): IntegrationInfo {
+  const id = toAppProviderID(integration.id);
+  if (id !== OPENAI_OAUTH_PROVIDER) return integration;
+  return {
+    ...integration,
+    id,
+    name: "ChatGPT Subscription",
+    methods: integration.methods.filter((method) => method.type === "oauth"),
+    connections: integration.connections.filter(
+      (connection) => connection.type === "credential" && connection.method === "oauth",
+    ),
+  };
+}
+
+function profileCanRun(integration: IntegrationInfo) {
+  if (integration.id === OPENAI_API_PROVIDER) {
+    return integration.connections.some(
+      (connection) =>
+        connection.type === "env" ||
+        (connection.type === "credential" && connection.method === "key"),
+    );
+  }
+  if (toAppProviderID(integration.id) === OPENAI_OAUTH_PROVIDER) {
+    const active = integration.connections[0];
+    return active?.type === "credential" && active.method === "oauth";
+  }
+  return true;
+}
+
 function toProviderList(
   integrations: ReadonlyArray<IntegrationInfo>,
   models: ReadonlyArray<ModelInfo>,
@@ -222,37 +276,47 @@ function toProviderList(
 ): ProviderListResponse {
   const byProvider = new Map<string, Record<string, Model>>();
   for (const model of models) {
-    if (!model.enabled) continue;
-    const provider = byProvider.get(model.providerID) ?? {};
-    provider[model.modelID] = toModel(model);
-    byProvider.set(model.providerID, provider);
+    if (!model.enabled || (model.type && model.type !== "chat")) continue;
+    const providerID = toAppProviderID(model.providerID);
+    const provider = byProvider.get(providerID) ?? {};
+    provider[model.id] = toModel(model);
+    byProvider.set(providerID, provider);
   }
-  const all = integrations.map(
-    (integration): Provider => ({
+  const all = integrations.map((native): Provider => {
+    const integration = toAppIntegration(native);
+    return {
       id: integration.id,
       name: integration.id === "opencode" ? "OpenCode Zen" : integration.name,
       source: providerSource(integration),
-      env: integration.methods.flatMap((method) =>
-        method.type === "env" ? [...method.names] : [],
-      ),
+      env:
+        integration.id === OPENAI_API_PROVIDER
+          ? ["OPENAI_API_KEY"]
+          : integration.methods.flatMap((method) =>
+              method.type === "env" ? [...method.names] : [],
+            ),
       options: {},
-      models: byProvider.get(integration.id) ?? {},
-    }),
-  );
+      models: profileCanRun(native) ? (byProvider.get(integration.id) ?? {}) : {},
+    };
+  });
+  const connected = all
+    .filter((provider) => Object.keys(provider.models).length > 0)
+    // A signed-out Claude Code still lists its models.
+    .filter(
+      (provider) =>
+        !integrations.some(
+          (item) => toAppProviderID(item.id) === provider.id && externalLoginProblem(item),
+        ),
+    )
+    .map((provider) => provider.id);
+  const defaultProvider = defaultModel && toAppProviderID(defaultModel.providerID);
   return {
     all,
-    default: defaultModel ? { [defaultModel.providerID]: defaultModel.modelID } : {},
-    connected: all
-      .filter((provider) => Object.keys(provider.models).length > 0)
-      // A signed-out Claude Code still lists its models.
-      .filter(
-        (provider) =>
-          !externalLoginProblem(
-            integrations.find((item) => item.id === provider.id) as IntegrationInfo,
-          ),
-      )
-      .map((p) => p.id),
-  } as ProviderListResponse;
+    default:
+      defaultModel && defaultProvider && connected.includes(defaultProvider)
+        ? { [defaultProvider]: defaultModel.id }
+        : {},
+    connected,
+  };
 }
 
 /**
@@ -273,12 +337,17 @@ export function createOpencodeClient(options: {
   const oauthAttempts = new Map<string, string>();
   const sessionModels = new Map<string, string>();
   const exchanges = new Map<string, string[]>();
+  let predictionInFlight = false;
+  let predictionRetryAt = 0;
 
   const remember = (info: SessionInfo): Session => {
     const session = toSession(info);
     translator.rememberSession(session);
     return session;
   };
+
+  const sessionLocation = async (sessionID?: string) =>
+    sessionID ? (await api.session.get({ sessionID })).location : location;
 
   // A cursor carries its query, and OpenCode rejects one sent with the query's filters again.
   const history = async (sessionID: string): Promise<SessionMessageInfo[]> => {
@@ -295,23 +364,63 @@ export function createOpencodeClient(options: {
     const sessions: Session[] = [];
     let page = await api.session.list({ archived, limit: PAGE_SIZE });
     for (;;) {
-      sessions.push(...page.data.map(remember));
+      sessions.push(
+        ...page.data.filter((info) => !info.metadata?.[PREDICTION_SESSION]).map(remember),
+      );
       if (page.data.length < PAGE_SIZE || !page.cursor.next) return sessions;
       page = await api.session.list({ limit: PAGE_SIZE, cursor: page.cursor.next });
     }
   };
 
+  const readProviderCatalog = async () => {
+    // Listing models loads config-defined providers. After a reload, integration.list can
+    // return a nonempty catalog of built-in providers before that work finishes.
+    const { data: models } = await api.model.list({ location });
+    for (let attempt = 0; attempt < 5; attempt += 1) {
+      const { data: integrations } = await api.integration.list({ location });
+      if (integrations.length > 0) return { integrations, models };
+      await sleep(250);
+    }
+    throw new Error("OpenCode's provider catalog is still loading.");
+  };
+
+  let pendingCatalog: ReturnType<typeof readProviderCatalog> | undefined;
+  const providerCatalog = () => {
+    pendingCatalog ??= readProviderCatalog().finally(() => {
+      pendingCatalog = undefined;
+    });
+    return pendingCatalog;
+  };
+
   const integration = async (providerID: string) =>
-    api.integration.get({ integrationID: providerID, location }).then((result) => result.data);
+    (await api.integration.get({ integrationID: toEngineProviderID(providerID), location })).data;
 
   /** Applies the prompt's model and instructions, which OpenCode 2 keeps on the session. */
   const defaultModel = async () => {
     const { data } = await api.model.default({ location }).catch(() => ({ data: null }));
-    return data ? { providerID: data.providerID, modelID: data.modelID } : undefined;
+    if (!data) return undefined;
+    const providerID = toAppProviderID(data.providerID);
+    if (providerID === OPENAI_API_PROVIDER || providerID === OPENAI_OAUTH_PROVIDER) {
+      if (!profileCanRun(await integration(providerID))) {
+        const { integrations, models } = await providerCatalog();
+        const list = toProviderList(integrations, models, null);
+        const provider = list.all.find((item) => list.connected.includes(item.id));
+        const fallback = provider && Object.values(provider.models)[0];
+        if (!fallback) throw new Error("Connect a provider before sending a message.");
+        return { providerID: fallback.providerID, modelID: fallback.id };
+      }
+    }
+    return { providerID, modelID: data.id };
   };
 
-  const prepareTurn = async (input: PromptInput) => {
-    const { sessionID, variant, system } = input;
+  const applyTurnModel = async (input: TurnModel) => {
+    const { sessionID, variant } = input;
+    if (
+      input.requirePaidModel &&
+      (!input.model || isKnownFreeModelKey(`${input.model.providerID}/${input.model.modelID}`))
+    ) {
+      throw new Error("Connect a paid provider or turn off Hide free models.");
+    }
     // A chat keeps its last model. With none selected, as when that model's provider was
     // disconnected, it moves to OpenCode's default instead of failing on the old one.
     const model = input.model ?? (await defaultModel());
@@ -320,11 +429,19 @@ export function createOpencodeClient(options: {
       if (sessionModels.get(sessionID) !== key) {
         await api.session.switchModel({
           sessionID,
-          model: { id: model.modelID, providerID: model.providerID, variant },
+          model: { id: model.modelID, providerID: toEngineProviderID(model.providerID), variant },
         });
         sessionModels.set(sessionID, key);
       }
     }
+  };
+
+  const prepareTurn = async (input: PromptInput) => {
+    await applyTurnModel(input);
+    const { sessionID } = input;
+    const system = input.system?.includes("studio_id")
+      ? withDelegationRouting(input.system)
+      : input.system;
     if (system) {
       await api.experimental.session.instructions.entry.put({
         sessionID,
@@ -407,6 +524,82 @@ export function createOpencodeClient(options: {
   };
 
   const client = {
+    composer: {
+      predict: async (
+        { draft, modelID }: { draft: string; modelID: string },
+        { signal }: Pick<RequestOptions, "signal"> = {},
+      ): Promise<string | null> => {
+        if (
+          predictionInFlight ||
+          Date.now() < predictionRetryAt ||
+          signal?.aborted ||
+          !canPredictDraft(draft) ||
+          !isKnownFreeModelKey(`opencode/${modelID}`)
+        ) {
+          return null;
+        }
+
+        predictionInFlight = true;
+        let sessionID: string | undefined;
+        try {
+          const { integrations, models } = await providerCatalog();
+          const native = models.find(
+            (item) => item.providerID === "opencode" && item.id === modelID,
+          );
+          const provider = toProviderList(integrations, native ? [native] : [], null).all.find(
+            ({ id }) => id === "opencode",
+          );
+          const model = provider?.models[modelID];
+          // Use the built-in anonymous Zen connection, with explicit zero pricing in the catalog.
+          if (
+            signal?.aborted ||
+            !native?.cost.length ||
+            !native.cost.every(isZeroCost) ||
+            !provider ||
+            !model ||
+            !isComposerPredictionModel(provider, model)
+          ) {
+            return null;
+          }
+
+          const scratch = await api.session.create({
+            title: "Composer prediction",
+            model: { id: modelID, providerID: "opencode" },
+            metadata: { bloxbotHidden: true, [PREDICTION_SESSION]: true },
+            location,
+          });
+          sessionID = scratch.id;
+          if (
+            signal?.aborted ||
+            scratch.model?.providerID !== "opencode" ||
+            scratch.model.id !== modelID
+          ) {
+            return null;
+          }
+          // This endpoint supplies the tools Zen expects without running them or writing history.
+          const reply = await api.session.generate(
+            { sessionID, prompt: composerPredictionPrompt(draft) },
+            { signal },
+          );
+          return signal?.aborted ? null : composerPredictionSuffix(draft, reply.text);
+        } catch (error) {
+          if (!signal?.aborted) {
+            const failure = toModelError(toStructuredError(error));
+            predictionRetryAt = isFreeUsageLimit(failure)
+              ? freeLimitEndsAt(failure, Date.now())
+              : Date.now() + 30_000;
+          }
+          return null;
+        } finally {
+          if (sessionID) {
+            await api.session
+              .remove({ sessionID }, { signal: AbortSignal.timeout(5000) })
+              .catch(() => undefined);
+          }
+          predictionInFlight = false;
+        }
+      },
+    },
     session: {
       create: (
         input: {
@@ -414,6 +607,7 @@ export function createOpencodeClient(options: {
           parentID?: string;
           metadata?: Record<string, string | number | boolean>;
           permission?: PermissionRuleset;
+          directory?: string;
         },
         requestOptions?: RequestOptions,
       ) =>
@@ -423,11 +617,19 @@ export function createOpencodeClient(options: {
               title: input.title,
               parentID: input.parentID,
               metadata: input.metadata,
-              location,
+              location: input.directory ? { directory: input.directory } : location,
               permissions: input.permission ? toRuleset(input.permission) : undefined,
             }),
           ),
         ),
+      move: (input: { sessionID: string; directory?: string }, requestOptions?: RequestOptions) =>
+        settle(requestOptions, async () => {
+          const directory = input.directory ?? location?.directory;
+          if (!directory) throw new Error("The default workspace is unavailable.");
+          await api.session.move({ sessionID: input.sessionID, directory });
+          await api.experimental.session.wait({ sessionID: input.sessionID });
+          return remember(await api.session.get({ sessionID: input.sessionID }));
+        }),
       update: (
         input: { sessionID: string; title?: string; time?: { archived?: number } },
         requestOptions?: RequestOptions,
@@ -458,10 +660,70 @@ export function createOpencodeClient(options: {
             ]),
           ) as Record<string, SessionStatus>;
         }),
-      messages: (input: { sessionID: string }, requestOptions?: RequestOptions) =>
+      context: (
+        input: { sessionID: string; beforeMessageID?: string },
+        requestOptions?: RequestOptions,
+      ) =>
         settle(requestOptions, async () =>
-          historyToMessages(input.sessionID, await history(input.sessionID)),
+          summarizeSessionContext(
+            await api.session.context(
+              { sessionID: input.sessionID },
+              { signal: requestOptions?.signal },
+            ),
+            input.beforeMessageID,
+          ),
         ),
+      messages: (
+        input: { sessionID: string; includePending?: boolean },
+        requestOptions?: RequestOptions,
+      ) =>
+        settle(requestOptions, async () => {
+          const { sessionID, includePending } = input;
+          const observer = includePending ? translator.observeInbox(sessionID) : undefined;
+          try {
+            // Read the inbox first so an item delivered during the history request is returned once.
+            const inbox = includePending
+              ? await api.session.inbox.list({ sessionID }, { signal: requestOptions?.signal })
+              : [];
+            const messages = await history(sessionID);
+            const transcript = historyToMessages(
+              sessionID,
+              messages,
+              translator.inboxDeliveries(sessionID),
+            );
+            if (!observer) return transcript;
+            const pending = inbox.flatMap((item) =>
+              item.type === "user"
+                ? [pendingUserMessage(sessionID, item.id, item.time.created, item)]
+                : [],
+            );
+            return translator.rememberTranscript(sessionID, transcript, pending, observer.changes);
+          } finally {
+            observer?.stop();
+          }
+        }),
+      inbox: {
+        cancel: (input: { sessionID: string; inboxID: string }, requestOptions?: RequestOptions) =>
+          settle(requestOptions, () =>
+            api.session.inbox.cancel(input, { signal: requestOptions?.signal }),
+          ),
+        update: (
+          input: { sessionID: string; inboxID: string; delivery: InboxDelivery },
+          requestOptions?: RequestOptions,
+        ) =>
+          settle(requestOptions, async () => {
+            const { sessionID, inboxID, delivery } = input;
+            const observer = translator.observeInbox(sessionID);
+            try {
+              await api.session.inbox.update(input, { signal: requestOptions?.signal });
+              if (observer.isActive() && observer.changes.get(inboxID) !== "cancelled") {
+                translator.rememberInboxDelivery(sessionID, inboxID, delivery);
+              }
+            } finally {
+              observer.stop();
+            }
+          }),
+      },
       todo: (input: { sessionID: string }, requestOptions?: RequestOptions) =>
         settle(
           requestOptions,
@@ -475,6 +737,53 @@ export function createOpencodeClient(options: {
       promptAsync: (input: PromptInput, requestOptions?: RequestOptions) =>
         settle(requestOptions, async () => {
           await sendPrompt(input);
+        }),
+      /** Sends a native inbox message while preserving the session's agent and instructions. */
+      promptInbox: (
+        input: {
+          sessionID: string;
+          text: string;
+          delivery: InboxDelivery;
+          files?: Array<{ uri: string; name?: string }>;
+          model?: { providerID: string; modelID: string };
+          studioTargetID?: string | null;
+        },
+        requestOptions?: RequestOptions,
+      ) =>
+        settle(requestOptions, async () => {
+          const { sessionID, text, delivery, files, model, studioTargetID } = input;
+          if (studioTargetID !== undefined) {
+            const entries = await api.experimental.session.instructions.entry.list({ sessionID });
+            const instructions = entries.find(({ key }) => key === INSTRUCTIONS_KEY)?.value;
+            const routedID =
+              typeof instructions === "string"
+                ? instructions.match(
+                    /^Route every Roblox Studio MCP tool call for this request to studio_id ("(?:[^"\\]|\\.)*")\./,
+                  )?.[1]
+                : undefined;
+            if (
+              routedID !== (studioTargetID === null ? undefined : JSON.stringify(studioTargetID))
+            ) {
+              throw new Error(
+                "The Studio selection changed. Send this message once the chat is idle.",
+              );
+            }
+          }
+          if (model) {
+            await api.session.switchModel({
+              sessionID,
+              model: { id: model.modelID, providerID: model.providerID },
+            });
+            sessionModels.delete(sessionID);
+          }
+          return api.session.prompt({
+            sessionID,
+            text,
+            delivery,
+            files,
+            metadata: { [INBOX_DELIVERY_KEY]: delivery },
+            resume: true,
+          });
         }),
       prompt: (input: PromptInput, requestOptions?: RequestOptions) =>
         settle(requestOptions, () => prompt(input)),
@@ -495,9 +804,28 @@ export function createOpencodeClient(options: {
             ),
           });
         }),
-      compact: (input: { sessionID: string }, requestOptions?: RequestOptions) =>
+      compact: (
+        input: TurnModel & { waitForCompletion?: boolean },
+        requestOptions?: RequestOptions,
+      ) =>
         settle(requestOptions, async () => {
-          await api.session.compact({ sessionID: input.sessionID });
+          const { sessionID, waitForCompletion } = input;
+          const previous = waitForCompletion
+            ? lastCompaction(await api.session.context({ sessionID }))
+            : undefined;
+          if (waitForCompletion && (await api.session.active())[sessionID]) {
+            throw new Error("Wait for the chat to finish before compacting.");
+          }
+          if (input.model || input.requirePaidModel) await applyTurnModel(input);
+          await api.session.compact({ sessionID });
+          if (!waitForCompletion) return;
+
+          await api.experimental.session.wait({ sessionID });
+          const latest = lastCompaction(await api.session.context({ sessionID }));
+          if (!latest || latest.id === previous?.id || latest.status === "running") {
+            throw new Error("OpenCode did not report a compaction result.");
+          }
+          if (latest.status === "failed") throw new Error(latest.error.message);
         }),
       fork: (input: { sessionID: string; before?: string }, requestOptions?: RequestOptions) =>
         settle(requestOptions, async () => remember(await api.session.fork(input))),
@@ -531,10 +859,29 @@ export function createOpencodeClient(options: {
     },
     event: {
       subscribe: async (_input: object = {}, requestOptions?: RequestOptions) => {
-        const stream = api.event.subscribe({ signal: requestOptions?.signal });
+        const iterator = api.event
+          .subscribe({ signal: requestOptions?.signal })
+          [Symbol.asyncIterator]();
+        // The SDK starts the stream on its first read. Connect before the caller refetches
+        // snapshots, so native changes during that request are buffered by the SDK.
+        const first = await iterator.next();
         async function* translated(): AsyncGenerator<Event> {
-          for await (const event of stream) {
-            yield* translator.translate(event);
+          const predictionSessions = new Set<string>();
+          try {
+            for (let next = first; !next.done; next = await iterator.next()) {
+              const event = next.value;
+              if (event.type === "session.created" && event.data.metadata?.[PREDICTION_SESSION]) {
+                predictionSessions.add(event.data.sessionID);
+              }
+              if ("sessionID" in event.data && predictionSessions.has(event.data.sessionID)) {
+                if (event.type === "session.deleted")
+                  predictionSessions.delete(event.data.sessionID);
+                continue;
+              }
+              yield* translator.translate(event);
+            }
+          } finally {
+            await iterator.return?.();
           }
         }
         return { stream: translated() };
@@ -597,19 +944,19 @@ export function createOpencodeClient(options: {
     provider: {
       list: (_input: object = {}, requestOptions?: RequestOptions) =>
         settle(requestOptions, async () => {
-          const [integrations, models, defaultModel] = await Promise.all([
-            api.integration.list({ location }),
-            api.model.list({ location }),
+          const [catalog, defaultModel] = await Promise.all([
+            providerCatalog(),
             api.model.default({ location }).catch(() => ({ data: null })),
           ]);
-          return toProviderList(integrations.data, models.data, defaultModel.data);
+          return toProviderList(catalog.integrations, catalog.models, defaultModel.data);
         }),
       auth: (_input: object = {}, requestOptions?: RequestOptions) =>
         settle(requestOptions, async () => {
-          const integrations = await api.integration.list({ location });
           return Object.fromEntries(
-            integrations.data.map((item) => [item.id, toAuthMethods(item.methods)]),
-          ) as Record<string, ProviderAuthMethod[]>;
+            (await providerCatalog()).integrations
+              .map(toAppIntegration)
+              .map((item) => [item.id, toAuthMethods(item.methods)]),
+          );
         }),
       oauth: {
         authorize: (
@@ -617,11 +964,11 @@ export function createOpencodeClient(options: {
           requestOptions?: RequestOptions,
         ) =>
           settle(requestOptions, async () => {
-            const { methods } = await integration(input.providerID);
+            const { methods } = toAppIntegration(await integration(input.providerID));
             const method = connectable(methods)[input.method];
             if (method?.type !== "oauth") throw new Error("This sign-in method isn't available.");
             const attempt = await api.integration.oauth.connect({
-              integrationID: input.providerID,
+              integrationID: toEngineProviderID(input.providerID),
               methodID: method.id,
               answer: input.inputs,
               location,
@@ -640,7 +987,11 @@ export function createOpencodeClient(options: {
           settle(requestOptions, async () => {
             const attemptID = oauthAttempts.get(input.providerID);
             if (!attemptID) throw new Error("Start the sign-in again.");
-            const ids = { integrationID: input.providerID, attemptID, location };
+            const ids = {
+              integrationID: toEngineProviderID(input.providerID),
+              attemptID,
+              location,
+            };
             if (input.code) {
               await api.integration.oauth.complete({ ...ids, code: input.code });
               oauthAttempts.delete(input.providerID);
@@ -665,8 +1016,12 @@ export function createOpencodeClient(options: {
         requestOptions?: RequestOptions,
       ) =>
         settle(requestOptions, async () => {
+          const providerID = input.providerID === "openai" ? OPENAI_API_PROVIDER : input.providerID;
+          if (providerID === OPENAI_OAUTH_PROVIDER) {
+            throw new Error("Use the OpenAI API Key profile to enter a key.");
+          }
           await api.integration.connect.key({
-            integrationID: input.providerID,
+            integrationID: providerID,
             key: input.auth.key,
             location,
           });
@@ -712,10 +1067,11 @@ export function createOpencodeClient(options: {
         }),
       remove: (input: { providerID: string }, requestOptions?: RequestOptions) =>
         settle(requestOptions, async () => {
-          const { connections } = await integration(input.providerID);
+          const { id, connections } = toAppIntegration(await integration(input.providerID));
           await Promise.all(
             connections.flatMap((connection) =>
-              connection.type === "credential"
+              connection.type === "credential" &&
+              (id !== OPENAI_API_PROVIDER || connection.method === "key")
                 ? [api.credential.remove({ credentialID: connection.id })]
                 : [],
             ),
@@ -724,20 +1080,27 @@ export function createOpencodeClient(options: {
         }),
     },
     permission: {
-      list: (_input: object = {}, requestOptions?: RequestOptions) =>
+      list: (input: { sessionID?: string } = {}, requestOptions?: RequestOptions) =>
         settle(requestOptions, async () => {
-          const requests = await api.permission.request.list({ location });
+          const requests = await api.permission.request.list({
+            location: await sessionLocation(input.sessionID),
+          });
           for (const request of requests.data) {
             permissionSessions.set(request.id, request.sessionID);
           }
           return requests.data.map(toPermissionRequest);
         }),
       reply: (
-        input: { requestID: string; reply: "once" | "always" | "reject"; message?: string },
+        input: {
+          requestID: string;
+          sessionID?: string;
+          reply: "once" | "always" | "reject";
+          message?: string;
+        },
         requestOptions?: RequestOptions,
       ) =>
         settle(requestOptions, async () => {
-          let sessionID = permissionSessions.get(input.requestID);
+          let sessionID = input.sessionID ?? permissionSessions.get(input.requestID);
           if (!sessionID) {
             const requests = await api.permission.request.list({ location });
             sessionID = requests.data.find((request) => request.id === input.requestID)?.sessionID;
@@ -754,18 +1117,20 @@ export function createOpencodeClient(options: {
         }),
     },
     question: {
-      list: (_input: object = {}, requestOptions?: RequestOptions) =>
+      list: (input: { sessionID?: string } = {}, requestOptions?: RequestOptions) =>
         settle(requestOptions, async (): Promise<QuestionRequest[]> => {
-          const open = await api.form.list({ location });
-          for (const form of open.data) forms.set(form.id, form);
-          return open.data.map(toQuestionRequest);
+          const open = input.sessionID
+            ? await api.session.form.list({ sessionID: input.sessionID })
+            : (await api.form.list({ location })).data;
+          for (const form of open) forms.set(form.id, form);
+          return open.map(toQuestionRequest);
         }),
       reply: (
-        input: { requestID: string; answers: QuestionAnswer[] },
+        input: { requestID: string; sessionID?: string; answers: QuestionAnswer[] },
         requestOptions?: RequestOptions,
       ) =>
         settle(requestOptions, async () => {
-          const form = await findForm(input.requestID);
+          const form = await findForm(input.requestID, input.sessionID);
           await api.session.form.reply({
             sessionID: form.sessionID,
             formID: form.id,
@@ -774,9 +1139,9 @@ export function createOpencodeClient(options: {
           forms.delete(form.id);
           return true;
         }),
-      reject: (input: { requestID: string }, requestOptions?: RequestOptions) =>
+      reject: (input: { requestID: string; sessionID?: string }, requestOptions?: RequestOptions) =>
         settle(requestOptions, async () => {
-          const form = await findForm(input.requestID);
+          const form = await findForm(input.requestID, input.sessionID);
           await api.session.form.cancel({ sessionID: form.sessionID, formID: form.id });
           forms.delete(form.id);
           return true;
@@ -784,9 +1149,12 @@ export function createOpencodeClient(options: {
     },
   };
 
-  const findForm = async (formID: string): Promise<FormInfo> => {
+  const findForm = async (formID: string, sessionID?: string): Promise<FormInfo> => {
     const known = forms.get(formID);
     if (known) return known;
+    if (sessionID) {
+      return api.session.form.get({ sessionID, formID });
+    }
     const open = await api.form.list({ location });
     const form = open.data.find((candidate) => candidate.id === formID);
     if (!form) throw new Error("This question is no longer open.");

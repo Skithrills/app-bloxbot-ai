@@ -1,0 +1,298 @@
+.message-rail {
+  --message-rail-width: 44px;
+  --message-rail-visible-height: min(100%, var(--message-rail-height));
+  position: absolute;
+  z-index: 10;
+  inset: 16px 0;
+  pointer-events: none;
+}
+
+.message-rail-viewport {
+  position: relative;
+  inset-block-start: 50%;
+  transform: translateY(-50%);
+  inline-size: var(--message-rail-width);
+  block-size: var(--message-rail-visible-height);
+  overflow: hidden auto;
+  overflow-anchor: none;
+  overscroll-behavior: contain;
+  scrollbar-width: none;
+  pointer-events: auto;
+}
+
+.message-rail-viewport[data-empty] {
+  pointer-events: none;
+}
+
+.message-rail-audio {
+  position: absolute;
+  inset-block-start: 50%;
+  transform: translateY(-50%);
+  block-size: var(--message-rail-visible-height);
+  inset-inline-start: 8px;
+  inline-size: calc(var(--message-rail-width) - 14px);
+  pointer-events: none;
+}
+
+.message-rail-marker {
+  display: flex;
+  inline-size: 100%;
+  block-size: var(--message-rail-row-height);
+  align-items: center;
+  padding-inline-start: 8px;
+  cursor: pointer;
+}
+
+.message-rail-marker:focus-visible {
+  outline: 1px solid var(--ring);
+  outline-offset: -2px;
+  border-radius: var(--radius);
+}
+
+.message-rail-tick {
+  inline-size: 10px;
+  block-size: 2px;
+  transform-origin: left center;
+}
+
+.message-rail-stroke {
+  display: block;
+  inline-size: 100%;
+  block-size: 100%;
+  border-radius: 99px;
+  background-color: color-mix(in srgb, var(--foreground) 33%, transparent);
+  /* Capped at the room the rail has, so the longest marks under the pointer aren't cut off. */
+  transform: scaleX(min(3.6, calc(var(--rail-mark-length, 1) * var(--rail-bump, 1))));
+  transform-origin: left center;
+}
+
+@media (prefers-reduced-motion: no-preference) {
+  .message-rail-stroke {
+    transition: transform 170ms cubic-bezier(0.2, 0.7, 0.25, 1), background-color 140ms ease-out;
+  }
+}
+
+@supports (animation-timeline: view()) {
+  @media (prefers-reduced-motion: no-preference) {
+    .message-rail-marker {
+      view-timeline-name: --rail-marker;
+      view-timeline-axis: block;
+    }
+
+    .message-rail-tick {
+      animation: message-rail-taper auto linear both;
+      animation-timeline: --rail-marker;
+      animation-range: cover;
+    }
+  }
+}
+
+@keyframes message-rail-taper {
+  0%, 6% {
+    transform: scaleX(0.32);
+  }
+
+  35%, 65% {
+    transform: scaleX(1);
+  }
+
+  94%, 100% {
+    transform: scaleX(0.32);
+  }
+}
+
+.message-rail:has(.message-rail-audio [data-audio-visible]) .message-rail-marker:not([aria-current], [data-favorite], [data-visible], [data-bump]) .message-rail-tick {
+  visibility: hidden;
+}
+
+.message-rail-marker:is([data-visible], [aria-current], [data-preview], [data-favorite]) .message-rail-stroke {
+  background-color: var(--foreground);
+}
+
+.message-rail-marker[data-visible] {
+  --rail-mark-length: 1.12;
+}
+
+.message-rail-marker[aria-current] {
+  --rail-mark-length: 1.35;
+}
+
+.message-rail-marker[data-favorite] {
+  --rail-mark-length: 1.8;
+}
+
+.message-rail-marker[data-favorite] .message-rail-tick {
+  block-size: 3px;
+}
+
+/* The hill under the pointer: tallest at the hovered row, easing out over four rows each way. */
+.message-rail-marker[data-bump="0"] {
+  --rail-bump: 2;
+}
+
+.message-rail-marker[data-bump="1"] {
+  --rail-bump: 1.76;
+}
+
+.message-rail-marker[data-bump="2"] {
+  --rail-bump: 1.46;
+}
+
+.message-rail-marker[data-bump="3"] {
+  --rail-bump: 1.22;
+}
+
+.message-rail-marker[data-bump="4"] {
+  --rail-bump: 1.08;
+}
+
+.message-rail-preview {
+  position: absolute;
+  inset-block-start: 0;
+  inset-inline-start: var(--message-rail-width);
+  inline-size: min(20rem, calc(100% - var(--message-rail-width) - 12px));
+  max-block-size: 100%;
+  overflow: hidden;
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--popover);
+  color: var(--popover-foreground);
+  box-shadow: 0 6px 24px rgb(0 0 0 / 18%);
+  pointer-events: auto;
+}
+
+.message-rail-preview-title {
+  display: block;
+  padding-inline-end: 28px;
+  line-height: 24px;
+  font-size: 0.75rem;
+  font-weight: 600;
+  max-block-size: 48px;
+  overflow: hidden;
+  overflow-wrap: anywhere;
+}
+
+.message-rail-preview-text {
+  display: block;
+  margin-block-start: 4px;
+  max-block-size: calc(1.35em * 5);
+  overflow: hidden;
+  color: var(--muted-foreground);
+  font-size: 0.8125rem;
+  line-height: 1.35;
+  overflow-wrap: anywhere;
+  mask-image: linear-gradient(to bottom, #000 calc(100% - 1.35em), transparent);
+}
+
+/* Compact markdown inside the preview card (MarkdownPreview renders spans only). */
+.message-rail-preview .md-preview-block {
+  display: block;
+}
+
+.message-rail-preview .md-preview-block + .md-preview-block {
+  margin-block-start: 2px;
+}
+
+.message-rail-preview .md-preview-heading {
+  font-weight: 600;
+  color: var(--foreground);
+}
+
+.message-rail-preview .md-preview-quote {
+  padding-inline-start: 6px;
+  border-inline-start: 2px solid var(--border);
+}
+
+.message-rail-preview .md-preview-list {
+  padding-inline-start: 12px;
+}
+
+.message-rail-preview .md-preview-item {
+  display: list-item;
+  list-style: disc;
+}
+
+.message-rail-preview .md-preview-ordered > .md-preview-item {
+  list-style: decimal;
+}
+
+.message-rail-preview .md-preview-code {
+  padding: 0 3px;
+  border-radius: 3px;
+  background: var(--muted);
+  font-family: var(--font-mono, ui-monospace, monospace);
+  font-size: 0.92em;
+}
+
+.message-rail-preview .md-preview-pre {
+  padding: 2px 6px;
+  border-radius: 4px;
+  background: var(--muted);
+  white-space: pre;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.message-rail-preview .md-preview-pre .md-preview-code {
+  padding: 0;
+  background: none;
+}
+
+.message-rail-preview .md-preview-link {
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+
+.message-rail-preview .md-preview-cell + .md-preview-cell::before {
+  content: " | ";
+}
+
+.message-rail-preview-jump {
+  display: block;
+  inline-size: 100%;
+  border-radius: calc(var(--radius) - 2px);
+  text-align: start;
+  cursor: pointer;
+}
+
+.message-rail-preview-jump:hover .message-rail-preview-text {
+  color: var(--foreground);
+}
+
+.message-rail-preview-jump:focus-visible {
+  outline: 1px solid var(--ring);
+  outline-offset: 2px;
+}
+
+.message-rail-favorite {
+  position: absolute;
+  inset-block-start: 10px;
+  inset-inline-end: 12px;
+  display: grid;
+  inline-size: 24px;
+  block-size: 24px;
+  flex: none;
+  place-items: center;
+  border-radius: calc(var(--radius) - 2px);
+  color: var(--muted-foreground);
+  cursor: pointer;
+}
+
+.message-rail-favorite:hover,
+.message-rail-favorite:focus-visible {
+  background: var(--accent);
+  color: var(--foreground);
+}
+
+.message-rail-favorite:focus-visible {
+  outline: 1px solid var(--ring);
+}
+
+.message-rail-favorite[aria-pressed="true"] {
+  color: var(--foreground);
+}
+
+.message-rail-favorite[aria-pressed="true"] svg {
+  fill: currentColor;
+}

@@ -22,27 +22,41 @@ vi.mock("@/hooks/useProviders", () => ({
 }));
 
 import { notify } from "@/lib/notifications";
+import type { Session } from "@/lib/opencode/types";
+import { qk } from "@/lib/queryKeys";
+import { ActiveSessionProvider, useActiveSession } from "@/providers/ActiveSessionProvider";
 import { PreferencesProvider, usePreferences } from "@/providers/PreferencesProvider";
 import { DEFAULT_APP_CONFIG } from "@/types/desktop";
 
-function renderPreferences() {
+function renderPreferences(sessions: Session[] = []) {
   const client = new QueryClient();
+  client.setQueryData(qk.sessions, sessions);
+  const activeSessionIdRef = { current: null as string | null };
   const wrapper = ({ children }: { children: ReactNode }) => (
     <QueryClientProvider client={client}>
-      <PreferencesProvider>{children}</PreferencesProvider>
+      <ActiveSessionProvider activeSessionIdRef={activeSessionIdRef}>
+        <PreferencesProvider>{children}</PreferencesProvider>
+      </ActiveSessionProvider>
     </QueryClientProvider>
   );
-  return renderHook(() => usePreferences(), { wrapper });
+  return renderHook(() => ({ ...usePreferences(), ...useActiveSession() }), { wrapper });
 }
 
 describe("the saved model", () => {
+  const capabilities = { toolcall: true, input: { text: true }, output: { text: true } };
   const freeTier = {
     id: "opencode",
     name: "OpenCode Zen",
     source: "custom",
     models: {
-      "flash-free": { id: "flash-free", name: "Flash Free", status: "active" },
-      "crouton-alpha-free": { id: "crouton-alpha-free", name: "Crouton", status: "alpha" },
+      "flash-free": { id: "flash-free", name: "Flash Free", status: "active", capabilities },
+      "crouton-alpha-free": {
+        id: "crouton-alpha-free",
+        name: "Crouton",
+        status: "alpha",
+        capabilities,
+        variants: { high: {} },
+      },
     },
   };
 
@@ -71,7 +85,10 @@ describe("the saved model", () => {
     const { result } = renderPreferences();
 
     await waitFor(() => expect(result.current.selectedModel).toBe("opencode/flash-free"));
-    expect(mocks.patchConfig).toHaveBeenCalledWith({ lastModel: "opencode/flash-free" });
+    expect(mocks.patchConfig).toHaveBeenCalledWith({
+      lastModel: "opencode/flash-free",
+      lastModelVariant: null,
+    });
     expect(message).toHaveBeenCalledTimes(1);
     expect(message).toHaveBeenCalledWith("nemotron-3-ultra-free is no longer available", {
       description: "This chat now uses Flash Free.",
@@ -88,7 +105,9 @@ describe("the saved model", () => {
     const { result } = renderPreferences();
 
     await waitFor(() => expect(result.current.selectedModel).toBe("opencode/flash-free"));
-    expect(result.current.unavailableModels.has("opencode/crouton-alpha-free")).toBe(true);
+    await waitFor(() =>
+      expect(result.current.unavailableModels.has("opencode/crouton-alpha-free")).toBe(true),
+    );
   });
 
   it("keeps a listed model, and remembers one refused in the region once", async () => {
@@ -104,7 +123,9 @@ describe("the saved model", () => {
     act(() => result.current.markModelUnavailable("opencode/crouton-alpha-free"));
     act(() => result.current.markModelUnavailable("opencode/crouton-alpha-free"));
 
-    expect(result.current.unavailableModels.has("opencode/crouton-alpha-free")).toBe(true);
+    await waitFor(() =>
+      expect(result.current.unavailableModels.has("opencode/crouton-alpha-free")).toBe(true),
+    );
     const saves = mocks.patchConfig.mock.calls.filter(([patch]) => "unavailableModels" in patch);
     expect(saves).toEqual([[{ unavailableModels: ["opencode/crouton-alpha-free"] }]]);
     // Its card offers the switch, so the chat isn't moved out from under it.
@@ -122,12 +143,98 @@ describe("the saved model", () => {
     await waitFor(() => expect(result.current.selectedModel).toBe("opencode/crouton-alpha-free"));
 
     act(() => result.current.setSelectedVariant("high"));
+    await waitFor(() => expect(result.current.selectedVariant).toBe("high"));
     act(() => result.current.setSelectedModel("opencode/crouton-alpha-free"));
     expect(result.current.selectedVariant).toBe("high");
 
     act(() => result.current.setSelectedModel("opencode/flash-free"));
+    await waitFor(() => expect(result.current.selectedVariant).toBeNull());
+  });
+
+  it("restores two chats independently across remount and only uses supported effort", async () => {
+    const persisted = { ...DEFAULT_APP_CONFIG, analyticsNoticeVersion: 99 };
+    mocks.loadConfig.mockResolvedValue(persisted);
+    mocks.patchConfig.mockImplementation(async (patch) => Object.assign(persisted, patch));
+    const sessions = [
+      { id: "one" },
+      { id: "two" },
+      {
+        id: "old",
+        model: { id: "crouton-alpha-free", providerID: "opencode", variant: "max" },
+      },
+    ] as Session[];
+
+    const first = renderPreferences(sessions);
+    await waitFor(() => expect(mocks.loadConfig).toHaveBeenCalled());
+    await act(async () => first.result.current.selectSession("one"));
+    act(() => first.result.current.setSelectedModel("opencode/crouton-alpha-free", "high"));
+    await act(async () => first.result.current.selectSession("two"));
+    act(() => first.result.current.setSelectedModel("opencode/flash-free"));
+    first.unmount();
+
+    const { result } = renderPreferences(sessions);
+    await act(async () => result.current.selectSession("two"));
+    await waitFor(() => expect(result.current.selectedModel).toBe("opencode/flash-free"));
+    expect(result.current.selectedVariant).toBeNull();
+    await act(async () => result.current.selectSession("one"));
+    expect(result.current.selectedModel).toBe("opencode/crouton-alpha-free");
+    expect(result.current.selectedVariant).toBe("high");
+    await act(async () => result.current.selectSession("old"));
+    expect(result.current.selectedModel).toBe("opencode/crouton-alpha-free");
     expect(result.current.selectedVariant).toBeNull();
   });
+
+  it("keeps a retired chat's selection when all replacements are hidden or ineligible", async () => {
+    const message = vi.spyOn(notify, "message");
+    mocks.loadConfig.mockResolvedValue({
+      ...DEFAULT_APP_CONFIG,
+      analyticsNoticeVersion: 99,
+      hiddenModels: ["opencode/flash-free"],
+      chatModels: { retired: { key: "opencode/retired-free", variant: "high" } },
+    });
+    const { result } = renderPreferences();
+    await act(async () => result.current.selectSession("retired"));
+    await waitFor(() =>
+      expect(result.current.modelSelectionMessage).toMatch(/Choose an available model/),
+    );
+    expect(result.current.selectedModel).toBeNull();
+    expect(message).toHaveBeenCalledWith("retired-free is no longer available", {
+      description: "Choose an available model to continue this chat.",
+    });
+    expect(mocks.patchConfig).not.toHaveBeenCalled();
+  });
+});
+
+describe("reasoning effort control preference", () => {
+  it("loads the saved control and persists subsequent changes", async () => {
+    vi.clearAllMocks();
+    mocks.patchConfig.mockResolvedValue(undefined);
+    mocks.loadConfig.mockResolvedValue({
+      ...DEFAULT_APP_CONFIG,
+      analyticsNoticeVersion: 99,
+      effortControl: "dropdown",
+    });
+    const { result } = renderPreferences();
+
+    await waitFor(() => expect(result.current.effortControl).toBe("dropdown"));
+    act(() => result.current.setEffortControl("slider"));
+    await waitFor(() => expect(result.current.effortControl).toBe("slider"));
+    expect(mocks.patchConfig).toHaveBeenCalledWith({ effortControl: "slider" });
+  });
+});
+
+it("uses the default busy shortcuts and persists a changed binding for each action", async () => {
+  vi.clearAllMocks();
+  mocks.patchConfig.mockResolvedValue(undefined);
+  mocks.loadConfig.mockResolvedValue({ ...DEFAULT_APP_CONFIG, analyticsNoticeVersion: 99 });
+  const { result } = renderPreferences();
+
+  await waitFor(() => expect(mocks.loadConfig).toHaveBeenCalled());
+  expect(result.current.composerShortcuts).toEqual({ steer: "enter", queue: "mod-enter" });
+  const changed = { steer: "mod-enter", queue: "alt-enter" } as const;
+  act(() => result.current.setComposerShortcuts(changed));
+  await waitFor(() => expect(result.current.composerShortcuts).toEqual(changed));
+  expect(mocks.patchConfig).toHaveBeenCalledWith({ composerShortcuts: changed });
 });
 
 describe("notification preferences", () => {

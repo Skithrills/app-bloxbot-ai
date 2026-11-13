@@ -2,6 +2,7 @@ import { QueryClient } from "@tanstack/react-query";
 import { describe, expect, it, vi } from "vitest";
 import { fetchMessages, mergeMessagesSnapshot } from "@/hooks/useMessages";
 import type { OpencodeClient } from "@/lib/opencode/client";
+import type { UserMessage } from "@/lib/opencode/types";
 import { qk } from "@/lib/queryKeys";
 import type { MessagesCache } from "@/lib/sseDispatch";
 import type { MessageWithParts } from "@/types";
@@ -14,6 +15,24 @@ function message(id: string, text: string): MessageWithParts {
 }
 
 describe("message snapshot reconciliation", () => {
+  it("includes pending native inbox items when first loading a chat", async () => {
+    const pending = {
+      ...message("m1", "After this turn"),
+      info: { ...message("m1", "").info, role: "user" },
+    };
+    const messages = vi.fn().mockResolvedValue({ data: [pending] });
+    const client = { session: { messages } } as unknown as OpencodeClient;
+
+    await expect(fetchMessages(client, new QueryClient(), "s1")).resolves.toEqual({
+      messageIds: ["m1"],
+      messagesById: { m1: pending },
+    });
+    expect(messages).toHaveBeenCalledExactlyOnceWith(
+      { sessionID: "s1", includePending: true },
+      { throwOnError: true },
+    );
+  });
+
   it("preserves messages updated by SSE while an HTTP snapshot is loading", () => {
     const before: MessagesCache = {
       messageIds: ["m1"],
@@ -57,6 +76,34 @@ describe("message snapshot reconciliation", () => {
 
     expect(merged.messageIds).toEqual(["m2"]);
     expect(merged.messagesById.m1).toBeUndefined();
+  });
+
+  it("keeps delivery order when pending inbox items are admitted during a history fetch", () => {
+    function queued(id: string, state: "pending" | "delivered"): MessageWithParts {
+      const info: UserMessage = {
+        id,
+        sessionID: "s1",
+        time: { created: 1 },
+        role: "user",
+        agent: "studio",
+        model: { providerID: "opencode", modelID: "fixture" },
+        inbox: { delivery: "queue", state },
+      };
+      return { ...message(id, id), info };
+    }
+    const before = {
+      messageIds: ["first", "second"],
+      messagesById: { first: queued("first", "pending"), second: queued("second", "pending") },
+    };
+    const after = {
+      messageIds: ["second", "reply", "first"],
+      messagesById: {
+        first: queued("first", "delivered"),
+        second: queued("second", "delivered"),
+        reply: message("reply", "A turn ran between deliveries"),
+      },
+    };
+    expect(mergeMessagesSnapshot(before, before, after)).toEqual(after);
   });
 
   it("does not resurrect a message added and removed while the snapshot loads", () => {

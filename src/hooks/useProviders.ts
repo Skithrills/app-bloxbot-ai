@@ -1,4 +1,6 @@
 import { useQuery } from "@tanstack/react-query";
+import { useMemo } from "react";
+import { openAiBillingLabel } from "@/lib/openAiProfiles";
 import type {
   ProviderAuthMethod,
   ProviderAuthResponse,
@@ -55,21 +57,22 @@ export function useConnectedProviders(): string[] {
 
 export function useAllModels(): ModelInfo[] {
   const { data } = useProvidersQuery();
-  if (!data?.all) return [];
-  const models: ModelInfo[] = [];
-  for (const provider of data.all) {
-    for (const model of Object.values(provider.models)) {
-      models.push({
-        id: model.id,
-        name: model.name,
-        providerId: provider.id,
-        providerName: providerDisplayName(provider),
-        status: model.status,
-        variants: model.variants,
-      });
-    }
-  }
-  return models;
+  return useMemo(
+    () =>
+      data?.all.flatMap((provider) =>
+        Object.values(provider.models).map((model) => ({
+          id: model.id,
+          name: model.name,
+          providerId: provider.id,
+          providerName: providerDisplayName(provider),
+          billingLabel: openAiBillingLabel(provider.id, model.serviceTier),
+          releasedAt: model.releasedAt,
+          status: model.status,
+          variants: model.variants,
+        })),
+      ) ?? [],
+    [data],
+  );
 }
 
 export function useAuthMethods(): Record<string, ProviderAuthMethod[]> {

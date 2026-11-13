@@ -1,4 +1,5 @@
 import { useMutation, useQueryClient } from "@tanstack/react-query";
+import { notify } from "@/lib/notifications";
 import type { Session } from "@/lib/opencode/types";
 
 import { qk } from "@/lib/queryKeys";
@@ -21,5 +22,6 @@ export function useRenameSession() {
         return prev.map((s) => (s.id === updated.id ? updated : s));
       });
     },
+    onError: () => notify.error("Could not rename chat."),
   });
 }

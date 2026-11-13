@@ -12,7 +12,7 @@ import type { StudioTarget, StudioTargetDiscovery, StudioTargetSelection } from 
 export type CallStudioTool = (
   name: string,
   args: Record<string, unknown>,
-  options?: { signal?: AbortSignal },
+  options?: { signal?: AbortSignal; timeout?: number },
 ) => Promise<CallToolResult>;
 
 // Studio MCP can put a note such as "Note: Output limited to N nodes" before

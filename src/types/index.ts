@@ -13,6 +13,8 @@ export interface ModelInfo {
   name: string;
   providerId: string;
   providerName: string;
+  billingLabel?: string;
+  releasedAt?: number;
   status?: "alpha" | "beta" | "deprecated" | "active";
   variants?: Record<string, Record<string, unknown>>;
 }

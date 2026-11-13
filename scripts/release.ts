@@ -3,7 +3,7 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { spawnSync } from "node:child_process";
 import { pathToFileURL } from "node:url";
-import { changelogSection, releaseAssetNames, releaseNotes } from "./release-notes.ts";
+import { changelogSection, releaseAssetNames, releaseNotes, releaseRepository } from "./release-notes.ts";
 
 interface ExistingRelease {
   assets: Array<{ name: string }>;
@@ -52,8 +52,12 @@ function command(commandName: string, args: string[]): void {
   }
 }
 
+function releaseCommand(args: string[]): void {
+  command("gh", ["release", ...args, "--repo", releaseRepository]);
+}
+
 function inspectRelease(tag: string): ExistingRelease | null {
-  const result = spawnSync("gh", ["release", "view", tag, "--json", "assets,isDraft,tagName"], {
+  const result = spawnSync("gh", ["release", "view", tag, "--repo", releaseRepository, "--json", "assets,isDraft,tagName"], {
     encoding: "utf8",
   });
   if (result.status === 0) return JSON.parse(result.stdout) as ExistingRelease;
@@ -66,7 +70,7 @@ function remoteTagExists(tag: string): boolean {
     "ls-remote",
     "--exit-code",
     "--tags",
-    "origin",
+    `https://github.com/${releaseRepository}.git`,
     `refs/tags/${tag}`,
   ]);
   if (result.status === 0) return true;
@@ -115,8 +119,7 @@ async function publish(releaseDirectory: string): Promise<void> {
   try {
     await writeFile(notesPath, `${releaseNotes(changelog, version)}\n`);
     if (action === "create") {
-      command("gh", [
-        "release",
+      releaseCommand([
         "create",
         tag,
         "--draft",
@@ -128,8 +131,7 @@ async function publish(releaseDirectory: string): Promise<void> {
         notesPath,
       ]);
     } else {
-      command("gh", [
-        "release",
+      releaseCommand([
         "edit",
         tag,
         "--draft",
@@ -148,12 +150,11 @@ async function publish(releaseDirectory: string): Promise<void> {
     const expected = new Set(releaseAssetNames(version));
     for (const asset of draft.assets) {
       if (!expected.has(asset.name)) {
-        command("gh", ["release", "delete-asset", tag, asset.name, "--yes"]);
+        releaseCommand(["delete-asset", tag, asset.name, "--yes"]);
       }
     }
 
-    command("gh", [
-      "release",
+    releaseCommand([
       "upload",
       tag,
       ...releaseAssetNames(version).map((name) => join(directory, name)),
@@ -168,8 +169,8 @@ async function publish(releaseDirectory: string): Promise<void> {
       `The remote ${tag} draft`,
     );
 
-    command("gh", ["release", "edit", tag, "--draft=false", "--latest"]);
-    process.stdout.write(`Published ${tag} with exactly seven verified assets.\n`);
+    releaseCommand(["edit", tag, "--draft=false", "--latest"]);
+    process.stdout.write(`Published ${tag} with ${uploaded.assets.length} verified assets.\n`);
   } finally {
     await rm(temporaryDirectory, { recursive: true, force: true });
   }

@@ -38,6 +38,7 @@ import {
   menuPosition,
 } from "@/components/ExplorerControls";
 import { type FieldChange, Inspector } from "@/components/ExplorerInspector";
+import { StudioClassIcon } from "@/components/StudioClassIcon";
 import {
   analyticsProperties,
   errorAnalyticsProperties,
@@ -52,6 +53,7 @@ import {
   type ExplorerNode,
   explorerRows,
   nodeId,
+  OBJECT_DRAG_CLASS_TYPE,
   OBJECT_DRAG_NAME_TYPE,
   OBJECT_DRAG_TYPE,
   renamedId,
@@ -141,7 +143,6 @@ const TreeRow = memo(function TreeRow({
 }: TreeRowProps) {
   const id = nodeId(node);
   const canExpand = node.hasChildren || node.children.length > 0;
-  const InstanceIcon = iconForClass(node.className);
 
   return (
     <div
@@ -155,6 +156,7 @@ const TreeRow = memo(function TreeRow({
       onDragStart={(event) => {
         event.dataTransfer.setData(OBJECT_DRAG_TYPE, node.path);
         event.dataTransfer.setData(OBJECT_DRAG_NAME_TYPE, node.name);
+        event.dataTransfer.setData(OBJECT_DRAG_CLASS_TYPE, node.className);
         event.dataTransfer.effectAllowed = "copy";
       }}
       onDragEnd={(event) => {
@@ -201,7 +203,7 @@ const TreeRow = memo(function TreeRow({
         />
       </button>
       <span className="flex min-w-0 flex-1 items-center gap-1.5 text-left">
-        <InstanceIcon size={13} strokeWidth={1.8} className="shrink-0 text-muted-foreground/80" />
+        <StudioClassIcon className={node.className} />
         {isRenaming ? (
           <InlineEdit
             value={node.name}
@@ -214,6 +216,16 @@ const TreeRow = memo(function TreeRow({
           <span className="truncate">{node.name}</span>
         )}
       </span>
+      {node.unlisted ? (
+        <span
+          data-unlisted={node.unlisted}
+          title={`Holds ${node.unlisted === 1 ? "1 more object" : `${node.unlisted.toLocaleString()} more objects`} that can't be listed here. See them in Studio.`}
+          className="ml-1.5 shrink-0 rounded bg-muted px-1 text-[10px] leading-4 tabular-nums text-muted-foreground"
+        >
+          +{node.unlisted.toLocaleString()}
+          <span className="sr-only"> more inside, not listed</span>
+        </span>
+      ) : null}
     </div>
   );
 });
@@ -567,10 +579,12 @@ export default function Explorer({ collapsed, sessionBusy, onToggle }: ExplorerP
         : studioTarget.nameMatch
           ? `Is the open ${placeName(studioTarget.nameMatch.label)} this chat's place?`
           : `${placeName(studioTarget.missing?.label ?? "")} isn't open. Reopen it to see its objects.`
-    : (waitingNotice ??
-      (syncError
-        ? "Explorer couldn’t load this place. If it keeps failing, restart Studio."
-        : null));
+    : studioId && studioTarget?.reconnecting
+      ? "Reconnecting to Studio."
+      : (waitingNotice ??
+        (syncError
+          ? "Explorer couldn’t load this place. If it keeps failing, restart Studio."
+          : null));
   // Coming back from a notice is news too, and whatever had focus in it has gone.
   const [recovered, setRecovered] = useState(false);
   const hadNotice = useRef(false);
@@ -748,7 +762,7 @@ export default function Explorer({ collapsed, sessionBusy, onToggle }: ExplorerP
   }
 
   return (
-    <aside className="flex w-72 shrink-0 flex-col bg-sidebar">
+    <aside id="chat-explorer" className="flex min-w-0 flex-1 flex-col bg-sidebar">
       <header className="flex h-11 shrink-0 items-center justify-between px-3">
         <h2 className="text-sm font-medium text-muted-foreground">Explorer</h2>
         <button
@@ -1064,7 +1078,7 @@ function DeleteObjectDialog({
           id="delete-object-description"
           className="mt-1.5 text-xs leading-relaxed text-muted-foreground"
         >
-          {node.pending
+          {node.pending || node.unlisted
             ? "This removes it and everything inside it from your place."
             : inside > 0
               ? `This removes it and the ${inside === 1 ? "object" : `${inside} objects`} inside it from your place.`

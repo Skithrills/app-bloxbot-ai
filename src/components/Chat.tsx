@@ -1,19 +1,45 @@
-import { Boxes, Play } from "lucide-react";
+import { Bot, Boxes, ChartPie, Play } from "lucide-react";
 import posthog from "posthog-js/dist/module.full.no-external.js";
-import { lazy, Suspense, useCallback, useEffect, useRef, useState } from "react";
+import {
+  type CSSProperties,
+  lazy,
+  type MouseEvent,
+  Suspense,
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
 import { createPortal } from "react-dom";
 
 import ChatInput from "@/components/ChatInput";
 import ChatMessages from "@/components/ChatMessages";
 import ChatSidebar from "@/components/ChatSidebar";
+import {
+  CONTEXT_PANEL_ID,
+  CONTEXT_TITLE_ID,
+  ContextControl,
+  ContextPanel,
+} from "@/components/ContextPanel";
 import Explorer from "@/components/Explorer";
 import LoadingScreen from "@/components/LoadingScreen";
+import PanelResizeHandle, { clampPanelWidth } from "@/components/PanelResizeHandle";
 import PlaytestPanel from "@/components/PlaytestPanel";
+import SessionTitle from "@/components/SessionTitle";
+import SettingsSkeleton from "@/components/SettingsSkeleton";
 import StudioNotice from "@/components/StudioNotice";
 import StudioSetup from "@/components/StudioSetup";
 import StudioTargetPicker from "@/components/StudioTargetPicker";
+import SubagentDrawer, {
+  SUBAGENT_COMPOSER_ID,
+  SUBAGENT_LIST_TITLE_ID,
+  SUBAGENT_ROW_ID_PREFIX,
+} from "@/components/SubagentDrawer";
 import { MENU_TRIGGER } from "@/components/ui/menu";
 import { useCreateSession } from "@/hooks/mutations/useCreateSession";
+import { useChatContext } from "@/hooks/useChatContext";
+import { useClearBlankChats } from "@/hooks/useClearBlankChats";
 import { useChatStudioUse } from "@/hooks/useMessages";
 import { useSessionStatus } from "@/hooks/useSessionStatuses";
 import { useSessions } from "@/hooks/useSessions";
@@ -21,19 +47,35 @@ import { useStudioConnection } from "@/hooks/useStudioConnection";
 import { analyticsProperties, POSTHOG_PROJECT_TOKEN } from "@/lib/analytics";
 import { desktop } from "@/lib/desktop";
 import { setChatOnScreen, setSessionOpener } from "@/lib/sessionNotifications";
+import { subagentsForSession } from "@/lib/sessionVisibility";
+import type { AddComposerImage } from "@/lib/toolImages";
 import { useActiveSession } from "@/providers/ActiveSessionProvider";
 import { useExplorerReference } from "@/providers/ExplorerReferenceProvider";
 import { useOpenCodeClient } from "@/providers/OpenCodeClientProvider";
 import { useStudioTargetOptional } from "@/providers/StudioTargetProvider";
 
-const Settings = lazy(() => import("@/components/Settings"));
+const loadSettings = () => import("@/components/Settings");
+const Settings = lazy(loadSettings);
+type SidePanel = "explorer" | "playtest" | "subagents";
+const MIN_CHAT_WIDTH = 280;
+const PLAYTEST_WIDTH = 288;
+const MIN_SIDEBAR_WIDTH = 160;
+const MAX_SIDEBAR_WIDTH = 420;
+const MIN_EXPLORER_WIDTH = 220;
+const MAX_EXPLORER_WIDTH = 560;
+const MIN_CONTEXT_WIDTH = 220;
+const MAX_CONTEXT_WIDTH = 560;
+const MIN_SUBAGENT_WIDTH = 280;
+const MAX_SUBAGENT_WIDTH = 680;
 
 function Chat() {
   const { ready, initError } = useOpenCodeClient();
   const { activeSessionId, clearSession, selectSession } = useActiveSession();
+  const attachImageRef = useRef<AddComposerImage>(null);
   const sessionStatus = useSessionStatus(activeSessionId);
   const isBusy = sessionStatus !== undefined && sessionStatus.type !== "idle";
   const createSession = useCreateSession();
+  useClearBlankChats();
   const { data: allSessions } = useSessions();
   const studioConnection = useStudioConnection();
   const studioTarget = useStudioTargetOptional();
@@ -53,9 +95,49 @@ function Chat() {
     hasSelectedStudio || (!!studioTarget?.missing && studioTarget.status !== "loading");
 
   // Get active session title from the sessions list
-  const activeSessionTitle = allSessions?.find((s) => s.id === activeSessionId)?.title ?? null;
+  const activeSession = allSessions?.find((s) => s.id === activeSessionId);
+  const activeSessionTitle = activeSession?.title ?? null;
+  const chatContext = useChatContext(activeSessionId, activeSession?.revert?.messageID);
+  const [contextSessionID, setContextSessionID] = useState<string | null>(null);
+  const showContext = !!activeSessionId && contextSessionID === activeSessionId;
+  const contextTrigger = useRef<HTMLButtonElement | null>(null);
+  const contextOpenedByHand = useRef(false);
+  const subagentSessions = useMemo(
+    () => (activeSessionId ? subagentsForSession(allSessions ?? [], activeSessionId) : []),
+    [activeSessionId, allSessions],
+  );
+  const [subagentChoices, setSubagentChoices] = useState<
+    Record<string, { open: boolean; selected: string | null }>
+  >({});
+  const subagentChoice = activeSessionId ? subagentChoices[activeSessionId] : undefined;
+  const subagentsOpen = subagentChoice?.open === true;
+  const setSubagentsOpen = useCallback(
+    (open: boolean, selected?: string | null) => {
+      if (!activeSessionId) return;
+      setSubagentChoices((choices) => ({
+        ...choices,
+        [activeSessionId]: {
+          open,
+          selected:
+            selected === undefined ? (choices[activeSessionId]?.selected ?? null) : selected,
+        },
+      }));
+    },
+    [activeSessionId],
+  );
+  const [preferredSubagentWidth, setPreferredSubagentWidth] = useState(384);
+  const subagentToggleRef = useRef<HTMLButtonElement>(null);
 
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
+  const [preferredSidebarWidth, setPreferredSidebarWidth] = useState(285);
+  const [preferredExplorerWidth, setPreferredExplorerWidth] = useState(288);
+  const [preferredContextWidth, setPreferredContextWidth] = useState(320);
+  const [viewportWidth, setViewportWidth] = useState(() => window.innerWidth);
+  useEffect(() => {
+    const update = () => setViewportWidth(window.innerWidth);
+    window.addEventListener("resize", update);
+    return () => window.removeEventListener("resize", update);
+  }, []);
   // Null until someone says. It opens by itself once a chat is about Studio, not just for one being
   // open, since it takes a lot of room from a chat about a website.
   const [explorerChoices, setExplorerChoices] = useState<Record<string, boolean>>({});
@@ -89,14 +171,75 @@ function Chat() {
   const explorerToggleRef = useRef<HTMLButtonElement>(null);
   const [focusComposer, setFocusComposer] = useState(false);
   const [showPlaytest, setShowPlaytest] = useState(false);
-  const desiredSidePanel = showPlaytest
+  const desiredSidePanel: SidePanel | null = showPlaytest
     ? "playtest"
-    : hasStudioTarget && !explorerCollapsed
-      ? "explorer"
-      : null;
-  const [renderedSidePanel, setRenderedSidePanel] = useState<"explorer" | "playtest" | null>(null);
+    : subagentsOpen && activeSession
+      ? "subagents"
+      : hasStudioTarget && !explorerCollapsed
+        ? "explorer"
+        : null;
+  const [renderedSidePanel, setRenderedSidePanel] = useState<SidePanel | null>(null);
   const [sidePanelExiting, setSidePanelExiting] = useState(false);
   const sidePanelTimerRef = useRef<number | null>(null);
+  // Context and Explorer share the available space in one layout change.
+  const visibleSidePanel = showContext ? desiredSidePanel : renderedSidePanel;
+  const explorerVisible = visibleSidePanel === "explorer";
+  const sidePanelOverlay = viewportWidth <= 760;
+  const contextOverlay = viewportWidth <= (explorerVisible ? 1160 : 880);
+  // The chat comes first. When the window is made too narrow to fit Context beside it, Context
+  // closes instead of covering the chat, and comes back once the window has room again. Only a
+  // resize does this: opened by hand in a narrow window it still shows, over the chat.
+  const contextRoomAt = desiredSidePanel === "explorer" ? 1160 : 880;
+  const lastViewportWidth = useRef(viewportWidth);
+  const contextHiddenFor = useRef<string | null>(null);
+  useEffect(() => {
+    const before = lastViewportWidth.current;
+    lastViewportWidth.current = viewportWidth;
+    const crowded = viewportWidth <= contextRoomAt;
+    if (before === viewportWidth || crowded === before <= contextRoomAt) return;
+    if (crowded) {
+      if (!showContext) return;
+      contextHiddenFor.current = activeSessionId;
+      setContextSessionID(null);
+    } else {
+      if (contextHiddenFor.current && contextHiddenFor.current === activeSessionId) {
+        setContextSessionID(activeSessionId);
+      }
+      contextHiddenFor.current = null;
+    }
+  }, [viewportWidth, contextRoomAt, showContext, activeSessionId]);
+  const sidebarSpace = Math.floor(viewportWidth * 0.35);
+  const sidebarMax = Math.min(
+    MAX_SIDEBAR_WIDTH,
+    sidebarSpace,
+    visibleSidePanel === "playtest" && !sidePanelOverlay
+      ? viewportWidth - MIN_CHAT_WIDTH - PLAYTEST_WIDTH
+      : sidebarSpace,
+  );
+  const sidebarWidth = sidebarCollapsed
+    ? 40
+    : clampPanelWidth(preferredSidebarWidth, MIN_SIDEBAR_WIDTH, sidebarMax);
+  const sidePanelSpace = sidePanelOverlay
+    ? viewportWidth
+    : viewportWidth - sidebarWidth - MIN_CHAT_WIDTH;
+  const explorerMax = Math.min(
+    MAX_EXPLORER_WIDTH,
+    showContext && (!contextOverlay || sidePanelOverlay)
+      ? sidePanelSpace - MIN_CONTEXT_WIDTH
+      : sidePanelSpace,
+  );
+  const explorerWidth = clampPanelWidth(preferredExplorerWidth, MIN_EXPLORER_WIDTH, explorerMax);
+  const subagentMax = Math.min(
+    MAX_SUBAGENT_WIDTH,
+    sidePanelOverlay ? sidePanelSpace : Math.min(sidePanelSpace, Math.floor(viewportWidth * 0.48)),
+  );
+  const subagentWidth = clampPanelWidth(preferredSubagentWidth, MIN_SUBAGENT_WIDTH, subagentMax);
+  const contextSpace = viewportWidth - (explorerVisible ? explorerWidth : 0);
+  const contextMax = Math.min(
+    MAX_CONTEXT_WIDTH,
+    contextOverlay ? contextSpace : contextSpace - sidebarWidth - MIN_CHAT_WIDTH,
+  );
+  const contextWidth = clampPanelWidth(preferredContextWidth, MIN_CONTEXT_WIDTH, contextMax);
 
   // Finishing setup is a decision to start, so it shouldn't need a second click.
   const { mutate: createChat } = createSession;
@@ -217,7 +360,7 @@ function Chat() {
       setSidePanelExiting(false);
       return;
     }
-    if (renderedSidePanel !== null) {
+    if (renderedSidePanel !== null && !showContext) {
       setSidePanelExiting(true);
       sidePanelTimerRef.current = window.setTimeout(() => {
         setRenderedSidePanel(desiredSidePanel);
@@ -228,7 +371,7 @@ function Chat() {
     }
     setRenderedSidePanel(desiredSidePanel);
     setSidePanelExiting(false);
-  }, [desiredSidePanel, renderedSidePanel]);
+  }, [desiredSidePanel, renderedSidePanel, showContext]);
 
   useEffect(
     () => () => {
@@ -282,6 +425,13 @@ function Chat() {
     setShowSettings(true);
     leaveSetup();
   }, [leaveSetup]);
+  // Settings is its own chunk. Fetching it once the app has settled means it opens at once
+  // instead of on the first click. Tests load it themselves when they open it.
+  useEffect(() => {
+    if (!ready || import.meta.env.MODE === "test") return;
+    const timer = window.setTimeout(() => void loadSettings().catch(() => {}), 1200);
+    return () => window.clearTimeout(timer);
+  }, [ready]);
   // Someone who asked for the panel should land in it, not when it opens by itself.
   const explorerOpenedByHand = useRef(false);
   // Asked for again while it was still on its way out, it stays without ever having gone, so the
@@ -303,19 +453,89 @@ function Chat() {
       setExplorerChoice(true);
       return;
     }
+    if (subagentsOpen) {
+      setSubagentsOpen(false);
+      explorerOpenedByHand.current = true;
+      setExplorerChoice(true);
+      return;
+    }
 
     if (explorerCollapsed) explorerOpenedByHand.current = true;
     setExplorerChoice(explorerCollapsed);
-  }, [showPlaytest, explorerCollapsed, setExplorerChoice]);
+  }, [showPlaytest, subagentsOpen, setSubagentsOpen, explorerCollapsed, setExplorerChoice]);
   const handleOpenPlaytest = useCallback(() => {
     if (!hasStudioTarget) return;
     posthog.capture("playtest_opened", analyticsProperties("playtest"));
+    setContextSessionID(null);
+    setSubagentsOpen(false);
     setShowPlaytest(true);
-  }, [hasStudioTarget]);
+  }, [hasStudioTarget, setSubagentsOpen]);
   const handleClosePlaytest = useCallback(() => {
     posthog.capture("playtest_closed", analyticsProperties("playtest"));
     setShowPlaytest(false);
   }, []);
+  const handleCloseContext = useCallback(() => {
+    contextHiddenFor.current = null;
+    setContextSessionID(null);
+    if (contextTrigger.current?.isConnected) contextTrigger.current.focus();
+    else focusWhatsNext();
+  }, [focusWhatsNext]);
+  const handleToggleContext = (event: MouseEvent<HTMLButtonElement>) => {
+    if (showContext) {
+      handleCloseContext();
+      return;
+    }
+    if (showPlaytest) handleClosePlaytest();
+    setSubagentsOpen(false);
+    contextTrigger.current = event.currentTarget;
+    contextOpenedByHand.current = true;
+    contextHiddenFor.current = null;
+    setContextSessionID(activeSessionId);
+  };
+  useEffect(() => {
+    if (!showContext || !contextOpenedByHand.current) return;
+    contextOpenedByHand.current = false;
+    document.getElementById(CONTEXT_TITLE_ID)?.focus();
+  }, [showContext]);
+  const subagentFocusRequested = useRef<{ rootId: string; targetId: string } | null>(null);
+  const handleCloseSubagents = useCallback(() => {
+    subagentFocusRequested.current = null;
+    setSubagentsOpen(false);
+    subagentToggleRef.current?.focus();
+  }, [setSubagentsOpen]);
+  const handleOpenSubagent = useCallback(
+    (id?: string) => {
+      if (!activeSessionId) return;
+      subagentFocusRequested.current = {
+        rootId: activeSessionId,
+        targetId: id ? SUBAGENT_COMPOSER_ID : SUBAGENT_LIST_TITLE_ID,
+      };
+      setShowPlaytest(false);
+      setContextSessionID(null);
+      setSubagentsOpen(true, id ?? null);
+    },
+    [activeSessionId, setSubagentsOpen],
+  );
+  const handleBackToSubagents = useCallback(
+    (id: string) => {
+      if (!activeSessionId) return;
+      subagentFocusRequested.current = {
+        rootId: activeSessionId,
+        targetId: `${SUBAGENT_ROW_ID_PREFIX}${id}`,
+      };
+      setSubagentsOpen(true, null);
+    },
+    [activeSessionId, setSubagentsOpen],
+  );
+  useEffect(() => {
+    if (renderedSidePanel !== "subagents" || sidePanelExiting || !subagentChoice?.open) return;
+    const request = subagentFocusRequested.current;
+    if (!request || request.rootId !== activeSessionId) return;
+    subagentFocusRequested.current = null;
+    const target =
+      document.getElementById(request.targetId) ?? document.getElementById(SUBAGENT_LIST_TITLE_ID);
+    target?.focus({ preventScroll: request.targetId === SUBAGENT_COMPOSER_ID });
+  }, [activeSessionId, renderedSidePanel, sidePanelExiting, subagentChoice]);
 
   // One chat's plan shouldn't run in another.
   // biome-ignore lint/correctness/useExhaustiveDependencies: each chat starts without it
@@ -341,9 +561,12 @@ function Chat() {
   // chat's Explorer.
   const setExplorerChoiceRef = useRef(setExplorerChoice);
   setExplorerChoiceRef.current = setExplorerChoice;
+  const setSubagentsOpenRef = useRef(setSubagentsOpen);
+  setSubagentsOpenRef.current = setSubagentsOpen;
   useEffect(() => {
     if (!focusRequest) return;
     setShowPlaytest(false);
+    setSubagentsOpenRef.current(false);
     setExplorerChoiceRef.current(true);
   }, [focusRequest]);
   // A link still waiting for its object came from the chat being left, not the one coming up.
@@ -356,7 +579,7 @@ function Chat() {
   if (showSettings && !showStudioSetup && !needsSetup && !connectionPending) {
     return (
       <div className="flex min-h-0 flex-1 bg-sidebar">
-        <Suspense fallback={<LoadingScreen message="Loading settings..." />}>
+        <Suspense fallback={<SettingsSkeleton onClose={handleSessionSelect} />}>
           <Settings onClose={handleSessionSelect} />
         </Suspense>
       </div>
@@ -365,21 +588,23 @@ function Chat() {
 
   // Main chat UI
   return (
-    <div className="flex min-h-0 flex-1 bg-sidebar">
-      {titlebarActions && appScreen === "chat" && hasStudioTarget
+    <div className="relative flex min-h-0 flex-1 bg-sidebar">
+      {titlebarActions && appScreen === "chat"
         ? createPortal(
             <>
-              <button
-                ref={explorerToggleRef}
-                type="button"
-                onClick={handleToggleExplorer}
-                className={`${MENU_TRIGGER} gap-1.5`}
-                aria-pressed={!explorerCollapsed && !showPlaytest}
-                title={explorerCollapsed ? "Open Explorer" : "Close Explorer"}
-              >
-                <Boxes aria-hidden="true" size={14} />
-                Explorer
-              </button>
+              {hasStudioTarget && (
+                <button
+                  ref={explorerToggleRef}
+                  type="button"
+                  onClick={handleToggleExplorer}
+                  className={`${MENU_TRIGGER} gap-1.5`}
+                  aria-pressed={desiredSidePanel === "explorer"}
+                  title={desiredSidePanel === "explorer" ? "Close Explorer" : "Open Explorer"}
+                >
+                  <Boxes aria-hidden="true" size={14} />
+                  Explorer
+                </button>
+              )}
               {hasSelectedStudio ? (
                 <button
                   type="button"
@@ -396,16 +621,55 @@ function Chat() {
                   Playtest
                 </button>
               ) : null}
+              <button
+                ref={subagentToggleRef}
+                type="button"
+                onClick={() => (subagentsOpen ? handleCloseSubagents() : handleOpenSubagent())}
+                className={`${MENU_TRIGGER} gap-1.5`}
+                aria-expanded={subagentsOpen}
+                aria-controls="subagent-drawer"
+                title={subagentsOpen ? "Close subagent chats" : "Open subagent chats"}
+              >
+                <Bot aria-hidden="true" size={14} />
+                <span className="max-[680px]:sr-only">Subagents</span>
+              </button>
+              <button
+                type="button"
+                onClick={handleToggleContext}
+                className={`${MENU_TRIGGER} gap-1.5 aria-expanded:bg-accent aria-expanded:text-foreground`}
+                aria-expanded={showContext}
+                aria-controls={CONTEXT_PANEL_ID}
+                title={showContext ? "Close Context" : "Open Context"}
+              >
+                <ChartPie aria-hidden="true" size={14} />
+                <span className="max-[680px]:sr-only">Context</span>
+              </button>
             </>,
             titlebarActions,
           )
         : null}
-      <ChatSidebar
-        collapsed={sidebarCollapsed}
-        onToggle={handleToggleSidebar}
-        onSessionSelect={handleSessionSelect}
-        onOpenSettings={handleOpenSettings}
-      />
+      <div
+        className="relative flex shrink-0 motion-safe:transition-[width] motion-safe:duration-200 motion-safe:ease-out has-[hr:focus]:transition-none"
+        style={{ width: sidebarWidth }}
+      >
+        <ChatSidebar
+          collapsed={sidebarCollapsed}
+          onToggle={handleToggleSidebar}
+          onSessionSelect={handleSessionSelect}
+          onOpenSettings={handleOpenSettings}
+        />
+        {!sidebarCollapsed && (
+          <PanelResizeHandle
+            label="Resize chat sidebar"
+            controls="chat-sidebar"
+            edge="right"
+            width={sidebarWidth}
+            min={MIN_SIDEBAR_WIDTH}
+            max={sidebarMax}
+            onResize={setPreferredSidebarWidth}
+          />
+        )}
+      </div>
 
       <div className="flex min-w-0 flex-1 flex-col overflow-hidden rounded-t-xl border-x border-t bg-background">
         {showStudioSetup || (needsSetup && !connectionPending) ? (
@@ -465,9 +729,11 @@ function Chat() {
         ) : (
           <>
             <div className="flex h-11 shrink-0 items-center justify-between gap-3 px-3">
-              <h3 className="min-w-0 truncate text-lg font-medium">
-                {activeSessionTitle || "Untitled"}
-              </h3>
+              <SessionTitle
+                key={activeSessionId}
+                sessionId={activeSessionId}
+                title={activeSessionTitle}
+              />
               <div className="flex max-w-[45%] shrink-0">
                 <StudioTargetPicker
                   onOpenSetup={handleOpenStudioSetup}
@@ -477,14 +743,28 @@ function Chat() {
               </div>
             </div>
 
-            <ChatMessages />
+            <ChatMessages
+              onOpenSubagent={handleOpenSubagent}
+              onAddImage={(image) => attachImageRef.current?.(image) ?? false}
+            />
             <StudioNotice
               quiet={studioUse?.started === true || setupSkipped === true}
               onWorkedWithoutStudio={handleWorkedWithoutStudio}
               onOpenSetup={handleOpenStudioSetup}
               onOpenPicker={() => setPickerRequest((request) => request + 1)}
             />
-            <ChatInput onOpenSettings={handleOpenSettings} focusOnMount={focusComposer} />
+            <ChatInput
+              onOpenSettings={handleOpenSettings}
+              focusOnMount={focusComposer}
+              attachImageRef={attachImageRef}
+              contextControl={
+                <ContextControl
+                  value={chatContext}
+                  expanded={showContext}
+                  onToggle={handleToggleContext}
+                />
+              }
+            />
           </>
         )}
 
@@ -495,22 +775,113 @@ function Chat() {
         )}
       </div>
       <output className="sr-only">{panelNote}</output>
-      {renderedSidePanel && activeSessionId && !showSettings && !showStudioSetup ? (
+      {showContext && appScreen === "chat" ? (
         <div
-          className={`flex w-72 shrink-0 overflow-hidden ${sidePanelExiting ? "animate-side-panel-out" : "animate-side-panel-in"}`}
+          className={`flex min-h-0 shrink-0 animate-panel-grow-in overflow-hidden ${
+            contextOverlay ? "absolute inset-y-0 z-30 shadow-xl" : "relative"
+          }`}
+          style={
+            {
+              width: contextWidth,
+              "--side-panel-width": `${contextWidth}px`,
+              right: contextOverlay ? (explorerVisible ? explorerWidth : 0) : undefined,
+            } as CSSProperties
+          }
         >
-          {renderedSidePanel === "explorer" ? (
-            <Explorer
-              collapsed={false}
-              sessionBusy={isBusy}
-              onToggle={() => {
-                setExplorerChoice(false);
-                explorerToggleRef.current?.focus();
-              }}
+          {/* Full width from the first frame: the wrapper grows and uncovers it. */}
+          <div className="relative flex min-h-0 shrink-0" style={{ width: contextWidth }}>
+            <PanelResizeHandle
+              label="Resize Context panel"
+              controls={CONTEXT_PANEL_ID}
+              edge="left"
+              width={contextWidth}
+              min={MIN_CONTEXT_WIDTH}
+              max={contextMax}
+              onResize={setPreferredContextWidth}
             />
-          ) : (
+            <ContextPanel value={chatContext} busy={isBusy} onClose={handleCloseContext} />
+          </div>
+        </div>
+      ) : null}
+      {visibleSidePanel && activeSessionId && !showSettings && !showStudioSetup ? (
+        <div
+          className={`flex min-h-0 shrink-0 ${
+            sidePanelOverlay ? "absolute inset-y-0 right-0 z-20 shadow-xl" : "relative"
+          } ${
+            visibleSidePanel === "subagents"
+              ? "w-[var(--side-panel-width)] overflow-clip"
+              : "w-72 overflow-hidden"
+          } ${
+            explorerVisible
+              ? sidePanelExiting && !showContext
+                ? "animate-panel-grow-out"
+                : "animate-panel-grow-in"
+              : sidePanelExiting
+                ? "animate-side-panel-out"
+                : "animate-side-panel-in"
+          }`}
+          style={
+            explorerVisible
+              ? ({
+                  width: explorerWidth,
+                  "--side-panel-width": `${explorerWidth}px`,
+                } as CSSProperties)
+              : visibleSidePanel === "subagents"
+                ? ({ "--side-panel-width": `${subagentWidth}px` } as CSSProperties)
+                : undefined
+          }
+        >
+          {explorerVisible ? (
+            // Full width from the first frame, and the line that parts it from Context.
+            <div
+              className={`relative flex min-h-0 shrink-0 ${showContext ? "border-l" : ""}`}
+              style={{ width: explorerWidth }}
+            >
+              {(!sidePanelExiting || showContext) && (
+                <PanelResizeHandle
+                  label="Resize Explorer panel"
+                  controls="chat-explorer"
+                  edge="left"
+                  width={explorerWidth}
+                  min={MIN_EXPLORER_WIDTH}
+                  max={explorerMax}
+                  onResize={setPreferredExplorerWidth}
+                />
+              )}
+              <Explorer
+                collapsed={false}
+                sessionBusy={isBusy}
+                onToggle={() => {
+                  setExplorerChoice(false);
+                  explorerToggleRef.current?.focus();
+                }}
+              />
+            </div>
+          ) : visibleSidePanel === "playtest" ? (
             <PlaytestPanel onClose={handleClosePlaytest} />
-          )}
+          ) : activeSession ? (
+            <>
+              {!sidePanelExiting && (
+                <PanelResizeHandle
+                  label="Resize subagent panel"
+                  controls="subagent-drawer"
+                  edge="left"
+                  width={subagentWidth}
+                  min={MIN_SUBAGENT_WIDTH}
+                  max={subagentMax}
+                  onResize={setPreferredSubagentWidth}
+                />
+              )}
+              <SubagentDrawer
+                root={activeSession}
+                sessions={subagentSessions}
+                selected={subagentChoice?.selected ?? null}
+                onOpen={handleOpenSubagent}
+                onBack={handleBackToSubagents}
+                onClose={handleCloseSubagents}
+              />
+            </>
+          ) : null}
         </div>
       ) : null}
     </div>

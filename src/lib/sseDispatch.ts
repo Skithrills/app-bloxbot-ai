@@ -10,7 +10,7 @@ import type {
   Todo,
 } from "@/lib/opencode/types";
 import { qk } from "@/lib/queryKeys";
-import { isVisibleSession } from "@/lib/sessionVisibility";
+import { isSessionInThread, isVisibleSession } from "@/lib/sessionVisibility";
 import type { MessageWithParts } from "@/types";
 
 export interface MessagesCache {
@@ -89,6 +89,12 @@ function dispatchEvent(
   captureModelUsage?: (usage: ModelUsageEvent) => void,
 ): void {
   const currentSessionId = activeSessionIdRef.current;
+  const inCurrentThread = (sessionID: string) =>
+    isSessionInThread(
+      queryClient.getQueryData<Session[]>(qk.sessions),
+      sessionID,
+      currentSessionId,
+    );
 
   switch (event.type) {
     case "session.created": {
@@ -135,7 +141,8 @@ function dispatchEvent(
     }
     case "session.compacted": {
       const { sessionID } = event.properties;
-      if (sessionID === currentSessionId) {
+      void queryClient.invalidateQueries({ queryKey: qk.sessionContext(sessionID) });
+      if (inCurrentThread(sessionID)) {
         void queryClient.invalidateQueries({ queryKey: qk.messages(sessionID) });
       }
       break;
@@ -149,7 +156,7 @@ function dispatchEvent(
         [sessionID]: { type: "idle" } as SessionStatus,
       }));
       if (
-        sessionID === currentSessionId &&
+        inCurrentThread(sessionID) &&
         event.properties.error &&
         event.properties.error.name !== "MessageAbortedError"
       ) {
@@ -162,6 +169,7 @@ function dispatchEvent(
     }
     case "session.idle": {
       const { sessionID } = event.properties;
+      void queryClient.invalidateQueries({ queryKey: qk.sessionContext(sessionID) });
       queryClient.setQueryData<Record<string, SessionStatus>>(qk.statuses, (prev) => {
         if (prev?.[sessionID]?.type === "idle") return prev;
         return { ...prev, [sessionID]: { type: "idle" } as SessionStatus };
@@ -169,10 +177,11 @@ function dispatchEvent(
       break;
     }
     case "message.updated": {
-      const { info } = event.properties;
-      if (info.sessionID !== currentSessionId) break;
-      const previousMessage = queryClient.getQueryData<MessagesCache>(qk.messages(currentSessionId))
-        ?.messagesById[info.id];
+      const { info, inboxDelivered } = event.properties;
+      if (!inCurrentThread(info.sessionID)) break;
+      const queryKey = qk.messages(info.sessionID);
+      const previousMessage =
+        queryClient.getQueryData<MessagesCache>(queryKey)?.messagesById[info.id];
       const newlyCompleted =
         info.role === "assistant" &&
         info.time?.completed !== undefined &&
@@ -180,13 +189,20 @@ function dispatchEvent(
           previousMessage?.info.role === "assistant" &&
           previousMessage.info.time?.completed !== undefined
         );
-      queryClient.setQueryData<MessagesCache>(qk.messages(currentSessionId), (prev) => {
+      queryClient.setQueryData<MessagesCache>(queryKey, (prev) => {
         if (!prev)
           return { messageIds: [info.id], messagesById: { [info.id]: { info, parts: [] } } };
         const existing = prev.messagesById[info.id];
         if (existing) {
+          const existingInbox = existing.info.role === "user" ? existing.info.inbox : undefined;
+          // A reconnect snapshot may already include the delivered message or its receipt.
+          if (inboxDelivered && existingInbox?.state === "read") return prev;
           return {
             ...prev,
+            messageIds:
+              inboxDelivered && existingInbox?.state === "pending"
+                ? [...prev.messageIds.filter((id) => id !== info.id), info.id]
+                : prev.messageIds,
             messagesById: { ...prev.messagesById, [info.id]: { ...existing, info } },
           };
         }
@@ -195,7 +211,7 @@ function dispatchEvent(
           messagesById: { ...prev.messagesById, [info.id]: { info, parts: [] } },
         };
       });
-      if (newlyCompleted) {
+      if (newlyCompleted && info.sessionID === currentSessionId) {
         captureModelUsage?.({
           provider: info.providerID,
           model: info.modelID,
@@ -210,10 +226,56 @@ function dispatchEvent(
       }
       break;
     }
+    case "message.inbox.pending": {
+      const { sessionID, info, parts } = event.properties;
+      if (!inCurrentThread(sessionID)) break;
+      queryClient.setQueryData<MessagesCache>(qk.messages(sessionID), (prev) => {
+        const existing = prev?.messagesById[info.id];
+        if (
+          existing &&
+          (existing.info.role !== "user" || existing.info.inbox?.state !== "pending")
+        ) {
+          return prev;
+        }
+        return {
+          messageIds: existing && prev ? prev.messageIds : [...(prev?.messageIds ?? []), info.id],
+          messagesById: { ...prev?.messagesById, [info.id]: { info, parts } },
+        };
+      });
+      break;
+    }
+    case "message.inbox.read": {
+      const { sessionID, messageID } = event.properties;
+      if (!inCurrentThread(sessionID)) break;
+      queryClient.setQueryData<MessagesCache>(qk.messages(sessionID), (prev) => {
+        const existing = prev?.messagesById[messageID];
+        const info = existing?.info;
+        if (
+          !prev ||
+          !existing ||
+          info?.role !== "user" ||
+          info.inbox?.delivery !== "steer" ||
+          info.inbox.state !== "delivered"
+        ) {
+          return prev;
+        }
+        return {
+          ...prev,
+          messagesById: {
+            ...prev.messagesById,
+            [messageID]: {
+              ...existing,
+              info: { ...info, inbox: { ...info.inbox, state: "read" } },
+            },
+          },
+        };
+      });
+      break;
+    }
     case "message.part.updated": {
       const { part } = event.properties;
-      if (part.sessionID !== currentSessionId) break;
-      queryClient.setQueryData<MessagesCache>(qk.messages(currentSessionId), (prev) => {
+      if (!inCurrentThread(part.sessionID)) break;
+      queryClient.setQueryData<MessagesCache>(qk.messages(part.sessionID), (prev) => {
         if (!prev) return prev;
         const msg = prev.messagesById[part.messageID];
         if (!msg) return prev;
@@ -230,10 +292,21 @@ function dispatchEvent(
       });
       break;
     }
+    case "message.removed": {
+      const { sessionID, messageID } = event.properties;
+      if (!inCurrentThread(sessionID)) break;
+      queryClient.setQueryData<MessagesCache>(qk.messages(sessionID), (prev) => {
+        if (!prev?.messagesById[messageID]) return prev;
+        const { [messageID]: _removed, ...messagesById } = prev.messagesById;
+        return { messageIds: prev.messageIds.filter((id) => id !== messageID), messagesById };
+      });
+      break;
+    }
     case "message.part.delta": {
-      const { messageID, partID, field, delta } = event.properties;
-      if (!currentSessionId) break;
-      queryClient.setQueryData<MessagesCache>(qk.messages(currentSessionId), (prev) => {
+      const { sessionID: eventSessionID, messageID, partID, field, delta } = event.properties;
+      const sessionID = eventSessionID ?? currentSessionId;
+      if (!sessionID || !inCurrentThread(sessionID)) break;
+      queryClient.setQueryData<MessagesCache>(qk.messages(sessionID), (prev) => {
         if (!prev) return prev;
         const msg = prev.messagesById[messageID];
         if (!msg) return prev;
@@ -267,7 +340,7 @@ function dispatchEvent(
     }
     case "question.asked": {
       const props = event.properties;
-      if (props.sessionID === currentSessionId) {
+      if (inCurrentThread(props.sessionID)) {
         queryClient.setQueryData<QuestionRequest | null>(qk.questions(props.sessionID), props);
       }
       break;
@@ -275,21 +348,21 @@ function dispatchEvent(
     case "question.replied":
     case "question.rejected": {
       const { sessionID } = event.properties;
-      if (sessionID === currentSessionId) {
+      if (inCurrentThread(sessionID)) {
         queryClient.setQueryData<QuestionRequest | null>(qk.questions(sessionID), null);
       }
       break;
     }
     case "permission.asked": {
       const props = event.properties;
-      if (props.sessionID === currentSessionId) {
+      if (inCurrentThread(props.sessionID)) {
         queryClient.setQueryData<PermissionRequest | null>(qk.permissions(props.sessionID), props);
       }
       break;
     }
     case "permission.replied": {
       const { sessionID } = event.properties;
-      if (sessionID === currentSessionId) {
+      if (inCurrentThread(sessionID)) {
         queryClient.setQueryData<PermissionRequest | null>(qk.permissions(sessionID), null);
       }
       break;

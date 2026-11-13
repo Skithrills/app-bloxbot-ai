@@ -177,9 +177,13 @@ export function ExplorerReferenceProvider({ children }: { children: ReactNode })
 }
 
 export function useExplorerReference() {
-  const value = useContext(ExplorerReferenceContext);
+  const value = useExplorerReferenceOptional();
   if (!value) throw new Error("useExplorerReference must be used inside ExplorerReferenceProvider");
   return value;
+}
+
+export function useExplorerReferenceOptional() {
+  return useContext(ExplorerReferenceContext);
 }
 
 export function useExplorerView() {

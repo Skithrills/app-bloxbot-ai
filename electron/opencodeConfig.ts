@@ -1,7 +1,13 @@
 import { win32 } from "node:path";
 
+import { isKnownFreeModelKey } from "../src/lib/freeModels";
+import { OPENAI_API_PROVIDER, toEngineModelKey } from "../src/lib/openAiProfiles";
+import { splitModelKey } from "../src/lib/splitModelKey";
 import { STUDIO_MCP_SERVER_NAME } from "../src/lib/studioMcp";
-import { DEFAULT_SYSTEM_PROMPT } from "../src/lib/systemPrompt";
+import { SUBAGENT_PROFILE_PROMPT, SUBAGENT_PROFILES } from "../src/lib/subagentProfiles";
+import { CAPTURE_EMBED_PROMPT, DEFAULT_SYSTEM_PROMPT, INSTANCE_REFERENCE_PROMPT, STUDIO_TOOL_PROMPT } from "../src/lib/systemPrompt";
+import type { ModelSettings } from "../src/types/desktop";
+import { openAiApiProvider } from "./openAiApiProvider";
 
 export const BLENDER_MCP_SERVER_NAME = "blender";
 
@@ -65,14 +71,42 @@ interface McpLocalServer {
 }
 
 const agentSystem = (systemPrompt: string | null | undefined, hasBlender: boolean) => {
-  const base = systemPrompt ?? DEFAULT_SYSTEM_PROMPT;
+  const base = [systemPrompt ?? DEFAULT_SYSTEM_PROMPT, CAPTURE_EMBED_PROMPT, STUDIO_TOOL_PROMPT, INSTANCE_REFERENCE_PROMPT, SUBAGENT_PROFILE_PROMPT].join("\n\n");
   return hasBlender ? `${base}\n\n${BLENDER_PROMPT}` : base;
 };
+
+function subagents(settings?: ModelSettings) {
+  return Object.fromEntries(
+    SUBAGENT_PROFILES.map(({ id, description, system }) => {
+      const override = settings?.subagentModels[id];
+      const model =
+        override && (!settings?.hideFreeModels || !isKnownFreeModelKey(override))
+          ? toEngineModelKey(override)
+          : undefined;
+      const variant = model ? settings?.subagentEfforts?.[id] : undefined;
+      const [providerID, modelID] = model ? splitModelKey(model) : [];
+      return [
+        id,
+        {
+          mode: "subagent",
+          description: model
+            ? `${description} Configured model: ${model}. Effort: ${variant ?? "model default"}.`
+            : description,
+          system: [system, CAPTURE_EMBED_PROMPT, STUDIO_TOOL_PROMPT, INSTANCE_REFERENCE_PROMPT].filter(Boolean).join("\n\n"),
+          ...(model && {
+            model: variant ? { providerID, model: modelID, variant } : model,
+          }),
+        },
+      ];
+    }),
+  );
+}
 
 export function createOpenCodeConfig(
   broker: { url: string },
   systemPrompt?: string | null,
   blender?: McpLocalServer | null,
+  modelSettings?: ModelSettings,
 ) {
   return {
     // Keep OpenCode's standard automatic context compaction enabled for long sessions.
@@ -100,8 +134,12 @@ export function createOpenCodeConfig(
     ]),
     // OpenCode would otherwise load skills from ~/.claude and ~/.agents, which belong to other tools.
     plugins: ["*", "-opencode.config.compatibility"],
+    providers: {
+      [OPENAI_API_PROVIDER]: openAiApiProvider(modelSettings?.openAiApiServiceTier ?? "auto"),
+    },
     default_agent: "studio",
     agents: {
+      ...subagents(modelSettings),
       studio: {
         mode: "primary",
         description: "Roblox Studio development assistant",
@@ -109,6 +147,19 @@ export function createOpenCodeConfig(
       },
     },
   };
+}
+
+export function withModelSettings(contents: string, settings: ModelSettings): string {
+  const config: {
+    agents?: Record<string, unknown>;
+    providers?: Record<string, unknown>;
+  } = JSON.parse(contents);
+  config.agents = { ...config.agents, ...subagents(settings) };
+  config.providers = {
+    ...config.providers,
+    [OPENAI_API_PROVIDER]: openAiApiProvider(settings.openAiApiServiceTier),
+  };
+  return JSON.stringify(config, null, 2);
 }
 
 /** The config with its system prompt swapped, for a change while OpenCode is running. */

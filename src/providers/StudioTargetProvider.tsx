@@ -42,6 +42,8 @@ function sameNamedPlace(target: StudioTarget, remembered: StudioTarget): boolean
 interface StudioTargetContextValue {
   targets: readonly StudioTarget[];
   selected: StudioTarget | null;
+  /** The place recorded for a chat, even if Studio is closed. */
+  recordedTarget(sessionID: string): StudioTarget | undefined;
   promptReference: string | null;
   status: StudioTargetStatus;
   /**
@@ -50,6 +52,12 @@ interface StudioTargetContextValue {
    */
   discoveryFailed: boolean;
   selectingKey: string | null;
+  /**
+   * The chat's Studio dropped out of the latest list, which a helper restart, a playtest starting or
+   * stopping, or a busy Studio can all do for a moment. It stays selected until it's been gone for
+   * STUDIO_GONE_GRACE_MS, so the Explorer keeps its tree instead of vanishing over a blip.
+   */
+  reconnecting: boolean;
   error: string | null;
   /** The place this chat was working in, when it isn't open any more. */
   missing: StudioTarget | null;
@@ -69,6 +77,8 @@ interface StudioTargetContextValue {
   studioChoices: number;
   /** A forked chat carries the same history, so it's working in the same place. */
   copyPlaceToChat(from: string, to: string): void;
+  /** Starts a new project chat with the place chosen for its folder. */
+  rememberProjectStudio(sessionID: string, target: StudioTarget): Promise<void>;
   /** How many open Studios share the missing place's name, when that's why nothing was picked. */
   twins: number;
   /**
@@ -96,6 +106,13 @@ function countBucket(count: number): "0" | "1" | "2-4" | "5+" {
 function discoveredPlaceIds(targets: readonly StudioTarget[]): string[] {
   return [...new Set(targets.flatMap((target) => (target.placeId ? [target.placeId] : [])))];
 }
+
+/**
+ * How long a selected Studio can be missing from the list before it counts as closed. Studio's
+ * helper lists nothing while it restarts, and a Studio can drop out while it switches to or from a
+ * playtest, so one list without it isn't proof it closed.
+ */
+export const STUDIO_GONE_GRACE_MS = 6_000;
 
 /** Shown only when Studio's helper is missing, which is when a link to get Studio helps. */
 export const STUDIO_NOT_INSTALLED = "BloxBot can't find Roblox Studio. Check it's installed.";
@@ -151,6 +168,11 @@ export function StudioTargetProvider({ children }: { children: ReactNode }) {
   const [discoveryFailed, setDiscoveryFailed] = useState(false);
   const [selectingKey, setSelectingKey] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [reconnecting, setReconnecting] = useState(false);
+  // When the selected Studio first went missing from the list, for this chat.
+  const goneRef = useRef<{ session: string | null; key: string; since: number } | null>(null);
+  // Failed checks in a row, so one that didn't get through doesn't raise a warning by itself.
+  const discoveryFailuresRef = useRef(0);
   const operationRef = useRef(0);
   const targetsRef = useRef<readonly StudioTarget[]>([]);
   const discoveryRef = useRef<{ session: string | null; promise: Promise<number> } | null>(null);
@@ -178,7 +200,43 @@ export function StudioTargetProvider({ children }: { children: ReactNode }) {
   const errorSourceRef = useRef<"discovery" | "select" | null>(null);
   const lastDiscoveryReportRef = useRef<string | null>(null);
   const targetsBySessionRef = useRef<Record<string, StudioTarget>>({});
+  const recordedTarget = useCallback(
+    (sessionID: string) =>
+      targetsBySessionRef.current[sessionID] ?? routedBySessionRef.current[sessionID],
+    [],
+  );
   const configLoadedRef = useRef(false);
+  const configLoadRef = useRef<Promise<void> | null>(null);
+
+  const loadStudioConfig = useCallback(() => {
+    configLoadRef.current ??= desktop
+      .loadConfig()
+      .then((config) => {
+        targetsBySessionRef.current = config.studioTargetsBySession ?? {};
+        chatsWithoutStudioRef.current = new Set(config.chatsWithoutStudio ?? []);
+        chosenChatsRef.current = new Set(config.chatsWithChosenPlace ?? []);
+        routedBySessionRef.current = config.routedTargetsBySession ?? {};
+        configLoadedRef.current = true;
+      })
+      .catch((error) => {
+        configLoadRef.current = null;
+        throw error;
+      });
+    return configLoadRef.current;
+  }, []);
+
+  const rememberProjectStudio = useCallback(
+    async (sessionID: string, target: StudioTarget) => {
+      await loadStudioConfig();
+      targetsBySessionRef.current = { ...targetsBySessionRef.current, [sessionID]: target };
+      chosenChatsRef.current = new Set(chosenChatsRef.current).add(sessionID);
+      await desktop.patchConfig({
+        studioTargetsBySession: targetsBySessionRef.current,
+        chatsWithChosenPlace: [...chosenChatsRef.current],
+      });
+    },
+    [loadStudioConfig],
+  );
 
   const rememberTarget = useCallback(
     async (target: StudioTarget) => {
@@ -208,9 +266,12 @@ export function StudioTargetProvider({ children }: { children: ReactNode }) {
     async (operation: number) => {
       const result = await desktop.discoverStudioTargets();
       if (operation !== operationRef.current) return;
-      targetsRef.current = result.targets;
-      setTargets(result.targets);
+      const showTargets = () => {
+        targetsRef.current = result.targets;
+        setTargets(result.targets);
+      };
       if (activeSessionId && chatsWithoutStudioRef.current.has(activeSessionId)) {
+        showTargets();
         setSelected(null);
         setStatus(result.targets.length === 0 ? "empty" : "ready");
         return;
@@ -239,6 +300,24 @@ export function StudioTargetProvider({ children }: { children: ReactNode }) {
             (target) =>
               !askWhich && target.key === (result.selectedKey ?? selectedRef.current?.key),
           ) ?? null);
+      // The Studio this chat has dropped out of the list. Until it's been gone a while, keep it and
+      // everything listed before, rather than tearing the Explorer down over a moment's absence.
+      const held = selectedRef.current;
+      if (!nextSelected && held && !askWhich && !result.targets.some((t) => t.key === held.key)) {
+        const gone = goneRef.current;
+        const since =
+          gone?.session === activeSessionId && gone.key === held.key ? gone.since : Date.now();
+        goneRef.current = { session: activeSessionId, key: held.key, since };
+        if (Date.now() - since < STUDIO_GONE_GRACE_MS) {
+          // The list stays as it was too: a failed check reads an empty one as Studio being gone.
+          setReconnecting(true);
+          if (!selectingRef.current) setSelectingKey(null);
+          return;
+        }
+      }
+      goneRef.current = null;
+      setReconnecting(false);
+      showTargets();
       const selectionMode = nextSelected
         ? nextSelected.key === remembered?.key
           ? "session_id_match"
@@ -294,6 +373,8 @@ export function StudioTargetProvider({ children }: { children: ReactNode }) {
         await rememberTarget(nextSelected);
       }
       if (operation !== operationRef.current) return;
+      // Now, not at the next render, so a check that starts before then doesn't see the old one.
+      selectedRef.current = nextSelected;
       setSelected(nextSelected);
       setStatus(result.targets.length === 0 ? "empty" : "ready");
       // A selection this replaced was left mid-way, and nothing else will finish it.
@@ -329,7 +410,10 @@ export function StudioTargetProvider({ children }: { children: ReactNode }) {
       const operation = ++operationRef.current;
       try {
         await applyDiscovery(operation);
-        if (operation === operationRef.current) setDiscoveryFailed(false);
+        if (operation === operationRef.current) {
+          discoveryFailuresRef.current = 0;
+          setDiscoveryFailed(false);
+        }
         if (operation === operationRef.current && errorSourceRef.current === "discovery") {
           errorSourceRef.current = null;
           setError(null);
@@ -340,11 +424,17 @@ export function StudioTargetProvider({ children }: { children: ReactNode }) {
           setStatus(targetsRef.current.length > 0 ? "ready" : "error");
           setDiscoveryFailed(true);
           setSelectingKey(null);
-          const alreadyReported = errorSourceRef.current === "discovery";
-          errorSourceRef.current = "discovery";
           console.error("[studio-target] discovery failed", discoveryError);
-          setError(message);
-          if (!alreadyReported)
+          discoveryFailuresRef.current += 1;
+          // With a Studio in use, one check that didn't get through is usually a blip that the next
+          // one gets past, so it takes two in a row to warn about it.
+          const blip = discoveryFailuresRef.current < 2 && selectedRef.current !== null;
+          const alreadyReported = errorSourceRef.current === "discovery";
+          if (!blip) {
+            errorSourceRef.current = "discovery";
+            setError(message);
+          }
+          if (!blip && !alreadyReported)
             posthog.capture(
               "studio_target_discovery_failed",
               errorAnalyticsProperties("studio_target", "discovery", discoveryError),
@@ -434,6 +524,8 @@ export function StudioTargetProvider({ children }: { children: ReactNode }) {
     discoveryRef.current = null;
     selectedRef.current = null;
     setSelected(null);
+    goneRef.current = null;
+    setReconnecting(false);
     selectingRef.current = false;
     setSelectingKey(null);
     if (targetsBySessionRef.current[activeSessionId]) {
@@ -555,14 +647,8 @@ export function StudioTargetProvider({ children }: { children: ReactNode }) {
       return;
     }
     const loadAndDiscover = async () => {
-      if (!configLoadedRef.current) {
-        const config = await desktop.loadConfig();
-        targetsBySessionRef.current = config.studioTargetsBySession ?? {};
-        chatsWithoutStudioRef.current = new Set(config.chatsWithoutStudio ?? []);
-        chosenChatsRef.current = new Set(config.chatsWithChosenPlace ?? []);
-        routedBySessionRef.current = config.routedTargetsBySession ?? {};
-        configLoadedRef.current = true;
-      }
+      await loadStudioConfig();
+      if (activeSessionRef.current !== activeSessionId) return;
       setWithoutStudio(chatsWithoutStudioRef.current.has(activeSessionId));
       // A failed choice belongs to the chat it happened in.
       if (errorSourceRef.current === "select") clearError();
@@ -576,10 +662,14 @@ export function StudioTargetProvider({ children }: { children: ReactNode }) {
           : null;
       selectedRef.current = restored;
       setSelected(restored);
+      goneRef.current = null;
+      setReconnecting(false);
       await discover();
     };
-    void loadAndDiscover();
-  }, [activeSessionId, clearError, client, discover]);
+    void loadAndDiscover().catch((error) =>
+      console.error("[studio-target] configuration failed", error),
+    );
+  }, [activeSessionId, clearError, client, discover, loadStudioConfig]);
 
   const remembered = activeSessionId ? targetsBySessionRef.current[activeSessionId] : undefined;
   const missing = !withoutStudio && !selected && remembered ? remembered : null;
@@ -618,7 +708,13 @@ export function StudioTargetProvider({ children }: { children: ReactNode }) {
   // otherwise, so a Studio closing is noticed without anyone having to open the Explorer.
   useEffect(() => {
     if (!client || status === "loading" || withoutStudio) return;
-    const waitingForStudio = status === "empty" || missing !== null;
+    // Also while the chat's Studio is out of the list or its check failed, so a blip clears quickly.
+    // Without a Studio in use, a check that keeps failing isn't worth asking about that often.
+    const waitingForStudio =
+      status === "empty" ||
+      missing !== null ||
+      reconnecting ||
+      (discoveryFailed && selected !== null);
     const timer = window.setInterval(
       () => {
         if (!selectingRef.current) void discover();
@@ -626,7 +722,7 @@ export function StudioTargetProvider({ children }: { children: ReactNode }) {
       waitingForStudio ? 2_000 : 10_000,
     );
     return () => window.clearInterval(timer);
-  }, [client, discover, missing, status, withoutStudio]);
+  }, [client, discover, discoveryFailed, missing, reconnecting, selected, status, withoutStudio]);
 
   const promptReference = selected
     ? createStudioTargetPromptReference(selected)
@@ -644,10 +740,12 @@ export function StudioTargetProvider({ children }: { children: ReactNode }) {
     () => ({
       targets,
       selected,
+      recordedTarget,
       promptReference,
       status,
       discoveryFailed,
       selectingKey,
+      reconnecting,
       error,
       missing,
       sendBlock,
@@ -659,6 +757,7 @@ export function StudioTargetProvider({ children }: { children: ReactNode }) {
       studioChosen,
       studioChoices,
       copyPlaceToChat,
+      rememberProjectStudio,
       clearError,
       twins,
       nameMatch,
@@ -668,10 +767,12 @@ export function StudioTargetProvider({ children }: { children: ReactNode }) {
     [
       targets,
       selected,
+      recordedTarget,
       promptReference,
       status,
       discoveryFailed,
       selectingKey,
+      reconnecting,
       error,
       missing,
       sendBlock,
@@ -683,6 +784,7 @@ export function StudioTargetProvider({ children }: { children: ReactNode }) {
       studioChosen,
       studioChoices,
       copyPlaceToChat,
+      rememberProjectStudio,
       clearError,
       twins,
       nameMatch,

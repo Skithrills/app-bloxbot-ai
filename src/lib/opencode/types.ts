@@ -51,6 +51,7 @@ export type Session = {
   };
   title: string;
   agent?: string;
+  outcome?: "succeeded" | "failed" | "interrupted";
   model?: {
     id: string;
     providerID: string;
@@ -63,6 +64,8 @@ export type Session = {
   time: {
     created: number;
     updated: number;
+    busy?: number;
+    idle?: number;
     compacting?: number;
     archived?: number;
   };
@@ -91,10 +94,18 @@ export type OutputFormatJsonSchema = {
 
 export type OutputFormat = OutputFormatText | OutputFormatJsonSchema;
 
+export type InboxDelivery = "queue" | "steer";
+
+export type MessageInbox = {
+  delivery: InboxDelivery;
+  state: "pending" | "delivered" | "read";
+};
+
 export type UserMessage = {
   id: string;
   sessionID: string;
   role: "user";
+  inbox?: MessageInbox;
   time: {
     created: number;
   };
@@ -375,6 +386,7 @@ export type ToolStateError = {
     [key: string]: unknown;
   };
   error: string;
+  attachments?: Array<FilePart>;
   metadata?: {
     [key: string]: unknown;
   };
@@ -566,6 +578,7 @@ export type QuestionTool = {
 export type QuestionAnswer = Array<string>;
 
 export type Model = {
+  serviceTier?: string;
   id: string;
   providerID: string;
   api: {
@@ -640,7 +653,7 @@ export type Model = {
   headers: {
     [key: string]: string;
   };
-  release_date: string;
+  releasedAt?: number;
   variants?: {
     [key: string]: {
       [key: string]: unknown;
@@ -789,6 +802,24 @@ export type EventMessageUpdated = {
   properties: {
     sessionID: string;
     info: Message;
+    inboxDelivered?: boolean;
+  };
+};
+
+export type EventMessageInboxPending = {
+  type: "message.inbox.pending";
+  properties: {
+    sessionID: string;
+    info: UserMessage;
+    parts: Part[];
+  };
+};
+
+export type EventMessageInboxRead = {
+  type: "message.inbox.read";
+  properties: {
+    sessionID: string;
+    messageID: string;
   };
 };
 
@@ -991,6 +1022,8 @@ export type Event =
   | EventSessionError
   | EventSessionIdle
   | EventMessageUpdated
+  | EventMessageInboxPending
+  | EventMessageInboxRead
   | EventMessageRemoved
   | EventMessagePartUpdated
   | EventMessagePartDelta

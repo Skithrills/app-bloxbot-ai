@@ -20,11 +20,14 @@ import {
 describe("startup progress", () => {
   beforeEach(() => {
     vi.clearAllMocks();
-    checkForUpdate.mockResolvedValue(null);
+    checkForUpdate.mockResolvedValue({ status: "up-to-date", version: "0.15.4" });
   });
 
   it("offers an update straight away when one could get someone unstuck", async () => {
-    checkForUpdate.mockResolvedValue({ version: "9.9.9", body: null });
+    checkForUpdate.mockResolvedValue({
+      status: "available",
+      update: { version: "9.9.9", body: null },
+    });
 
     render(<LoadingScreen message="BloxBot couldn't start" error onRetry={() => {}} />);
 
@@ -124,7 +127,10 @@ describe("startup progress", () => {
   });
 
   it("says out loud when it finds an update", async () => {
-    checkForUpdate.mockResolvedValue({ version: "9.9.9", body: null });
+    checkForUpdate.mockResolvedValue({
+      status: "available",
+      update: { version: "9.9.9", body: null },
+    });
     render(<LoadingScreen message="BloxBot couldn't start" error onRetry={() => {}} />);
     expect(await screen.findByRole("status")).toHaveTextContent("Update available: v9.9.9");
   });
@@ -233,7 +239,10 @@ describe("startup progress", () => {
   });
 
   it("tells a failed install apart from a failed check, and offers it again", async () => {
-    checkForUpdate.mockResolvedValue({ version: "9.9.9", body: null });
+    checkForUpdate.mockResolvedValue({
+      status: "available",
+      update: { version: "9.9.9", body: null },
+    });
     installUpdate.mockRejectedValueOnce(new Error("no"));
     render(<LoadingScreen message="BloxBot couldn't start" error onRetry={() => {}} />);
     fireEvent.click(await screen.findByRole("button", { name: "Install v9.9.9 & restart" }));

@@ -7,8 +7,9 @@ import { useOpenCodeClient } from "@/providers/OpenCodeClientProvider";
 
 const NOOP_KEY = ["__noop-question__"] as const;
 
-export function useActiveQuestion(): QuestionRequest | null {
-  const { activeSessionId } = useActiveSession();
+export function useActiveQuestion(targetSessionId?: string | null): QuestionRequest | null {
+  const { activeSessionId: rootSessionId } = useActiveSession();
+  const activeSessionId = targetSessionId === undefined ? rootSessionId : targetSessionId;
   const { client, ready } = useOpenCodeClient();
   const queryClient = useQueryClient();
   const { data } = useQuery<QuestionRequest | null>({
@@ -18,7 +19,10 @@ export function useActiveQuestion(): QuestionRequest | null {
       const queryKey = qk.questions(activeSessionId);
       const beforeRevision =
         queryClient.getQueryState<QuestionRequest | null>(queryKey)?.dataUpdateCount ?? 0;
-      const response = await client.question.list({}, { throwOnError: true });
+      const response = await client.question.list(
+        { sessionID: activeSessionId },
+        { throwOnError: true },
+      );
       const afterState = queryClient.getQueryState<QuestionRequest | null>(queryKey);
       if ((afterState?.dataUpdateCount ?? 0) !== beforeRevision) return afterState?.data ?? null;
       return response.data?.find((question) => question.sessionID === activeSessionId) ?? null;

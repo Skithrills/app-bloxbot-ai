@@ -21,7 +21,19 @@ import { userInfo } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
-import { app, BrowserWindow, ipcMain, Menu, net, Notification, shell } from "electron";
+import {
+  app,
+  BrowserWindow,
+  clipboard,
+  dialog,
+  ipcMain,
+  Menu,
+  nativeImage,
+  net,
+  Notification,
+  protocol,
+  shell,
+} from "electron";
 import { autoUpdater } from "electron-updater";
 import { Cause, Data, Effect, Layer, ManagedRuntime, Schema } from "effect";
 
@@ -31,10 +43,14 @@ import {
   AppConfigPatchSchema,
   AppConfigSchema,
   DEFAULT_APP_CONFIG,
+  ModelSettingsPatchSchema,
   type OpenCodeStartupProgress,
   SystemNotificationSchema,
+  ToolImageExportSchema,
   ModelUploadResult,
 } from "../src/types/desktop";
+import { OPENAI_ENGINE_OAUTH_PROVIDER } from "../src/lib/openAiProfiles";
+import { SubscriptionProviderSchema } from "../src/types/subscriptionUsage";
 import {
   ExplorerDetailsRequestSchema,
   ExplorerEditSchema,
@@ -46,10 +62,17 @@ import {
   StudioTargetSelectionSchema,
 } from "../src/types/studioTarget";
 import { handleLastWindowClosed } from "./appLifecycle";
+import { checkForAppUpdate, installAppUpdate } from "./appUpdater";
 import { blenderToolsFolder, engineFolder } from "./machineFolders";
 import { createMainErrorReporter } from "./errorReporter";
 import { syncExplorerTree } from "./explorerTree";
+import {
+  createStudioIconResolver,
+  STUDIO_ICON_SCHEME,
+  studioIconProtocolHandler,
+} from "./studioIconResolver";
 import { findInstructionFiles, readInstructions, saveInstructions } from "./instructionFiles";
+import { defaultSkillSources, importSkills, listImportableSkills } from "./skillImport";
 import {
   type CallStudioTool,
   discoverStudioTargets,
@@ -57,11 +80,16 @@ import {
   inspectExplorerNode,
   selectStudioTarget,
 } from "./studioQueries";
-import { withBlender, withSystemPrompt } from "./opencodeConfig";
+import { withBlender, withModelSettings, withSystemPrompt } from "./opencodeConfig";
 import { channels } from "./channels";
 import { makeOpenCodeLayer, OpenCode } from "./services/OpenCode";
+import { createSubscriptionUsageReader } from "./services/SubscriptionUsage";
 import { createSystemNotifier, notificationSettingsUrl } from "./systemNotifications";
 import { makeStudioMcpBrokerLayer, StudioMcpBroker } from "./services/StudioMcpBroker";
+
+protocol.registerSchemesAsPrivileged([
+  { scheme: STUDIO_ICON_SCHEME, privileges: { standard: true, secure: true } },
+]);
 
 const currentDirectory = dirname(fileURLToPath(import.meta.url));
 const defaultConfig: AppConfig = DEFAULT_APP_CONFIG;
@@ -126,6 +154,8 @@ class DesktopMainError extends Data.TaggedError("DesktopMainError")<{
 
 const studioMcpBrokerLayer = makeStudioMcpBrokerLayer({
   workspace: join(app.getPath("home"), "BloxBot"),
+  // What Studio's helper and the broker report, kept so a dropped connection can be traced later.
+  logFile: join(app.getPath("userData"), "logs", "studio-mcp.log"),
   localAppData: process.env.LOCALAPPDATA,
   comSpec: process.env.ComSpec,
   systemRoot: process.env.SystemRoot,
@@ -151,6 +181,11 @@ const openCodeRuntime = ManagedRuntime.make(
         loadConfig.pipe(
           Effect.map((config) => config.systemPrompt),
           Effect.catchAll(() => Effect.succeed(null)),
+        ),
+      loadModelSettings: () => loadConfig.pipe(Effect.orElseSucceed(() => defaultConfig)),
+      onOpenAiProfileMigrated: (providerID) =>
+        migrateOpenAiPreferences(providerID).pipe(
+          Effect.catchAll(() => Effect.logWarning("[opencode] Could not migrate OpenAI model preferences")),
         ),
       loadBlenderServer: () =>
         Effect.promise(async () =>
@@ -249,26 +284,59 @@ function patchConfig(input: unknown) {
     const current = yield* loadConfig;
     const next = { ...current, ...patch };
     yield* Effect.tryPromise({
-      try: async () => {
-        const destination = configPath();
-        const temporary = `${destination}.${process.pid}.tmp`;
-        try {
-          await writeFile(temporary, JSON.stringify(next, null, 2), { mode: 0o600 });
-          await rename(temporary, destination);
-        } catch (cause) {
-          await rm(temporary, { force: true }).catch(() => undefined);
-          throw cause;
-        }
-      },
+      try: () => writeConfigFile(configPath(), JSON.stringify(next, null, 2)),
       catch: (cause) =>
         new DesktopMainError({ message: "Failed to write app configuration", cause }),
     });
   }).pipe(configMutex.withPermits(1));
 }
 
+async function writeConfigFile(destination: string, contents: string): Promise<void> {
+  const temporary = `${destination}.${process.pid}.tmp`;
+  try {
+    await writeFile(temporary, contents, { mode: 0o600 });
+    await rename(temporary, destination);
+  } catch (cause) {
+    await rm(temporary, { force: true }).catch(() => undefined);
+    throw cause;
+  }
+}
+
+function migrateOpenAiPreferences(providerID: string) {
+  const prefix = `${OPENAI_ENGINE_OAUTH_PROVIDER}/`;
+  const migrate = (key: string) =>
+    key.startsWith(prefix) ? `${providerID}/${key.slice(prefix.length)}` : key;
+  return Effect.gen(function* () {
+    const { lastModel, lastPaidModel, paidDefaultModel, chatModels, hiddenModels, unavailableModels } =
+      yield* loadConfig;
+    const patch: Partial<AppConfig> = {};
+    if (lastModel?.startsWith(prefix)) patch.lastModel = migrate(lastModel);
+    if (lastPaidModel?.startsWith(prefix)) patch.lastPaidModel = migrate(lastPaidModel);
+    if (paidDefaultModel?.startsWith(prefix)) patch.paidDefaultModel = migrate(paidDefaultModel);
+    const chatSelections = Object.entries(chatModels);
+    if (chatSelections.some(([, selection]) => selection.key.startsWith(prefix))) {
+      patch.chatModels = Object.fromEntries(
+        chatSelections.map(([sessionID, selection]) => [
+          sessionID,
+          { ...selection, key: migrate(selection.key) },
+        ]),
+      );
+    }
+    if (hiddenModels.some((key) => key.startsWith(prefix))) patch.hiddenModels = hiddenModels.map(migrate);
+    if (unavailableModels.some((key) => key.startsWith(prefix))) {
+      patch.unavailableModels = unavailableModels.map(migrate);
+    }
+    if (Object.keys(patch).length > 0) yield* patchConfig(patch);
+  });
+}
+
 const runMain = <A, E>(effect: Effect.Effect<A, E>) => Effect.runPromise(effect);
 
 const StudioKeySchema = Schema.String.pipe(Schema.minLength(1), Schema.maxLength(512));
+// Left out, it means every skill, which is also the only time removed ones are cleaned up.
+const SkillNamesSchema = Schema.NullishOr(
+  Schema.Array(Schema.String.pipe(Schema.maxLength(64))).pipe(Schema.maxItems(1_000)),
+);
 // Instances can nest deeply under long names, so a path gets far more room than an ID.
 
 /** Runs a read against Studio through the broker, keeping Studio's error text for the renderer. */
@@ -293,12 +361,27 @@ const queryStudio = <A>(query: (callTool: CallStudioTool) => Promise<A>) =>
 
 const registerIpcHandlers = Effect.sync(() => {
   ipcMain.on(channels.mainErrorReady, (event) => mainErrorReporter.attach(event.sender));
-  ipcMain.handle(channels.getOpenCodeInfo, () =>
+  const getOpenCodeInfo = () =>
     openCodeRuntime.runPromise(
       OpenCode.pipe(Effect.flatMap((service) => service.info)),
-    ),
+    );
+  ipcMain.handle(channels.getOpenCodeInfo, getOpenCodeInfo);
+  const readSubscriptionUsage = createSubscriptionUsageReader(getOpenCodeInfo, app.getVersion());
+  ipcMain.handle(channels.getSubscriptionUsage, (_event, provider: unknown) =>
+    Schema.decodeUnknownPromise(SubscriptionProviderSchema)(provider).then(readSubscriptionUsage),
   );
   ipcMain.handle(channels.getOpenCodeInstallFolder, () => openCodeBinaryDirectory);
+  ipcMain.handle(channels.chooseProjectFolder, async (event) => {
+    const window = BrowserWindow.fromWebContents(event.sender);
+    const options: Electron.OpenDialogOptions = {
+      title: "Choose a project folder",
+      properties: ["openDirectory"],
+    };
+    const result = await (window
+      ? dialog.showOpenDialog(window, options)
+      : dialog.showOpenDialog(options));
+    return result.canceled ? null : (result.filePaths[0] ?? null);
+  });
   ipcMain.handle(channels.getStudioMcpStatus, () =>
     openCodeRuntime.runPromise(StudioMcpBroker.pipe(Effect.flatMap((broker) => broker.status))),
   );
@@ -315,11 +398,55 @@ const registerIpcHandlers = Effect.sync(() => {
       saveInstructions(openCodeConfigDirectory(), value),
     ),
   );
+  const skillFolders = () => ({
+    sources: defaultSkillSources(app.getPath("home")),
+    configDirectory: openCodeConfigDirectory(),
+    home: app.getPath("home"),
+  });
+  // One at a time, so two imports never copy into BloxBot's skills folder at once.
+  let skillWork: Promise<unknown> = Promise.resolve();
+  const afterSkillWork = <A>(run: () => Promise<A>): Promise<A> => {
+    const result = skillWork.then(run);
+    skillWork = result.catch(() => undefined);
+    return result;
+  };
+  ipcMain.handle(channels.listImportableSkills, () =>
+    afterSkillWork(() => listImportableSkills(skillFolders())),
+  );
+  ipcMain.handle(channels.importSkills, (_event, names: unknown) =>
+    afterSkillWork(async () => {
+      const chosen = await Schema.decodeUnknownPromise(SkillNamesSchema)(names);
+      return importSkills({ ...skillFolders(), names: chosen ?? undefined });
+    }),
+  );
   ipcMain.handle(channels.loadConfig, () => runMain(loadConfig));
   ipcMain.handle(channels.patchConfig, (_event, patch: unknown) => runMain(patchConfig(patch)));
-  // The system prompt and Blender's settings both read opencode.json and write it back, so one
-  // mustn't write over the other's change.
+  // Serialize changes to the engine config so one settings screen can't overwrite another.
   const configWrites = Effect.unsafeMakeSemaphore(1);
+  ipcMain.handle(channels.setModelSettings, (_event, input: unknown) =>
+    runMain(
+      configWrites.withPermits(1)(
+        Effect.gen(function* () {
+          const patch = yield* Schema.decodeUnknown(ModelSettingsPatchSchema)(input).pipe(
+            Effect.mapError((cause) => new DesktopMainError({ message: "Model settings are invalid", cause })),
+          );
+          const current = yield* loadConfig;
+          const path = join(openCodeConfigDirectory(), "opencode.json");
+          const read = Effect.tryPromise({
+            try: () => readFile(path, "utf8"),
+            catch: (cause) => new DesktopMainError({ message: "Failed to read OpenCode settings", cause }),
+          });
+          const previous = yield* read;
+          const write = (contents: string) => Effect.tryPromise({
+            try: () => writeConfigFile(path, contents),
+            catch: (cause) => new DesktopMainError({ message: "Failed to apply model settings", cause }),
+          });
+          yield* write(withModelSettings(previous, { ...current, ...patch }));
+          yield* patchConfig(patch).pipe(Effect.tapError(() => write(previous).pipe(Effect.ignore)));
+        }),
+      ),
+    ),
+  );
   ipcMain.handle(channels.setSystemPrompt, (_event, input: unknown) =>
     runMain(
       Effect.gen(function* () {
@@ -425,39 +552,26 @@ const registerIpcHandlers = Effect.sync(() => {
       ),
     ),
   );
-  ipcMain.handle(channels.checkForUpdate, () =>
-    runMain(
-      Effect.gen(function* () {
-        if (!app.isPackaged) return null;
-        const result = yield* Effect.tryPromise({
-          try: () => autoUpdater.checkForUpdates(),
-          catch: (cause) =>
-            new DesktopMainError({ message: "Failed to check for updates", cause }),
-        });
-        if (!result) return null;
-        const body =
-          typeof result.updateInfo.releaseNotes === "string" ? result.updateInfo.releaseNotes : null;
-        return { version: result.updateInfo.version, body };
-      }),
-    ),
-  );
-  ipcMain.handle(channels.installUpdate, () =>
-    runMain(
-      Effect.gen(function* () {
-        if (!app.isPackaged) {
-          return yield* Effect.fail(
-            new DesktopMainError({ message: "Updates are only available in packaged builds" }),
-          );
-        }
-        yield* Effect.tryPromise({
-          try: () => autoUpdater.downloadUpdate(),
-          catch: (cause) =>
-            new DesktopMainError({ message: "Failed to download the update", cause }),
-        });
-        yield* Effect.sync(() => autoUpdater.quitAndInstall());
-      }),
-    ),
-  );
+  let updateCheck: ReturnType<typeof checkForAppUpdate> | undefined;
+  let updateInstall: ReturnType<typeof installAppUpdate> | undefined;
+  ipcMain.handle(channels.checkForUpdate, () => {
+    if (!app.isPackaged) return { status: "unsupported" };
+    updateCheck ??= checkForAppUpdate(
+      () => autoUpdater.checkForUpdates(),
+      (url, options) => net.fetch(url, options),
+    ).finally(() => {
+      updateCheck = undefined;
+    });
+    return updateCheck;
+  });
+  ipcMain.handle(channels.installUpdate, () => {
+    if (!app.isPackaged) throw new Error("Updates are only available in packaged builds.");
+    updateInstall ??= installAppUpdate(autoUpdater).catch((error) => {
+      updateInstall = undefined;
+      throw error;
+    });
+    return updateInstall;
+  });
   // Kept here rather than on the page, since leaving Settings shouldn't stop or lose a setup.
   let blenderSetup: AbortController | null = null;
   let blenderProgress: BlenderSetupProgress | null = null;
@@ -580,6 +694,31 @@ const registerIpcHandlers = Effect.sync(() => {
       sent: await readSentModel(sentModels(), file.hash),
     };
   });
+  ipcMain.handle(channels.exportToolImage, async (event, raw: unknown) => {
+    const { action, png, filename } = await Schema.decodeUnknownPromise(ToolImageExportSchema)(raw);
+    const bytes = Buffer.from(png.buffer, png.byteOffset, png.byteLength);
+    const pngSignature = Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]);
+    if (bytes.length > 128 * 1024 * 1024 || !bytes.subarray(0, 8).equals(pngSignature)) {
+      throw new Error("Invalid PNG image");
+    }
+    const image = nativeImage.createFromBuffer(bytes);
+    if (image.isEmpty()) throw new Error("Could not decode the PNG image");
+    if (action === "copy") {
+      clipboard.writeImage(image);
+      return true;
+    }
+    const name = filename.split(/[\\/]/).at(-1)?.replace(/\.[^.]+$/, "") ?? "";
+    const safeName = name.replace(/[^a-zA-Z0-9 _.-]/g, "_").replace(/^[. ]+|[. ]+$/g, "");
+    const options = {
+      defaultPath: `${safeName.slice(0, 100) || "attachment"}.png`,
+      filters: [{ name: "PNG image", extensions: ["png"] }],
+    };
+    const window = BrowserWindow.fromWebContents(event.sender);
+    const result = await (window ? dialog.showSaveDialog(window, options) : dialog.showSaveDialog(options));
+    if (result.canceled || !result.filePath) return false;
+    await writeFile(result.filePath, bytes);
+    return true;
+  });
   ipcMain.handle(
     channels.uploadModelToPlace,
     async (event, url: unknown, studioKey: unknown, hash: unknown, addOnly: unknown) => {
@@ -629,6 +768,7 @@ function createWindow(): Effect.Effect<void, DesktopMainError> {
       try: () =>
         new BrowserWindow({
           title: "BloxBot",
+          icon: join(app.getAppPath(), app.isPackaged ? "dist" : "public", "bloxbot-icon.png"),
           width: 920,
           height: 600,
           minWidth: 520,
@@ -648,6 +788,25 @@ function createWindow(): Effect.Effect<void, DesktopMainError> {
 
     yield* Effect.sync(() => {
       mainWindow = window;
+      if (process.platform === "win32") {
+        window.webContents.session.setDisplayMediaRequestHandler((request, respond) => {
+          const frame = request.frame;
+          if (
+            mainWindow !== window ||
+            !frame ||
+            frame !== window.webContents.mainFrame ||
+            !request.userGesture ||
+            !request.audioRequested ||
+            !request.videoRequested
+          ) {
+            respond({});
+            return;
+          }
+          // Chromium requires video for display capture. Supply the app's own frame,
+          // which the visualizer stops immediately, alongside system output audio.
+          respond({ video: frame, audio: "loopback" });
+        });
+      }
       window.webContents.setUserAgent(
         `${window.webContents.getUserAgent()} BloxBot/${app.getVersion()}`,
       );
@@ -748,11 +907,30 @@ Effect.runFork(
     yield* Effect.sync(() => {
       autoUpdater.autoDownload = false;
       autoUpdater.autoInstallOnAppQuit = true;
+      autoUpdater.autoRunAppAfterInstall = true;
+      // The updater logs raw feed errors before the check can classify an empty fork.
+      autoUpdater.logger = null;
     });
     yield* registerAppLifecycle;
     yield* Effect.tryPromise({
       try: () => app.whenReady(),
       catch: (cause) => new DesktopMainError({ message: "Electron failed to become ready", cause }),
+    });
+    yield* Effect.sync(() => {
+      const resolveStudioIcon = createStudioIconResolver({
+        platform: process.platform,
+        home: app.getPath("home"),
+        userData: app.getPath("userData"),
+        localAppData: process.env.LOCALAPPDATA,
+        xdgDataHome: process.env.XDG_DATA_HOME,
+        winePrefix: process.env.WINEPREFIX,
+        loadSpriteSheet(png) {
+          const image = nativeImage.createFromBuffer(png);
+          if (image.isEmpty()) return null;
+          return { ...image.getSize(), crop: (rectangle) => image.crop(rectangle).toPNG() };
+        },
+      });
+      protocol.handle(STUDIO_ICON_SCHEME, studioIconProtocolHandler(resolveStudioIcon));
     });
     yield* registerIpcHandlers;
     yield* Effect.sync(() => Menu.setApplicationMenu(null));

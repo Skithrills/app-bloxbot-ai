@@ -130,6 +130,24 @@ describe("useExplorerTreeSync", () => {
     expect(result.current.syncing).toBe(false);
   });
 
+  it("keeps a tree it has on screen through one failed read, without an error", async () => {
+    mocks.sync.mockImplementationOnce(async () => {
+      send("a", "Kept");
+      return answer(true);
+    });
+    const { result } = renderHook(() => useExplorerTreeSync(), { wrapper });
+    act(() => result.current.requestSync());
+    await settle();
+    expect(result.current.objects.map((object) => object.name)).toEqual(["Kept"]);
+
+    mocks.sync.mockRejectedValueOnce(new Error("Studio MCP call failed"));
+    act(() => result.current.requestSync());
+    await settle();
+    expect(mocks.sync).toHaveBeenCalledTimes(2);
+    expect(result.current.syncError).toBeNull();
+    expect(result.current.tree?.roots.map((root) => root.name)).toEqual(["Kept"]);
+  });
+
   it("asks for everything again when what it has is empty", async () => {
     mocks.sync.mockImplementationOnce(async () => {
       // An update for something it doesn't have yet leaves a tree with nothing in it.

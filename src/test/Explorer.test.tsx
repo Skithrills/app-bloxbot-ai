@@ -26,7 +26,8 @@ const mocks = vi.hoisted(() => ({
 vi.mock("posthog-js/dist/module.full.no-external.js", () => ({
   default: { capture: mocks.capture },
 }));
-vi.mock("@/lib/desktop", () => ({
+vi.mock("@/lib/desktop", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@/lib/desktop")>()),
   desktop: {
     onExplorerTreeUpdate: (listener: (update: unknown) => void) => {
       mocks.treeListeners.add(listener);
@@ -151,6 +152,23 @@ describe("Explorer", () => {
     vi.restoreAllMocks();
   });
 
+  it("renders a class-specific local icon with a decorative fallback", async () => {
+    mocks.getSnapshot.mockResolvedValue(tree);
+    start();
+    await advance(0);
+
+    const row = screen.getByRole("treeitem", { name: "Workspace" });
+    const icon = row.querySelector("img");
+    expect(icon).toHaveAttribute("src", "bloxbot-icon://studio/light/Workspace");
+    expect(icon).toHaveAttribute("alt", "");
+    expect(icon).toHaveAttribute("width", "16");
+    if (!icon) throw new Error("Workspace icon was missing");
+
+    fireEvent.error(icon);
+    expect(row.querySelector("img")).toBeNull();
+    expect(row.querySelector("span > svg")).toHaveAttribute("aria-hidden", "true");
+  });
+
   it("retries a failed first load on its own", async () => {
     mocks.getSnapshot.mockRejectedValueOnce(new Error("Studio is busy"));
     mocks.getSnapshot.mockResolvedValue(tree);
@@ -183,13 +201,21 @@ describe("Explorer", () => {
     await advance(0);
     expect(screen.getByText("Workspace")).toBeInTheDocument();
 
+    // One failed read is usually a blip, so the tree stays without a warning.
     mocks.getSnapshot.mockRejectedValueOnce(new Error("Studio went away"));
     await advance(5_000);
+    expect(screen.getByText("Workspace")).toBeInTheDocument();
+    expect(screen.getByRole("status")).not.toHaveTextContent(/restart Studio/);
+
+    // A streak is worth saying, and the tree still stays.
+    mocks.getSnapshot.mockRejectedValueOnce(new Error("Studio went away"));
+    await advance(10_000);
     expect(screen.getByText("Workspace")).toBeInTheDocument();
     expect(screen.getByRole("status")).toHaveTextContent(/If it keeps failing, restart Studio/);
 
     mocks.getSnapshot.mockResolvedValue(tree);
-    await advance(10_000);
+    // Two failures back off to 20 seconds.
+    await advance(20_000);
     expect(screen.getByRole("status")).toHaveTextContent("Explorer is back.");
   });
 

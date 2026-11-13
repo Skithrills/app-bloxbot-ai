@@ -44,6 +44,8 @@ export const ExplorerNodeSchema = Schema.Struct({
   hasChildren: Schema.Boolean,
   /** Its children come in their own update, so anything already there stays until then. */
   pending: Schema.optional(Schema.Boolean),
+  /** How many objects it holds that can't be listed, so it shows a count where an arrow would open nothing. */
+  unlisted: Schema.optional(Schema.Number),
   children: Schema.Array(Schema.suspend((): Schema.Schema<ExplorerNode> => ExplorerNodeSchema)),
 }).annotations({ identifier: "ExplorerNode" });
 
@@ -56,6 +58,7 @@ export interface ExplorerNode {
   readonly path: string;
   readonly hasChildren: boolean;
   readonly pending?: boolean;
+  readonly unlisted?: number;
   readonly children: readonly ExplorerNode[];
 }
 
@@ -535,12 +538,14 @@ export type ExplorerReferenceKind = ExplorerFieldKind | "tag";
 export interface ExplorerReference {
   readonly name: string;
   readonly path: string;
+  readonly className?: string;
   readonly field?: { readonly kind: ExplorerReferenceKind; readonly name: string };
 }
 
 /** What an object dragged out of Explorer carries: its path, which the message box looks up. */
 export const OBJECT_DRAG_TYPE = "application/x-bloxbot-object";
 export const OBJECT_DRAG_NAME_TYPE = "application/x-bloxbot-object-name";
+export const OBJECT_DRAG_CLASS_TYPE = "application/x-bloxbot-object-class";
 
 // Roblox's limit on Instance.Name.
 const ObjectNameSchema = Schema.String.pipe(Schema.minLength(1), Schema.maxLength(100));

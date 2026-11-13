@@ -1,6 +1,7 @@
 import type {
   FormField,
   FormInfo,
+  SessionInboxEnqueued,
   SessionInfo,
   SessionMessageAssistant,
   SessionMessageAssistantTool,
@@ -11,12 +12,15 @@ import type {
 import type {
   AssistantMessage,
   FilePart,
+  InboxDelivery,
   Message,
+  MessageInbox,
   Part,
   QuestionRequest,
   Session,
   Todo,
   ToolPart,
+  UserMessage,
 } from "./types";
 
 export type ModelError = NonNullable<AssistantMessage["error"]>;
@@ -24,6 +28,66 @@ export type ModelError = NonNullable<AssistantMessage["error"]>;
 export interface MessageWithParts {
   info: Message;
   parts: Part[];
+}
+
+// OpenCode defaults every prompt to steer and preserves user metadata in delivered history.
+export const INBOX_DELIVERY_KEY = "bloxbot.inboxDelivery";
+
+function inboxDelivery(metadata: Record<string, unknown> | undefined): InboxDelivery | undefined {
+  const delivery = metadata?.[INBOX_DELIVERY_KEY];
+  if (delivery === "queue" || delivery === "steer") return delivery;
+}
+
+export type InboxUserItem = Extract<SessionInboxEnqueued["data"]["item"], { type: "user" }>;
+
+export function pendingUserMessage(
+  sessionID: string,
+  id: string,
+  created: number,
+  item: InboxUserItem,
+): { info: UserMessage; parts: Part[] } {
+  const inbox: MessageInbox = { delivery: item.delivery, state: "pending" };
+  const info = userInfo(
+    sessionID,
+    id,
+    created,
+    item.delivery === "queue" || inboxDelivery(item.payload.metadata) ? inbox : undefined,
+  );
+  return { info, parts: userParts(sessionID, id, item.payload) };
+}
+
+function userParts(
+  sessionID: string,
+  id: string,
+  message: Pick<InboxUserItem["payload"], "text" | "files">,
+): Part[] {
+  const shared = { sessionID, messageID: id };
+  const parts: Part[] = [];
+  if (message.text) parts.push({ ...shared, id: `${id}:text`, type: "text", text: message.text });
+  for (const [index, file] of (message.files ?? []).entries()) {
+    parts.push({
+      ...shared,
+      id: `${id}:file:${index}`,
+      type: "file",
+      mime: file.mime,
+      filename: file.name,
+      url: `data:${file.mime};base64,${file.data}`,
+    });
+  }
+  return parts;
+}
+
+export function providerFinished(finish: SessionMessageAssistant["finish"]): boolean {
+  return finish === "stop" || finish === "tool-calls" || finish === "length";
+}
+
+function hasProviderOutput(message: SessionMessageAssistant): boolean {
+  return (
+    providerFinished(message.finish) ||
+    message.content.some((part) =>
+      part.type === "tool" ? part.state.status !== "streaming" : part.text.length > 0,
+    )
+  );
 }
 
 // OpenCode 2 renamed these tools. The UI and analytics keep the established names.
@@ -48,10 +112,21 @@ export function toSession(info: SessionInfo): Session {
     directory: info.location.directory,
     parentID: info.parentID,
     title: info.title ?? "",
+    agent: info.agent,
+    model: info.model,
+    cost: info.cost,
+    tokens: info.tokens,
+    outcome: info.outcome,
     version: "",
     metadata: info.metadata,
     revert: info.revert ? { messageID: info.revert.messageID } : undefined,
-    time: { created: info.time.created, updated: info.time.updated, archived: info.time.archived },
+    time: {
+      created: info.time.created,
+      updated: info.time.updated,
+      busy: info.time.busy,
+      idle: info.time.idle,
+      archived: info.time.archived,
+    },
   } as Session;
 }
 
@@ -115,12 +190,15 @@ export function toToolPart(
   }
   const span = { start: time.ran ?? time.created, end: time.completed ?? time.created };
   if (state.status === "error") {
+    const attachments =
+      state.content && toolResult(sessionID, messageID, tool.id, state.content).attachments;
     return {
       ...base,
       state: {
         status: "error",
         input,
         error: state.error.message,
+        ...(attachments ? { attachments } : {}),
         metadata: state.metadata,
         time: span,
       },
@@ -204,24 +282,14 @@ export function toMessageWithParts(
   sessionID: string,
   message: SessionMessageInfo,
   parentID: string,
+  inbox?: MessageInbox,
 ): MessageWithParts | null {
   const shared = { sessionID, messageID: message.id };
   if (message.type === "user") {
-    const parts: Part[] = [];
-    if (message.text) {
-      parts.push({ ...shared, id: `${message.id}:text`, type: "text", text: message.text });
-    }
-    for (const [index, file] of (message.files ?? []).entries()) {
-      parts.push({
-        ...shared,
-        id: `${message.id}:file:${index}`,
-        type: "file",
-        mime: file.mime,
-        filename: file.name,
-        url: `data:${file.mime};base64,${file.data}`,
-      });
-    }
-    return { info: userInfo(sessionID, message.id, message.time.created), parts };
+    return {
+      info: userInfo(sessionID, message.id, message.time.created, inbox),
+      parts: userParts(sessionID, message.id, message),
+    };
   }
   if (message.type === "compaction") {
     return {
@@ -254,11 +322,17 @@ export function toMessageWithParts(
   return { info: assistantInfo(sessionID, message, parentID), parts };
 }
 
-export function userInfo(sessionID: string, id: string, created: number): Message {
+export function userInfo(
+  sessionID: string,
+  id: string,
+  created: number,
+  inbox?: MessageInbox,
+): UserMessage {
   return {
     id,
     sessionID,
     role: "user",
+    ...(inbox ? { inbox } : {}),
     time: { created },
     agent: "",
     model: { providerID: "", modelID: "" },
@@ -268,12 +342,28 @@ export function userInfo(sessionID: string, id: string, created: number): Messag
 export function historyToMessages(
   sessionID: string,
   history: ReadonlyArray<SessionMessageInfo>,
+  deliveryOverrides?: ReadonlyMap<string, InboxDelivery>,
 ): MessageWithParts[] {
   const messages: MessageWithParts[] = [];
+  let hasResponse = false;
+  const receipts = new Map<string, MessageInbox>();
+  for (let i = history.length - 1; i >= 0; i--) {
+    const entry = history[i];
+    if (entry.type === "compaction") hasResponse = false;
+    if (entry.type === "assistant" && hasProviderOutput(entry)) hasResponse = true;
+    if (entry.type !== "user") continue;
+    const delivery = deliveryOverrides?.get(entry.id) ?? inboxDelivery(entry.metadata);
+    if (delivery) {
+      receipts.set(entry.id, {
+        delivery,
+        state: delivery === "steer" && hasResponse ? "read" : "delivered",
+      });
+    }
+  }
   let parentID = "";
   for (const entry of history) {
     if (entry.type === "user") parentID = entry.id;
-    const message = toMessageWithParts(sessionID, entry, parentID);
+    const message = toMessageWithParts(sessionID, entry, parentID, receipts.get(entry.id));
     if (message) messages.push(message);
   }
   return messages;

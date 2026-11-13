@@ -1,4 +1,5 @@
 import { Schema } from "effect";
+import { COMPOSER_SHORTCUTS, DEFAULT_COMPOSER_SHORTCUTS } from "../lib/composerDelivery";
 import type {
   ExplorerDetailsRequest,
   ExplorerEdit,
@@ -8,18 +9,61 @@ import type {
   ExplorerSyncResult,
   ExplorerTreeUpdate,
 } from "../lib/explorer";
+import { OPENAI_SERVICE_TIERS } from "../lib/openAiProfiles";
+import type { AppUpdateCheck } from "./appUpdate";
+import type { SkillImportList, SkillImportResult } from "./skillImport";
 import {
   type StudioTargetDiscovery,
   StudioTargetSchema,
   type StudioTargetSelection,
 } from "./studioTarget";
+import type { SubscriptionProvider, SubscriptionUsageResult } from "./subscriptionUsage";
 
 const MutableStrings = Schema.mutable(Schema.Array(Schema.String));
+const ProjectFolderSchema = Schema.Struct({
+  directory: Schema.String.pipe(Schema.minLength(1)),
+  name: Schema.String.pipe(Schema.minLength(1), Schema.maxLength(128)),
+  studio: Schema.NullOr(StudioTargetSchema),
+});
+
+export type ProjectFolder = typeof ProjectFolderSchema.Type;
 
 export const ThemePreferenceSchema = Schema.Literal("light", "dark", "system");
+// Saved in the config file, so an ID here is never renamed or removed: a value the schema
+// stops accepting would make the whole file read as invalid.
+export const ACCENT_COLORS = [
+  "blue",
+  "violet",
+  "pink",
+  "red",
+  "orange",
+  "amber",
+  "green",
+  "teal",
+] as const;
+export const AccentColorSchema = Schema.Literal(...ACCENT_COLORS);
+export const DEFAULT_ACCENT_COLOR: AccentColor = "blue";
 export const DetailedAnalyticsPreferenceSchema = Schema.Literal("unset", "enabled", "disabled");
+const EffortControlSchema = Schema.Literal("slider", "dropdown");
+const ContextChartSchema = Schema.Literal("bar", "pie");
+const ModelCatalogOrderSchema = Schema.Literal("name", "newest");
+const ComposerShortcutSchema = Schema.Literal(...COMPOSER_SHORTCUTS);
+const ComposerShortcutsSchema = Schema.Struct({
+  steer: ComposerShortcutSchema,
+  queue: ComposerShortcutSchema,
+}).pipe(Schema.filter(({ steer, queue }) => steer === "disabled" || steer !== queue));
 
 export type ThemePreference = typeof ThemePreferenceSchema.Type;
+export type AccentColor = typeof AccentColorSchema.Type;
+export type EffortControl = typeof EffortControlSchema.Type;
+export type ContextChart = typeof ContextChartSchema.Type;
+export type ModelCatalogOrder = typeof ModelCatalogOrderSchema.Type;
+
+const ChatModelSelectionSchema = Schema.Struct({
+  key: Schema.String,
+  variant: Schema.NullOr(Schema.String),
+});
+export type ChatModelSelection = typeof ChatModelSelectionSchema.Type;
 
 export const NotificationKindsSchema = Schema.Struct({
   finished: Schema.Boolean,
@@ -30,13 +74,45 @@ export const NotificationKindsSchema = Schema.Struct({
 
 export type NotificationKinds = typeof NotificationKindsSchema.Type;
 
+export const ModelSettingsSchema = Schema.Struct({
+  hideFreeModels: Schema.Boolean,
+  openAiApiServiceTier: Schema.Literal(...OPENAI_SERVICE_TIERS),
+  subagentModels: Schema.Record({
+    key: Schema.String.pipe(Schema.pattern(/^[a-z][a-z-]{0,63}$/)),
+    value: Schema.String.pipe(Schema.pattern(/^[^\s/]+\/[^\s]+$/), Schema.maxLength(512)),
+  }),
+  subagentEfforts: Schema.optional(
+    Schema.Record({
+      key: Schema.String.pipe(Schema.pattern(/^[a-z][a-z-]{0,63}$/)),
+      value: Schema.String.pipe(Schema.pattern(/^[^\s]+$/), Schema.maxLength(128)),
+    }),
+  ),
+});
+
+export const ModelSettingsPatchSchema = Schema.partial(ModelSettingsSchema);
+export type ModelSettings = typeof ModelSettingsSchema.Type;
+export type ModelSettingsPatch = typeof ModelSettingsPatchSchema.Type;
+
 export const AppConfigSchema = Schema.mutable(
   Schema.Struct({
+    ...ModelSettingsSchema.fields,
     lastModel: Schema.NullOr(Schema.String),
+    lastModelVariant: Schema.NullOr(Schema.String),
+    chatModels: Schema.Record({ key: Schema.String, value: ChatModelSelectionSchema }),
+    modelCatalogOrder: ModelCatalogOrderSchema,
+    paidDefaultModel: Schema.NullOr(Schema.String),
+    lastPaidModel: Schema.NullOr(Schema.String),
     hiddenModels: MutableStrings,
     // Models refused in the user's region, so they aren't picked again.
     unavailableModels: MutableStrings,
     theme: ThemePreferenceSchema,
+    accentColor: AccentColorSchema,
+    effortControl: EffortControlSchema,
+    // How the Context panel draws token usage.
+    contextChart: ContextChartSchema,
+    composerShortcuts: ComposerShortcutsSchema,
+    composerPredictions: Schema.Boolean,
+    audioVisualizerEnabled: Schema.Boolean,
     detailedAnalytics: DetailedAnalyticsPreferenceSchema,
     // Highest analytics policy notice the user has seen; 0 predates the opt-out model.
     analyticsNoticeVersion: Schema.Number,
@@ -47,6 +123,7 @@ export const AppConfigSchema = Schema.mutable(
     chatsWithChosenPlace: MutableStrings,
     // The Studio a chat's latest message was sent to, which says which one it used if it did.
     routedTargetsBySession: Schema.Record({ key: Schema.String, value: StudioTargetSchema }),
+    projectFolders: Schema.optional(Schema.Array(ProjectFolderSchema)),
     studioSetupSkipped: Schema.Boolean,
     // Only for people who haven't chosen kinds yet: off here means every kind starts off.
     systemNotifications: Schema.Boolean,
@@ -64,9 +141,24 @@ export type AppConfig = typeof AppConfigSchema.Type;
 
 export const DEFAULT_APP_CONFIG: AppConfig = {
   lastModel: null,
+  lastModelVariant: null,
+  chatModels: {},
+  modelCatalogOrder: "name",
+  paidDefaultModel: null,
+  lastPaidModel: null,
+  hideFreeModels: false,
+  openAiApiServiceTier: "auto",
+  subagentModels: {},
+  subagentEfforts: {},
   hiddenModels: [],
   unavailableModels: [],
   theme: "system",
+  accentColor: DEFAULT_ACCENT_COLOR,
+  effortControl: "slider",
+  contextChart: "bar",
+  composerShortcuts: DEFAULT_COMPOSER_SHORTCUTS,
+  composerPredictions: false,
+  audioVisualizerEnabled: false,
   detailedAnalytics: "unset",
   analyticsNoticeVersion: 0,
   studioTargetsBySession: {},
@@ -116,15 +208,6 @@ export const InstructionFileSchema = Schema.Struct({
 
 export type InstructionFile = typeof InstructionFileSchema.Type;
 
-export const UpdateInfoSchema = Schema.mutable(
-  Schema.Struct({
-    version: Schema.String,
-    body: Schema.NullOr(Schema.String),
-  }),
-);
-
-export type UpdateInfo = typeof UpdateInfoSchema.Type;
-
 /**
  * Whether BloxBot could start Roblox Studio's MCP helper. `not_installed` means Studio isn't on
  * this computer, `helper_missing` that Studio is but hasn't installed its helper yet, and
@@ -152,6 +235,14 @@ export const SystemNotificationSchema = Schema.Struct({
 
 export type SystemNotification = typeof SystemNotificationSchema.Type;
 
+export const ToolImageExportSchema = Schema.Struct({
+  action: Schema.Literal("copy", "save"),
+  png: Schema.Uint8ArrayFromSelf,
+  filename: Schema.String,
+});
+
+export type ToolImageExport = typeof ToolImageExportSchema.Type;
+
 export interface DesktopApi {
   /** Brings the tree up to date, sending the parts that changed to `onExplorerTreeUpdate`. */
   syncExplorerTree(studioId: string, request: ExplorerSyncRequest): Promise<ExplorerSyncResult>;
@@ -167,6 +258,8 @@ export interface DesktopApi {
   getOpenCodeInfo(): Promise<OpenCodeInfo>;
   /** The folder OpenCode installs into, for antivirus exclusions. Null outside the desktop app. */
   getOpenCodeInstallFolder(): Promise<string | null>;
+  chooseProjectFolder(): Promise<string | null>;
+  getSubscriptionUsage(provider: SubscriptionProvider): Promise<SubscriptionUsageResult>;
   getStudioMcpStatus(): Promise<StudioMcpStatus>;
   onOpenCodeStartupProgress(listener: (progress: OpenCodeStartupProgress) => void): () => void;
   getVersion(): Promise<string>;
@@ -174,15 +267,21 @@ export interface DesktopApi {
   /** BloxBot's AGENTS.md, which is empty until the user writes something. */
   readInstructions(): Promise<string>;
   saveInstructions(text: string): Promise<void>;
+  /** The skills in the user's Codex and Claude Code folders, and the ones BloxBot has. */
+  listImportableSkills(): Promise<SkillImportList>;
+  /** Copies them into BloxBot's own folder: all of them, as a sync, or only the named ones. */
+  importSkills(names?: readonly string[]): Promise<SkillImportResult>;
   openUrl(url: string): Promise<void>;
   showSystemNotification(notification: SystemNotification): Promise<boolean>;
   onSystemNotificationClick(listener: (id: string) => void): () => void;
   /** Opens the page where the system lets people allow BloxBot's notifications. */
   openNotificationSettings(): Promise<void>;
+  exportToolImage(image: ToolImageExport): Promise<boolean>;
   loadConfig(): Promise<AppConfig>;
   patchConfig(patch: Partial<AppConfig>): Promise<void>;
+  setModelSettings(patch: ModelSettingsPatch): Promise<void>;
   setSystemPrompt(systemPrompt: string | null): Promise<void>;
-  checkForUpdate(): Promise<UpdateInfo | null>;
+  checkForUpdate(): Promise<AppUpdateCheck>;
   installUpdate(): Promise<void>;
   relaunch(): Promise<void>;
   getBlenderToolsState(): Promise<BlenderToolsState>;

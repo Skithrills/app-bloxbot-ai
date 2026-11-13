@@ -24,8 +24,13 @@ import {
   type StudioMcpHelperProbe,
 } from "../studioMcpHelper";
 import { ensureFolder, workspaceFailureReason } from "../workspaceFolders";
+import { createStudioMcpLog } from "../studioMcpLog";
+import { normalizeStudioToolImages } from "./ToolImages";
 
 const LOOPBACK = "127.0.0.1";
+
+// Stderr only until the layer is made with a log file.
+let log = createStudioMcpLog();
 
 export class StudioMcpBrokerError extends Data.TaggedError("StudioMcpBrokerError")<{
   message: string;
@@ -90,7 +95,7 @@ export interface StudioMcpUpstream {
   callTool(
     name: string,
     args: Record<string, unknown>,
-    options?: { signal?: AbortSignal },
+    options?: { signal?: AbortSignal; timeout?: number },
   ): Promise<CallToolResult>;
   close(): Promise<void>;
   listTools(): Promise<{ tools: Tool[] }>;
@@ -107,7 +112,7 @@ export interface StudioMcpBrokerService {
   readonly callTool: (
     name: string,
     args: Record<string, unknown>,
-    options?: { signal?: AbortSignal },
+    options?: { signal?: AbortSignal; timeout?: number },
   ) => Effect.Effect<CallToolResult, StudioMcpBrokerError>;
   readonly status: Effect.Effect<StudioMcpStatus>;
 }
@@ -122,6 +127,8 @@ class SdkStudioMcpUpstream implements StudioMcpUpstream {
     { name: "BloxBot", version: "1.0.0" },
     { capabilities: {} },
   );
+
+  private lastListSummary: string | undefined;
 
   private constructor() {}
 
@@ -139,7 +146,7 @@ class SdkStudioMcpUpstream implements StudioMcpUpstream {
         message: `Studio MCP helper not found at ${installPath}`,
       });
     }
-    if (source) process.stderr.write(`[studio-mcp] starting helper source=${source}\n`);
+    if (source) log(`starting helper source=${source}`);
     // Spawned directly, not through a shell, so paths with spaces need no quoting.
     const transport = new ObservedStdioClientTransport({
       command: executable,
@@ -151,7 +158,7 @@ class SdkStudioMcpUpstream implements StudioMcpUpstream {
     transport.stderr?.on("data", (chunk: Buffer | string) => {
       const message = chunk.toString().trimEnd();
       if (!message) return;
-      process.stderr.write(`[studio-mcp] ${message}\n`);
+      log(message);
       stderrTail = `${stderrTail}\n${message}`.slice(-STDERR_TAIL_LENGTH);
     });
     const upstream = new SdkStudioMcpUpstream();
@@ -183,20 +190,35 @@ class SdkStudioMcpUpstream implements StudioMcpUpstream {
   async callTool(
     name: string,
     args: Record<string, unknown>,
-    options?: { signal?: AbortSignal },
+    options?: { signal?: AbortSignal; timeout?: number },
   ): Promise<CallToolResult> {
     const startedAt = performance.now();
-    process.stderr.write(`[studio-mcp] call ${name}\n`);
-    const result = await this.client.callTool(
-      { name, arguments: args },
-      CallToolResultSchema,
-      options,
-    );
+    // The list of open Studios is asked for every few seconds, and the Explorer reads the tree
+    // hundreds of times in one go. Only a change in the first (or a slow answer) and a slow or
+    // refused read of the second are reported. Otherwise they would bury everything else.
+    const routine = name === "list_roblox_studios";
+    const treeRead = name === "search_game_tree";
+    const what = treeRead ? `${name}${describeTreeRead(args)}` : name;
+    if (!routine && !treeRead) log(`call ${name}`);
+    const result = await this.client
+      .callTool({ name, arguments: args }, CallToolResultSchema, options)
+      .catch((cause: unknown) => {
+        const reason = cause instanceof Error ? cause.message : String(cause);
+        // A read that a newer one replaced was cancelled on purpose.
+        if (!options?.signal?.aborted) {
+          log(`failed ${what} ${Math.round(performance.now() - startedAt)}ms ${reason}`);
+        }
+        throw cause;
+      });
     const parsed = CallToolResultSchema.parse(result);
     const summary = summarizeToolResult(name, parsed);
-    process.stderr.write(
-      `[studio-mcp] result ${name} ${Math.round(performance.now() - startedAt)}ms${summary}\n`,
-    );
+    const elapsed = Math.round(performance.now() - startedAt);
+    if (treeRead) {
+      if (elapsed > SLOW_TREE_READ_MS || parsed.isError) log(`result ${what} ${elapsed}ms${summary}`);
+    } else if (!routine || summary !== this.lastListSummary || elapsed > 2_000) {
+      log(`result ${name} ${elapsed}ms${summary}`);
+    }
+    if (routine) this.lastListSummary = summary;
     return parsed;
   }
 
@@ -303,6 +325,7 @@ export class StudioMcpConnection implements StudioMcpUpstream {
         });
         upstream.onClose?.(() => {
           if (this.current !== upstream) return;
+          log("helper closed");
           this.current = undefined;
           this.lastError = new Error("Studio MCP helper closed");
           if (this.startupFinished) this.state = "unavailable";
@@ -310,6 +333,7 @@ export class StudioMcpConnection implements StudioMcpUpstream {
         return upstream;
       },
       (cause: unknown) => {
+        log(`connect failed ${cause instanceof Error ? cause.message : String(cause)}`);
         this.lastError = cause;
         if (this.startupFinished) this.state = stateForFailure(cause);
         throw cause;
@@ -355,7 +379,7 @@ export class StudioMcpConnection implements StudioMcpUpstream {
   async callTool(
     name: string,
     args: Record<string, unknown>,
-    options?: { signal?: AbortSignal },
+    options?: { signal?: AbortSignal; timeout?: number },
   ): Promise<CallToolResult> {
     return (await this.ready()).callTool(name, args, options);
   }
@@ -417,12 +441,24 @@ export function runStudioMcpStartup(
   );
 }
 
+// Studio answers a read of the tree in tens of milliseconds, so one this slow is worth a line.
+const SLOW_TREE_READ_MS = 1_000;
+
+/** Which part of the tree a read asked for, so a slow or lost one can be found again. */
+function describeTreeRead(args: Record<string, unknown>): string {
+  const path = typeof args.path === "string" ? args.path : "(services)";
+  return ` path=${JSON.stringify(path)} depth=${String(args.max_depth)} limit=${String(args.head_limit)}`;
+}
+
 function summarizeToolResult(name: string, result: CallToolResult): string {
-  if (name !== "list_roblox_studios") return result.isError ? " error=true" : "";
   const text = result.content.find(
     (part): part is Extract<(typeof result.content)[number], { type: "text" }> =>
       part.type === "text",
   )?.text;
+  if (name !== "list_roblox_studios") {
+    // What Studio said when it refused, cut short because it can quote a whole script.
+    return result.isError ? ` error=${JSON.stringify((text ?? "").slice(0, 160))}` : "";
+  }
   if (!text) return ` error=${result.isError === true} studios=unknown`;
   try {
     const value = JSON.parse(text) as { studios?: unknown[] };
@@ -453,7 +489,7 @@ interface BrokerResource extends StudioMcpBrokerService {
 export async function startStudioMcpBroker(
   upstream: StudioMcpUpstream,
 ): Promise<BrokerResource> {
-  process.stderr.write("[studio-mcp] broker starting\n");
+  log("broker starting");
   const sessions = new Map<
     string,
     { server: Server; transport: StreamableHTTPServerTransport }
@@ -464,9 +500,10 @@ export async function startStudioMcpBroker(
       { capabilities: { tools: { listChanged: true } } },
     );
     server.setRequestHandler(ListToolsRequestSchema, () => upstream.listTools());
-    server.setRequestHandler(CallToolRequestSchema, (request) =>
-      upstream.callTool(request.params.name, request.params.arguments ?? {}),
-    );
+    server.setRequestHandler(CallToolRequestSchema, async (request) => {
+      const { name, arguments: args } = request.params;
+      return normalizeStudioToolImages(name, await upstream.callTool(name, args ?? {}));
+    });
     const transport: StreamableHTTPServerTransport = new StreamableHTTPServerTransport({
       sessionIdGenerator: randomUUID,
       onsessioninitialized: (sessionId): void => {
@@ -514,7 +551,7 @@ export async function startStudioMcpBroker(
   const address = httpServer.address();
   if (!address || typeof address === "string") throw new Error("Broker did not bind a TCP port");
 
-  process.stderr.write(`[studio-mcp] broker listening on ${LOOPBACK}:${address.port}\n`);
+  log(`broker listening on ${LOOPBACK}:${address.port}`);
   return {
     info: { url: `http://${LOOPBACK}:${address.port}/mcp` },
     callTool: (name, args, options) =>
@@ -542,9 +579,12 @@ export interface StudioMcpBrokerOptions {
   startSchedule?: Schedule.Schedule<unknown, StudioMcpStartFailure>;
   /** Replaces the file system and registry reads used to find the helper, for tests. */
   helperProbe?: StudioMcpHelperProbe;
+  /** Where to keep what the helper and the broker report. Only stderr gets it when left out. */
+  logFile?: string;
 }
 
 export function makeStudioMcpBrokerLayer(options: StudioMcpBrokerOptions) {
+  log = createStudioMcpLog(options.logFile);
   const platform = options.platform ?? process.platform;
   const environment = {
     localAppData: options.localAppData,

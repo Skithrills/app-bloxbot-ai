@@ -62,6 +62,11 @@ function Harness({
   const queryClient = new QueryClient({
     defaultOptions: { queries: { retry: false, staleTime: Infinity } },
   });
+  queryClient.setQueryData(qk.providers, {
+    all: [{ id: "anthropic", models: { claude: { id: "claude", name: "Claude" } } }],
+    connected: ["anthropic"],
+    default: { anthropic: "claude" },
+  });
   queryClient.setQueryData(qk.config, {
     lastModel: "anthropic/claude",
     hiddenModels: [],

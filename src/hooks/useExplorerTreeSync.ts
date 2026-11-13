@@ -20,6 +20,7 @@ import { useStudioTargetOptional } from "@/providers/StudioTargetProvider";
 
 // How often to ask once Studio says when the tree changes, which costs two tiny calls.
 const WATCHED_SYNC_MS = 1_500;
+const NO_OBJECTS: readonly ExplorerNode[] = [];
 const ACTIVE_SYNC_MS = 2_500;
 const IDLE_SYNC_MS = 5_000;
 const MAX_UNCHANGED_SYNC_MS = 30_000;
@@ -52,9 +53,18 @@ export interface ExplorerTreeSync {
 export function useExplorerTreeSync(): ExplorerTreeSync {
   const { client } = useOpenCodeClient();
   const studioTarget = useStudioTargetOptional();
-  const studioId = studioTarget?.selected?.key ?? null;
+  const selected = studioTarget?.selected;
+  const studioId = selected?.key ?? null;
+  const studioScope = selected
+    ? JSON.stringify([selected.key, selected.placeId, selected.label])
+    : null;
   const [tree, setTree] = useState<ExplorerTree | null>(null);
-  const [objects, setObjects] = useState<readonly ExplorerNode[]>([]);
+  const [objectSnapshot, setObjectSnapshot] = useState<{
+    scope: string | null;
+    objects: readonly ExplorerNode[];
+  } | null>(null);
+  const objects =
+    objectSnapshot && objectSnapshot.scope === studioScope ? objectSnapshot.objects : NO_OBJECTS;
   const [truncated, setTruncated] = useState(false);
   const [syncing, setSyncing] = useState(false);
   const [syncError, setSyncError] = useState<string | null>(null);
@@ -64,6 +74,8 @@ export function useExplorerTreeSync(): ExplorerTreeSync {
   const treeRef = useRef<ExplorerTree | null>(null);
   const studioRef = useRef(studioId);
   studioRef.current = studioId;
+  const studioScopeRef = useRef(studioScope);
+  studioScopeRef.current = studioScope;
   const discoverRef = useRef(studioTarget?.discover);
   discoverRef.current = studioTarget?.discover;
   const queueRef = useRef<ExplorerTreeUpdate[]>([]);
@@ -90,7 +102,10 @@ export function useExplorerTreeSync(): ExplorerTreeSync {
   const publishObjects = useCallback(() => {
     objectsStaleRef.current = false;
     objectsPublishedAtRef.current = Date.now();
-    setObjects([...(treeRef.current?.roots ?? [])]);
+    setObjectSnapshot({
+      scope: studioScopeRef.current,
+      objects: [...(treeRef.current?.roots ?? [])],
+    });
   }, []);
 
   const applyQueued = useCallback(() => {
@@ -119,14 +134,14 @@ export function useExplorerTreeSync(): ExplorerTreeSync {
   );
 
   // A tree belongs to one place. Switching Studio also retries straight away.
-  // biome-ignore lint/correctness/useExhaustiveDependencies: studioId is what triggers the reset
+  // biome-ignore lint/correctness/useExhaustiveDependencies: the Studio and place trigger the reset
   useEffect(() => {
     window.clearTimeout(batchTimerRef.current);
     batchTimerRef.current = undefined;
     queueRef.current = [];
     treeRef.current = null;
     setTree(null);
-    setObjects([]);
+    setObjectSnapshot(null);
     setTruncated(false);
     setSyncError(null);
     setWaiting(null);
@@ -134,7 +149,7 @@ export function useExplorerTreeSync(): ExplorerTreeSync {
     waitRef.current = null;
     unchangedRef.current = 0;
     watchingRef.current = false;
-  }, [studioId]);
+  }, [studioScope]);
 
   // Reopening Explorer retries straight away. This lives outside the sync effect, which also re-runs
   // whenever the chat turns busy or idle and must not clear the backoff.
@@ -179,16 +194,16 @@ export function useExplorerTreeSync(): ExplorerTreeSync {
     }
 
     async function sync({ force }: { force: boolean }) {
-      if (syncingRef.current && syncStudioRef.current === studioId) {
+      if (syncingRef.current && syncStudioRef.current === studioScope) {
         resyncRef.current = { force: force || resyncRef.current?.force === true };
         return;
       }
       // Starting this replaces a read of another Studio, which the main process stops.
       const token = ++syncTokenRef.current;
-      syncStudioRef.current = studioId;
+      syncStudioRef.current = studioScope;
       resyncRef.current = null;
       syncingRef.current = true;
-      const movedOn = () => studioRef.current !== studioId;
+      const movedOn = () => studioScopeRef.current !== studioScope;
       setSyncing(true);
       const syncStartedAt = performance.now();
       const isFirstSync = !telemetryRef.current.firstSyncReported;
@@ -290,7 +305,10 @@ export function useExplorerTreeSync(): ExplorerTreeSync {
               }),
             ),
           );
-        setSyncError(error instanceof Error ? error.message : String(error));
+        // A tree already on screen stays as it is through one failed read, which is usually Studio
+        // being busy or its helper restarting. Only a streak says something's wrong.
+        if (!treeRef.current?.roots.length || failuresRef.current >= 2)
+          setSyncError(error instanceof Error ? error.message : String(error));
       } finally {
         // Everything from here belongs to the latest read.
         if (token === syncTokenRef.current) {
@@ -338,7 +356,7 @@ export function useExplorerTreeSync(): ExplorerTreeSync {
       document.removeEventListener("visibilitychange", resume);
       window.removeEventListener("focus", resume);
     };
-  }, [applyQueued, client, demand.busy, demand.open, publishObjects, studioId]);
+  }, [applyQueued, client, demand.busy, demand.open, publishObjects, studioId, studioScope]);
 
   const requestSync = useCallback((options?: { force?: boolean }) => {
     const request = { force: options?.force === true };

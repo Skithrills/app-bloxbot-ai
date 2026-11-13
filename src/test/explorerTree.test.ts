@@ -385,6 +385,197 @@ describe("syncExplorerTree", () => {
     expect(last.pending).not.toBe(true);
   });
 
+  it("counts what's below a same-named object when a deep read can't reach it", async () => {
+    let deepest = folder("L12", folder("A"), folder("B"), folder("C"));
+    for (let level = 11; level >= 1; level -= 1) deepest = folder(`L${level}`, deepest);
+    const callTool = fakeStudio({
+      version: null,
+      place: [folder("Workspace", folder("Twin"), folder("Twin", deepest))],
+    });
+    const { sync, tree } = renderer(callTool);
+    await sync();
+
+    let last = child(tree().roots, "Workspace").children[1] as ExplorerNode;
+    while (last.children[0]) last = last.children[0];
+    expect(last.hasChildren).toBe(false);
+    expect(last.unlisted).toBeGreaterThan(0);
+  });
+
+  describe("beside a same-named pair, with far more below than one read can hold", () => {
+    // Animation saves look like this: a few objects, each holding tens of thousands of rows.
+    const heavy = (name: string) =>
+      folder(name, ...many(60, (a) => folder(`K${a}`, ...many(300, (b) => folder(`P${b}`)))));
+    const place = () => [
+      folder(
+        "ServerStorage",
+        folder("Saves", heavy("Rock"), heavy("Knife"), heavy("Knife"), heavy("Rifle")),
+      ),
+    ];
+
+    it("never asks for more than the cap, and still finishes", async () => {
+      const callTool = fakeStudio({ version: null, place: place() });
+      const { sync, tree } = renderer(callTool);
+      const { result } = await sync();
+
+      for (const args of treeReads(callTool)) {
+        if (Number(args.max_depth) > 1) expect(Number(args.head_limit)).toBeLessThanOrEqual(30_000);
+      }
+      expect(result.complete).toBe(true);
+      // The pair's own children fit, so they're listed. What those hold is counted, not listed.
+      const saves = child(child(tree().roots, "ServerStorage").children, "Saves");
+      const [first, second] = saves.children.filter((node) => node.name === "Knife");
+      expect(first.children).toHaveLength(60);
+      expect(second.children).toHaveLength(60);
+      expect(second.children[0].hasChildren).toBe(false);
+      expect(second.children[0].unlisted).toBe(300);
+      expect(result.truncated).toBe(true);
+      // The ones a path does reach are read in full.
+      expect(child(saves.children, "Rock").children[0].children).toHaveLength(300);
+    });
+
+    it("throws away a deeper read that hits the cap, and doesn't repeat it", async () => {
+      // The next level fits, so it's read, but the one after doesn't.
+      const twin = () =>
+        folder(
+          "Knife",
+          ...many(300, (a) => folder(`K${a}`, ...many(40, (b) => folder(`P${b}`, folder("Q"))))),
+        );
+      const studio = {
+        version: null,
+        place: [folder("ServerStorage", folder("Saves", twin(), twin()))],
+      };
+      const callTool = fakeStudio(studio);
+      const { sync, tree } = renderer(callTool);
+      const deeper = () =>
+        treeReads(callTool).filter(
+          (args) => args.path === "ServerStorage.Saves" && args.max_depth === 4,
+        );
+      const first = await sync();
+
+      expect(deeper()).toEqual([expect.objectContaining({ head_limit: 30_000 })]);
+      expect(first.result).toMatchObject({ complete: true, truncated: true });
+      const saves = child(child(tree().roots, "ServerStorage").children, "Saves");
+      expect(saves.children[1].children).toHaveLength(300);
+      expect(saves.children[1].children[0].unlisted).toBe(40);
+
+      const second = await sync();
+      expect(deeper()).toHaveLength(1);
+      expect(second.updates).toBe(0);
+
+      // Something there changed, so it's worth one more try.
+      studio.place[0].children?.[0].children?.[0].children?.push(folder("Added"));
+      await sync();
+      expect(deeper()).toHaveLength(2);
+    });
+
+    it("doesn't try the read that was too big again until something there changes", async () => {
+      const studio = { version: null, place: place() };
+      const callTool = fakeStudio(studio);
+      const { sync } = renderer(callTool);
+      await sync();
+      const deepReads = () =>
+        treeReads(callTool).filter(
+          (args) => args.path === "ServerStorage.Saves" && Number(args.max_depth) > 2,
+        ).length;
+      const first = deepReads();
+      const { result, updates } = await sync();
+
+      expect(deepReads()).toBe(first);
+      expect(updates).toBe(0);
+      expect(result.truncated).toBe(true);
+    });
+  });
+
+  describe("when Studio doesn't answer one read", () => {
+    const place = () => [
+      folder("Workspace", folder("Map", folder("Spawn")), folder("Lost", folder("Inside"))),
+      folder("Lighting", folder("Sky")),
+    ];
+    /** A Studio that never answers for one object, as with an answer too big to send. */
+    const losing = (studio: FakeStudio, lost: string) => {
+      const answer = fakeStudio(studio);
+      const callTool = vi.fn<CallStudioTool>(async (name, args, options) => {
+        if (name === "search_game_tree" && args.path === lost) {
+          throw new Error("MCP error -32001: Request timed out");
+        }
+        return answer(name, args, options);
+      });
+      return callTool;
+    };
+
+    it("keeps the rest of the tree and gives every read a time limit", async () => {
+      const callTool = losing({ version: null, place: place() }, "Lighting");
+      const { sync, tree } = renderer(callTool);
+      const { result } = await sync();
+
+      expect(result.complete).toBe(false);
+      const workspace = child(tree().roots, "Workspace");
+      expect(child(child(workspace.children, "Map").children, "Spawn")).toBeDefined();
+      for (const [name, , options] of callTool.mock.calls) {
+        if (name === "search_game_tree") expect(options?.timeout).toBeGreaterThan(0);
+      }
+    });
+
+    it("leaves it alone after a couple of walks, until a fresh read is asked for", async () => {
+      const callTool = losing({ version: null, place: place() }, "Lighting");
+      const { sync } = renderer(callTool);
+      await sync();
+      await sync();
+      const asked = () => callTool.mock.calls.filter(([, args]) => args.path === "Lighting").length;
+      const before = asked();
+
+      // Leaving it alone doesn't count as having read it, so it stays left alone.
+      for (let walk = 3; walk <= 5; walk += 1) {
+        const { result } = await sync();
+        expect(asked()).toBe(before);
+        expect(result.complete).toBe(true);
+        expect(result.truncated).toBe(true);
+      }
+      await sync({ force: true });
+      expect(asked()).toBeGreaterThan(before);
+    });
+
+    it("retries a skipped part after five minutes even when the watcher has seen no changes", async () => {
+      let now = Date.now();
+      const clock = vi.spyOn(Date, "now").mockImplementation(() => now);
+      try {
+        const callTool = losing({ version: "1", place: place() }, "Lighting");
+        const { sync } = renderer(callTool);
+        await sync();
+        await sync();
+
+        now += 299_999;
+        expect((await sync()).result).toMatchObject({ complete: true, truncated: true });
+        const asked = () => treeReads(callTool).filter((args) => args.path === "Lighting").length;
+        expect(asked()).toBe(2);
+        now += 1;
+        expect((await sync()).result.complete).toBe(false);
+        expect(asked()).toBe(3);
+      } finally {
+        clock.mockRestore();
+      }
+    });
+
+    it("throws the latest failure on walks where every read fails or is skipped", async () => {
+      const answer = fakeStudio({ version: null, place: place() });
+      let failed = 0;
+      const callTool = vi.fn<CallStudioTool>(async (name, args, options) => {
+        if (name === "search_game_tree" && args.path) {
+          throw new Error(`MCP error -32001: Request timed out (${++failed})`);
+        }
+        return answer(name, args, options);
+      });
+      const { sync } = renderer(callTool);
+
+      await expect(sync({ fresh: false })).rejects.toThrow("Request timed out (2)");
+      await expect(sync({ fresh: false })).rejects.toThrow("Request timed out (4)");
+      for (let walk = 3; walk <= 5; walk += 1) {
+        await expect(sync({ fresh: false })).rejects.toThrow("Request timed out (4)");
+      }
+      expect(failed).toBe(4);
+    });
+  });
+
   describe("when nothing has changed", () => {
     const place = () => [
       folder("Workspace", folder("Model", folder("Part")), folder("Other", folder("Thing"))),

@@ -6,15 +6,19 @@
  */
 
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { useRef } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import ChatSidebar from "@/components/ChatSidebar";
+import { loadConfig } from "@/lib/config";
+import { desktop } from "@/lib/desktop";
 import type { Session } from "@/lib/opencode/types";
 import { qk } from "@/lib/queryKeys";
 import { ActiveSessionProvider } from "@/providers/ActiveSessionProvider";
 import { OpenCodeClientContext } from "@/providers/OpenCodeClientProvider";
 import { PreferencesProvider } from "@/providers/PreferencesProvider";
+import { StudioTargetProvider } from "@/providers/StudioTargetProvider";
+import type { ProjectFolder } from "@/types/desktop";
 
 const { capture } = vi.hoisted(() => ({ capture: vi.fn() }));
 vi.mock("posthog-js/dist/module.full.no-external.js", () => ({
@@ -50,6 +54,7 @@ function createClient(overrides: Record<string, unknown> = {}) {
       update: vi.fn().mockResolvedValue({ data: null }),
       abort: vi.fn().mockResolvedValue({ data: true }),
       messages: vi.fn().mockResolvedValue({ data: [] }),
+      move: vi.fn().mockResolvedValue({ data: null }),
       status: vi.fn().mockResolvedValue({ data: {} }),
       todo: vi.fn().mockResolvedValue({ data: [] }),
       promptAsync: vi.fn().mockResolvedValue({}),
@@ -97,6 +102,7 @@ function TestSidebar({
   onToggle = vi.fn(),
   onSessionSelect = vi.fn(),
   onOpenSettings = vi.fn(),
+  withStudio = false,
 }: {
   client: ReturnType<typeof createClient>;
   queryClient: QueryClient;
@@ -104,8 +110,17 @@ function TestSidebar({
   onToggle?: () => void;
   onSessionSelect?: () => void;
   onOpenSettings?: () => void;
+  withStudio?: boolean;
 }) {
   const activeSessionIdRef = useRef<string | null>(null);
+  const sidebar = (
+    <ChatSidebar
+      collapsed={collapsed}
+      onToggle={onToggle}
+      onSessionSelect={onSessionSelect}
+      onOpenSettings={onOpenSettings}
+    />
+  );
   return (
     <QueryClientProvider client={queryClient}>
       <OpenCodeClientContext.Provider
@@ -119,12 +134,7 @@ function TestSidebar({
       >
         <ActiveSessionProvider activeSessionIdRef={activeSessionIdRef}>
           <PreferencesProvider>
-            <ChatSidebar
-              collapsed={collapsed}
-              onToggle={onToggle}
-              onSessionSelect={onSessionSelect}
-              onOpenSettings={onOpenSettings}
-            />
+            {withStudio ? <StudioTargetProvider>{sidebar}</StudioTargetProvider> : sidebar}
           </PreferencesProvider>
         </ActiveSessionProvider>
       </OpenCodeClientContext.Provider>
@@ -136,6 +146,7 @@ function TestSidebar({
 
 beforeEach(() => {
   vi.clearAllMocks();
+  localStorage.clear();
 });
 
 afterEach(() => {
@@ -145,6 +156,95 @@ afterEach(() => {
 // ── Tests ────────────────────────────────────────────────────────────
 
 describe("ChatSidebar", () => {
+  it("adds a real project folder, creates in it, and keeps grouping after a fresh configuration load", async () => {
+    const directory = "C:\\Games\\Game A";
+    const session = { ...makeSession("project1", "A project chat"), directory: "c:/games/game a" };
+    const client = createClient({ create: vi.fn().mockResolvedValue({ data: session }) });
+    const qc = createQueryClient();
+    seedState(qc);
+    vi.spyOn(desktop, "chooseProjectFolder").mockResolvedValue(directory);
+    const view = render(<TestSidebar client={client} queryClient={qc} />);
+
+    fireEvent.click(screen.getByTitle("Add project folder"));
+    expect(await screen.findByRole("dialog", { name: "Add project folder" })).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Add folder" }));
+    fireEvent.click(await screen.findByTitle("New chat in Game A"));
+    expect(
+      await within(screen.getByRole("region", { name: "Game A" })).findByText("A project chat"),
+    ).toBeInTheDocument();
+    expect(client.session.create).toHaveBeenCalledWith({ directory }, { throwOnError: true });
+
+    view.unmount();
+    const reloaded = createQueryClient();
+    seedState(reloaded, { sessions: [session] });
+    reloaded.setQueryData(qk.config, await loadConfig());
+    render(<TestSidebar client={client} queryClient={reloaded} />);
+    expect(
+      within(screen.getByRole("region", { name: "Game A" })).getByText("A project chat"),
+    ).toBeInTheDocument();
+
+    fireEvent.click(screen.getByTitle("Edit Game A"));
+    fireEvent.change(screen.getByLabelText("Project name"), { target: { value: "Renamed game" } });
+    fireEvent.click(screen.getByRole("button", { name: "Save" }));
+    expect(await screen.findByRole("region", { name: "Renamed game" })).toBeInTheDocument();
+    fireEvent.click(screen.getByTitle("Edit Renamed game"));
+    fireEvent.click(screen.getByRole("button", { name: "Remove…" }));
+    fireEvent.click(screen.getByRole("button", { name: "Remove folder" }));
+    await waitFor(() => expect(screen.queryByRole("region", { name: "Renamed game" })).toBeNull());
+    expect(screen.getByText("A project chat")).toBeInTheDocument();
+    expect(client.session.delete).not.toHaveBeenCalled();
+  });
+
+  it("moves an existing chat into a project through OpenCode", async () => {
+    const directory = "C:\\Games\\Game A";
+    const session = makeSession("general", "Existing chat");
+    const client = createClient({
+      move: vi.fn().mockResolvedValue({ data: { ...session, directory } }),
+    });
+    const qc = createQueryClient();
+    seedState(qc, { sessions: [session] });
+    const projectFolders: ProjectFolder[] = [{ directory, name: "Game A", studio: null }];
+    qc.setQueryData(qk.config, { ...(await loadConfig()), projectFolders });
+    render(<TestSidebar client={client} queryClient={qc} />);
+
+    fireEvent.click(screen.getByTitle("Chat actions"));
+    fireEvent.click(screen.getByRole("menuitem", { name: "Game A" }));
+    expect(
+      await within(screen.getByRole("region", { name: "Game A" })).findByText("Existing chat"),
+    ).toBeInTheDocument();
+    expect(client.session.move).toHaveBeenCalledWith(
+      { sessionID: session.id, directory },
+      { throwOnError: true },
+    );
+  });
+
+  it("remembers the folder's chosen Studio for a new project chat", async () => {
+    const directory = "C:\\Games\\Game A";
+    const studio = { key: "game-a", label: "Game A", detail: null, placeId: "101" };
+    const differentStudio = { key: "game-b", label: "Game B", detail: null, placeId: "102" };
+    const session = { ...makeSession("with-studio", "Project chat"), directory };
+    const client = createClient({ create: vi.fn().mockResolvedValue({ data: session }) });
+    const qc = createQueryClient();
+    seedState(qc);
+    qc.setQueryData(qk.config, {
+      ...(await loadConfig()),
+      projectFolders: [{ directory, name: "Game A", studio }],
+    });
+    vi.spyOn(desktop, "discoverStudioTargets").mockResolvedValue({
+      targets: [studio, differentStudio],
+      selectedKey: differentStudio.key,
+    });
+    const select = vi
+      .spyOn(desktop, "selectStudioTarget")
+      .mockResolvedValue({ selected: studio, verified: true });
+    render(<TestSidebar client={client} queryClient={qc} withStudio />);
+
+    fireEvent.click(screen.getByTitle("New chat in Game A"));
+    await waitFor(() => expect(select).toHaveBeenCalledWith(studio.key));
+    expect((await loadConfig()).studioTargetsBySession[session.id]).toEqual(studio);
+    expect((await loadConfig()).chatsWithChosenPlace).toContain(session.id);
+  });
+
   it("snoozes an idle session instead of deleting it", async () => {
     const s1 = makeSession("s1", "To Snooze");
     const snoozed = makeSession("s1", "To Snooze", s1.time.created, Date.now());

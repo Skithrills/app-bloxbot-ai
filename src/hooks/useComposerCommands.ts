@@ -47,7 +47,10 @@ export function useComposerCommands(actions: {
   const studioTarget = useStudioTargetOptional();
   const { client } = useOpenCodeClient();
   const { activeSessionId, selectSession } = useActiveSession();
-  const { selectedModel, selectedVariant } = usePreferences();
+  const { selectedModel, selectedVariant, hideFreeModels, modelSelectionMessage } =
+    usePreferences();
+  const [providerID, modelID] = selectedModel ? splitModelKey(selectedModel) : [];
+  const model = providerID && modelID ? { providerID, modelID } : undefined;
   const queryClient = useQueryClient();
   const createSession = useCreateSession();
   const catalog = useCommands();
@@ -64,6 +67,7 @@ export function useComposerCommands(actions: {
       const message = cache?.messagesById[id];
       const isPrompt =
         message?.info.role === "user" &&
+        message.info.inbox?.state !== "pending" &&
         message.parts.some((part) => part.type === "text" || part.type === "file");
       return isPrompt ? [message] : [];
     });
@@ -124,7 +128,16 @@ export function useComposerCommands(actions: {
           notify.message("Nothing to compact yet");
           return;
         }
-        await client.session.compact({ sessionID }, options);
+        if (modelSelectionMessage) throw new Error(modelSelectionMessage);
+        await client.session.compact(
+          {
+            sessionID,
+            ...(hideFreeModels && { requirePaidModel: true }),
+            model,
+            variant: selectedVariant ?? undefined,
+          },
+          options,
+        );
         return;
       case "fork": {
         const forked = await client.session.fork({ sessionID }, options);
@@ -156,16 +169,17 @@ export function useComposerCommands(actions: {
     system: string | null,
   ) {
     if (!client) return;
-    const [providerID, modelID] = selectedModel ? splitModelKey(selectedModel) : [];
+    if (modelSelectionMessage) throw new Error(modelSelectionMessage);
     const accepted = client.session.command(
       {
         sessionID,
         name,
+        ...(hideFreeModels && { requirePaidModel: true }),
         parts: [
           { type: "text", text: argument },
           ...images.map((image) => ({ type: "file", ...image })),
         ],
-        model: providerID && modelID ? { providerID, modelID } : undefined,
+        model,
         variant: selectedVariant ?? undefined,
         system: system ?? undefined,
       } as Parameters<typeof client.session.command>[0],

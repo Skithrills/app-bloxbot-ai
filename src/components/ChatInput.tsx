@@ -1,32 +1,67 @@
+import { useIsMutating, useQuery, useQueryClient } from "@tanstack/react-query";
 import type { SerializedEditorState } from "lexical";
 import { Paperclip, Plus } from "lucide-react";
 import posthog from "posthog-js/dist/module.full.no-external.js";
-import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import {
+  memo,
+  type ReactNode,
+  type Ref,
+  useCallback,
+  useEffect,
+  useImperativeHandle,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
+import { EffortPicker } from "@/components/EffortPicker";
 import GoalPill from "@/components/GoalPill";
 import ModelStatusBadge from "@/components/ModelStatusBadge";
 import PromptEditor, { type PromptEditorHandle } from "@/components/PromptEditor";
+import { QueuedMessages } from "@/components/QueuedMessages";
 import TodoPill, { hasOpenTodos } from "@/components/TodoPill";
-import {
-  MENU_TRIGGER,
-  MenuChevron,
-  MenuContent,
-  MenuItem,
-  MenuLabel,
-  MenuSearch,
-} from "@/components/ui/menu";
+import { MENU_TRIGGER, MenuChevron, MenuItem, MenuLabel, MenuSearch } from "@/components/ui/menu";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import { useAbort } from "@/hooks/mutations/useAbort";
-import { useSendMessage } from "@/hooks/mutations/useSendMessage";
+import { sendMessageMutationKey, useSendMessage } from "@/hooks/mutations/useSendMessage";
 import { useComposerCommands } from "@/hooks/useComposerCommands";
-import { useAllModels, useConnectedProviders } from "@/hooks/useProviders";
+import { useEligibleModels } from "@/hooks/useEligibleModels";
+import { useAllModels } from "@/hooks/useProviders";
 import { useSessionGoal } from "@/hooks/useSessionGoal";
 import { useIsBusy } from "@/hooks/useSessionStatuses";
 import { useTodos } from "@/hooks/useTodos";
 import { analyticsProperties } from "@/lib/analytics";
-import { EXPLORER_WAIT_NOTICES, OBJECT_DRAG_NAME_TYPE, OBJECT_DRAG_TYPE } from "@/lib/explorer";
+import {
+  type ComposerDelivery,
+  composerShortcutLabel,
+  DEFAULT_COMPOSER_SHORTCUTS,
+  getComposerDelivery,
+} from "@/lib/composerDelivery";
+import {
+  type ComposerDraft,
+  type DraftAttachment,
+  EMPTY_COMPOSER_DRAFT,
+  readComposerDraft,
+  saveComposerDraft,
+} from "@/lib/composerDrafts";
+import { loadConfig } from "@/lib/config";
+import {
+  EXPLORER_WAIT_NOTICES,
+  OBJECT_DRAG_CLASS_TYPE,
+  OBJECT_DRAG_NAME_TYPE,
+  OBJECT_DRAG_TYPE,
+} from "@/lib/explorer";
+import { compareCatalogModels, fastModelPairs } from "@/lib/modelChoice";
 import { notify } from "@/lib/notifications";
-import { needsStudio } from "@/lib/promptSuggestions";
+import { OPENAI_API_PROVIDER, OPENAI_OAUTH_PROVIDER } from "@/lib/openAiProfiles";
+import { needsStudio, parseSlashCommand } from "@/lib/promptSuggestions";
+import { qk } from "@/lib/queryKeys";
 import { splitModelKey } from "@/lib/splitModelKey";
+import {
+  type AddComposerImage,
+  COMPOSER_IMAGE_TYPES,
+  MAX_COMPOSER_IMAGE_BYTES,
+  MAX_COMPOSER_IMAGES,
+} from "@/lib/toolImages";
 import { useActiveSession } from "@/providers/ActiveSessionProvider";
 import { useExplorerReference } from "@/providers/ExplorerReferenceProvider";
 import { usePreferences } from "@/providers/PreferencesProvider";
@@ -34,19 +69,6 @@ import { useStudioTargetOptional } from "@/providers/StudioTargetProvider";
 import type { ModelInfo } from "@/types";
 
 // ── Image attachment helpers ────────────────────────────────────────────
-
-interface ImageAttachment {
-  id: string;
-  dataUrl: string;
-  mime: string;
-  filename: string;
-}
-
-const ACCEPTED_IMAGE_TYPES = ["image/png", "image/jpeg", "image/gif", "image/webp"];
-const MAX_IMAGE_SIZE = 20 * 1024 * 1024;
-const MAX_ATTACHMENTS = 5;
-
-let attachmentCounter = 0;
 
 function fileToDataURL(file: File): Promise<string> {
   return new Promise((resolve, reject) => {
@@ -186,19 +208,19 @@ const SendButton = memo(function SendButton({
   text,
   hasAttachments,
   isBusy,
+  isSending,
   blockedReason,
   onSend,
 }: {
   text: string;
   hasAttachments: boolean;
   isBusy: boolean;
+  isSending: boolean;
   /** Why sending is off, shown on the button. */
   blockedReason?: string | null;
   onSend: () => void;
 }) {
   const abort = useAbort();
-  const canSend = !isBusy;
-
   return (
     <>
       {isBusy ? (
@@ -225,9 +247,9 @@ const SendButton = memo(function SendButton({
         <button
           type="button"
           onClick={onSend}
-          disabled={(!text.trim() && !hasAttachments) || !canSend}
+          disabled={(!text.trim() && !hasAttachments) || isSending}
           aria-disabled={!!blockedReason}
-          className="flex h-7 w-7 shrink-0 items-center justify-center rounded-full bg-foreground text-background transition-opacity disabled:opacity-30 aria-disabled:opacity-30"
+          className="flex h-7 w-7 shrink-0 items-center justify-center rounded-full bg-brand text-brand-foreground transition-opacity disabled:opacity-30 aria-disabled:opacity-30"
           title={blockedReason ?? "Send"}
         >
           <svg
@@ -249,106 +271,39 @@ const SendButton = memo(function SendButton({
   );
 });
 
-const EFFORT_LABELS: Record<string, string> = {
-  none: "No",
-  minimal: "Minimal",
-  low: "Low",
-  medium: "Medium",
-  high: "High",
-  xhigh: "Extra high",
-  max: "Max",
-};
-
-/** OpenCode's names for a model's thinking levels, or Auto when the model decides. */
-function effortLabel(variant: string | null): string {
-  if (!variant) return "Auto";
-  return EFFORT_LABELS[variant] ?? variant;
-}
-
 /** What was in the message box when something else took over the screen, by chat. */
-interface Draft {
-  text: string;
-  attachments: ImageAttachment[];
-  editorState?: SerializedEditorState;
-}
-
-const KEPT_DRAFTS_KEY = "bloxbot-kept-drafts";
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
-}
-
-function isAttachment(value: unknown): value is ImageAttachment {
-  return (
-    isRecord(value) &&
-    typeof value.id === "string" &&
-    typeof value.dataUrl === "string" &&
-    typeof value.mime === "string" &&
-    typeof value.filename === "string"
-  );
-}
-
-/** Only the outline Lexical needs to start reading a saved state. */
-function isEditorState(value: unknown): value is SerializedEditorState {
-  return (
-    isRecord(value) &&
-    isRecord(value.root) &&
-    value.root.type === "root" &&
-    Array.isArray(value.root.children)
-  );
-}
-
-// Storage can hold anything, and a bad entry mustn't stop the app from opening.
-function isKeptDraft(value: unknown): value is [string, Draft] {
-  if (!Array.isArray(value) || value.length !== 2 || typeof value[0] !== "string") return false;
-  const draft: unknown = value[1];
-  return (
-    isRecord(draft) &&
-    typeof draft.text === "string" &&
-    Array.isArray(draft.attachments) &&
-    draft.attachments.every(isAttachment)
-  );
-}
-
-/** A draft's text is worth keeping even when its editor state isn't, which then restores as text. */
-function keptDraft([id, draft]: [string, Draft]): [string, Draft] {
-  if (draft.editorState === undefined || isEditorState(draft.editorState)) return [id, draft];
-  const { editorState: _unreadable, ...rest } = draft;
-  return [id, rest];
-}
-
-/** Reconnecting reloads the page or restarts the app, neither of which should take a draft with it. */
-export function takeKeptDrafts(): [string, Draft][] {
-  try {
-    const stored = localStorage.getItem(KEPT_DRAFTS_KEY);
-    localStorage.removeItem(KEPT_DRAFTS_KEY);
-    const parsed: unknown = stored ? JSON.parse(stored) : [];
-    return Array.isArray(parsed) ? parsed.filter(isKeptDraft).map(keptDraft) : [];
-  } catch {
-    return [];
+function mergeDrafts(failed: ComposerDraft, current: ComposerDraft): ComposerDraft {
+  const failedIDs = new Set(failed.attachments.map(({ id }) => id));
+  const attachments = [
+    ...failed.attachments,
+    ...current.attachments.filter(({ id }) => !failedIDs.has(id)),
+  ];
+  if (!current.text.trim() || (failed.editorState && failed.editorState === current.editorState)) {
+    return { ...failed, attachments };
   }
+  if (!failed.text.trim()) return { ...current, attachments };
+  const failedRoot = failed.editorState?.root;
+  const currentRoot = current.editorState?.root;
+  return {
+    text: `${failed.text}\n\n${current.text}`,
+    attachments,
+    editorState:
+      failedRoot && currentRoot
+        ? { root: { ...currentRoot, children: [...failedRoot.children, ...currentRoot.children] } }
+        : undefined,
+  };
 }
-
-export const savedDrafts = new Map<string, Draft>(takeKeptDrafts());
-
-function keepDrafts() {
-  try {
-    if (savedDrafts.size > 0) {
-      localStorage.setItem(KEPT_DRAFTS_KEY, JSON.stringify([...savedDrafts]));
-    }
-  } catch {
-    // Too big to keep, as with large images. The page is going either way.
-  }
-}
-
-window.addEventListener("beforeunload", keepDrafts);
 
 function ChatInput({
   onOpenSettings,
   focusOnMount = false,
+  attachImageRef,
+  contextControl,
 }: {
   onOpenSettings?: () => void;
   focusOnMount?: boolean;
+  attachImageRef?: Ref<AddComposerImage>;
+  contextControl?: ReactNode;
 }) {
   const {
     pendingReference,
@@ -362,17 +317,39 @@ function ChatInput({
     requestSync,
   } = useExplorerReference();
   const allModels = useAllModels();
-  const connectedProviders = useConnectedProviders();
+  const eligibleModels = useEligibleModels({ includeUnavailable: true });
   const { activeSessionId, activeSessionIdRef } = useActiveSession();
   const isBusy = useIsBusy(activeSessionId);
+  const { data: predictionsEnabled } = useQuery({
+    queryKey: qk.config,
+    queryFn: loadConfig,
+    select: (config) => config.composerPredictions === true,
+  });
   const {
+    composerShortcuts = DEFAULT_COMPOSER_SHORTCUTS,
     selectedModel,
     selectedVariant,
-    hiddenModels,
+    modelSelectionMessage,
+    modelCatalogOrder,
+    effortControl,
+    hideFreeModels,
+    savingModelSettings,
     unavailableModels,
+    setHideFreeModels,
     setSelectedModel,
     setSelectedVariant,
+    setModelCatalogOrder,
   } = usePreferences();
+  const fastPairs = useMemo(
+    () => fastModelPairs(eligibleModels, unavailableModels),
+    [eligibleModels, unavailableModels],
+  );
+  const fastPair = selectedModel ? fastPairs.get(selectedModel) : undefined;
+  const fastEnabled =
+    fastPair && selectedModel === `${fastPair.fast.providerId}/${fastPair.fast.id}`;
+  const displayModelKey = fastPair
+    ? `${fastPair.standard.providerId}/${fastPair.standard.id}`
+    : selectedModel;
   const studioTarget = useStudioTargetOptional();
   const studioTargetReference = studioTarget?.promptReference ?? null;
   const studioId = studioTarget?.selected?.key ?? null;
@@ -396,13 +373,13 @@ function ChatInput({
   // Available variants for the currently selected model
   const availableVariants = useMemo(() => {
     if (!selectedModel) return [];
-    const [, modelId] = splitModelKey(selectedModel);
-    const model = allModels.find((m) => m.id === modelId);
+    const [providerId, modelId] = splitModelKey(selectedModel);
+    const model = allModels.find((m) => m.providerId === providerId && m.id === modelId);
     return model?.variants ? Object.keys(model.variants) : [];
   }, [selectedModel, allModels]);
 
-  const [text, setText] = useState("");
-  const [attachments, setAttachments] = useState<ImageAttachment[]>([]);
+  const [draft, setDraft] = useState(EMPTY_COMPOSER_DRAFT);
+  const { text, attachments } = draft;
   const [isDragging, setIsDragging] = useState(false);
   const [isDraggingObject, setIsDraggingObject] = useState(false);
   const [lightboxIndex, setLightboxIndex] = useState<number | null>(null);
@@ -414,110 +391,71 @@ function ChatInput({
   const promptEditorRef = useRef<PromptEditorHandle>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const modelSearchRef = useRef<HTMLInputElement>(null);
-  const [effortOpen, setEffortOpen] = useState(false);
   const dragCounterRef = useRef(0);
   const rejectTimerRef = useRef<ReturnType<typeof setTimeout>>();
-  const previousSessionRef = useRef(activeSessionId);
-  const failedSendRef = useRef<{
-    sessionId: string | null;
-    text: string;
-    attachments: ImageAttachment[];
-  } | null>(null);
-  const sendMessage = useSendMessage({
-    onError: (error) => {
-      const failed = failedSendRef.current;
-      failedSendRef.current = null;
-      if (!failed || activeSessionIdRef.current !== failed.sessionId) return;
-      notify.error("Message not sent", { description: error.message });
-      if (failed.text) promptEditorRef.current?.insertText(failed.text);
-      setAttachments((current) => {
-        const currentIds = new Set(current.map((attachment) => attachment.id));
-        const restored = failed.attachments.filter((attachment) => !currentIds.has(attachment.id));
-        return [...restored, ...current];
-      });
+  const editorSessionRef = useRef<string | null>(null);
+  const sendMessage = useSendMessage();
+  const queryClient = useQueryClient();
+  const sendFilter = { mutationKey: sendMessageMutationKey(activeSessionId), exact: true };
+  const isSending = useIsMutating(sendFilter) > 0;
+
+  const draftRef = useRef(EMPTY_COMPOSER_DRAFT);
+  const restoringRef = useRef(false);
+  const replaceDraft = useCallback((next: ComposerDraft) => {
+    draftRef.current = next;
+    setDraft(next);
+    if (editorSessionRef.current) saveComposerDraft(editorSessionRef.current, next);
+  }, []);
+  const handleEditorChange = useCallback(
+    (nextText: string, state: SerializedEditorState) => {
+      if (restoringRef.current) return;
+      replaceDraft({ ...draftRef.current, text: nextText, editorState: state });
     },
-  });
-
-  // Setup and Settings replace the message box for a while, and what was typed should still be here.
-  // Plain text can't bring an object's chip back, so the editor's own state goes with a draft.
-  const editorStateRef = useRef<SerializedEditorState>();
-  const handleEditorChange = useCallback((nextText: string, state: SerializedEditorState) => {
-    setText(nextText);
-    editorStateRef.current = state;
-  }, []);
-  const restoreDraft = useCallback((draft: Draft) => {
-    let restored = false;
-    if (draft.editorState) {
-      // A kept state can still hold nodes Lexical won't read, and the words are worth keeping.
-      try {
-        promptEditorRef.current?.restore(draft.editorState);
-        restored = true;
-      } catch (error) {
-        console.error("[chat-input] couldn't restore a draft", error);
+    [replaceDraft],
+  );
+  const restoreDraft = useCallback((next: ComposerDraft) => {
+    // Restoring can synchronously emit a Lexical change while switching sessions.
+    restoringRef.current = true;
+    const editor = promptEditorRef.current;
+    try {
+      if (next.editorState) editor?.restore(next.editorState);
+      else {
+        editor?.clear();
+        if (next.text) editor?.insertText(next.text);
       }
+    } catch (error) {
+      console.error("[chat-input] couldn't restore a draft", error);
+      editor?.clear();
+      if (next.text) editor?.insertText(next.text);
+    } finally {
+      restoringRef.current = false;
     }
-    if (!restored && draft.text) promptEditorRef.current?.insertText(draft.text);
-    setAttachments(draft.attachments);
+    draftRef.current = next;
+    setDraft(next);
   }, []);
-  const draftRef = useRef({ text, attachments, sessionId: activeSessionId });
-  draftRef.current = { text, attachments, sessionId: activeSessionId };
-  // biome-ignore lint/correctness/useExhaustiveDependencies: restores once, and saves on the way out
+  useImperativeHandle(
+    attachImageRef,
+    () => (image) => {
+      const current = draftRef.current;
+      if (current.attachments.length >= MAX_COMPOSER_IMAGES) {
+        notify.error(`Maximum ${MAX_COMPOSER_IMAGES} images allowed`);
+        return false;
+      }
+      const attachment = { ...image, id: crypto.randomUUID() };
+      replaceDraft({ ...current, attachments: [...current.attachments, attachment] });
+      requestAnimationFrame(() => promptEditorRef.current?.focus());
+      return true;
+    },
+    [replaceDraft],
+  );
+  // biome-ignore lint/correctness/useExhaustiveDependencies: honor only the mount-time focus request
   useEffect(() => {
-    const draft = activeSessionId ? savedDrafts.get(activeSessionId) : undefined;
-    if (activeSessionId && draft) {
-      savedDrafts.delete(activeSessionId);
-      restoreDraft(draft);
-    }
     if (focusOnMount) requestAnimationFrame(() => promptEditorRef.current?.focus());
-    return () => {
-      const { text: lastText, attachments: lastAttachments, sessionId } = draftRef.current;
-      if (sessionId && (lastText || lastAttachments.length > 0)) {
-        savedDrafts.set(sessionId, {
-          text: lastText,
-          attachments: lastAttachments,
-          editorState: editorStateRef.current,
-        });
-      }
-    };
-  }, []);
-
-  // Before the page goes, so the message box's draft is saved with the others.
-  useEffect(() => {
-    const keepDraft = () => {
-      const { text: lastText, attachments: lastAttachments, sessionId } = draftRef.current;
-      if (sessionId && (lastText || lastAttachments.length > 0)) {
-        savedDrafts.set(sessionId, {
-          text: lastText,
-          attachments: lastAttachments,
-          editorState: editorStateRef.current,
-        });
-        keepDrafts();
-      }
-    };
-    window.addEventListener("beforeunload", keepDraft);
-    return () => window.removeEventListener("beforeunload", keepDraft);
   }, []);
 
   useEffect(() => {
-    if (previousSessionRef.current === activeSessionId) return;
-    const leaving = previousSessionRef.current;
-    const { text: leftText, attachments: leftAttachments } = draftRef.current;
-    if (leaving && (leftText || leftAttachments.length > 0)) {
-      savedDrafts.set(leaving, {
-        text: leftText,
-        attachments: leftAttachments,
-        editorState: editorStateRef.current,
-      });
-    }
-    previousSessionRef.current = activeSessionId;
-    setText("");
-    setAttachments([]);
-    promptEditorRef.current?.clear();
-    const draft = activeSessionId ? savedDrafts.get(activeSessionId) : undefined;
-    if (activeSessionId && draft) {
-      savedDrafts.delete(activeSessionId);
-      restoreDraft(draft);
-    }
+    editorSessionRef.current = activeSessionId;
+    restoreDraft(activeSessionId ? readComposerDraft(activeSessionId) : EMPTY_COMPOSER_DRAFT);
   }, [activeSessionId, restoreDraft]);
 
   useEffect(() => {
@@ -541,14 +479,16 @@ function ChatInput({
 
   const addImageFiles = useCallback(
     async (files: FileList | File[]) => {
+      const sessionId = editorSessionRef.current;
+      if (!sessionId) return;
       const toAdd: File[] = [];
       for (const file of Array.from(files)) {
-        if (!ACCEPTED_IMAGE_TYPES.includes(file.type)) {
+        if (!COMPOSER_IMAGE_TYPES.includes(file.type)) {
           notify.error("That file isn't an image. Try a PNG, JPEG, GIF, or WebP instead.");
           triggerRejectShake();
           continue;
         }
-        if (file.size > MAX_IMAGE_SIZE) {
+        if (file.size > MAX_COMPOSER_IMAGE_BYTES) {
           notify.error("That image is too large. Please use one under 20 MB.");
           triggerRejectShake();
           continue;
@@ -562,45 +502,45 @@ function ChatInput({
           return { dataUrl, mime: file.type, filename: file.name };
         }),
       );
-      const succeeded: { dataUrl: string; mime: string; filename: string }[] = [];
+      const succeeded: DraftAttachment[] = [];
       for (const r of results) {
         if (r.status === "fulfilled") {
-          succeeded.push(r.value);
+          succeeded.push({ ...r.value, id: crypto.randomUUID() });
         } else {
           notify.error("Failed to read an image file");
           triggerRejectShake();
         }
       }
       if (succeeded.length === 0) return;
-      setAttachments((prev) => {
-        const remaining = MAX_ATTACHMENTS - prev.length;
-        if (remaining <= 0) {
-          notify.error(`Maximum ${MAX_ATTACHMENTS} images allowed`);
-          triggerRejectShake();
-          return prev;
-        }
-        const allowed = succeeded.slice(0, remaining);
-        if (succeeded.length > remaining) {
-          notify.error(`Only ${remaining} more image(s) allowed`);
-          triggerRejectShake();
-        }
-        return [
-          ...prev,
-          ...allowed.map((s) => ({
-            id: `img-${++attachmentCounter}`,
-            dataUrl: s.dataUrl,
-            mime: s.mime,
-            filename: s.filename,
-          })),
-        ];
-      });
+      const stillOpen = editorSessionRef.current === sessionId && promptEditorRef.current;
+      const current = stillOpen ? draftRef.current : readComposerDraft(sessionId);
+      const remaining = MAX_COMPOSER_IMAGES - current.attachments.length;
+      if (remaining <= 0) {
+        notify.error(`Maximum ${MAX_COMPOSER_IMAGES} images allowed`);
+        triggerRejectShake();
+        return;
+      }
+      if (succeeded.length > remaining) {
+        notify.error(`Only ${remaining} more image(s) allowed`);
+        triggerRejectShake();
+      }
+      const next = {
+        ...current,
+        attachments: [...current.attachments, ...succeeded.slice(0, remaining)],
+      };
+      if (stillOpen) replaceDraft(next);
+      else saveComposerDraft(sessionId, next);
     },
-    [triggerRejectShake],
+    [replaceDraft, triggerRejectShake],
   );
 
-  const removeAttachment = useCallback((id: string) => {
-    setAttachments((prev) => prev.filter((a) => a.id !== id));
-  }, []);
+  const removeAttachment = useCallback(
+    (id: string) => {
+      const current = draftRef.current;
+      replaceDraft({ ...current, attachments: current.attachments.filter((a) => a.id !== id) });
+    },
+    [replaceDraft],
+  );
   const lightboxUrls = useMemo(() => attachments.map((a) => a.dataUrl), [attachments]);
   const closeLightbox = useCallback(() => setLightboxIndex(null), []);
   const lightboxPrev = useCallback(() => {
@@ -646,7 +586,11 @@ function ChatInput({
       // The panel can be ahead of this list while a big place loads, and the path is what counts.
       if (path)
         referenceObject(
-          objectIndex.get(path) ?? { name: e.dataTransfer.getData(OBJECT_DRAG_NAME_TYPE), path },
+          objectIndex.get(path) ?? {
+            name: e.dataTransfer.getData(OBJECT_DRAG_NAME_TYPE),
+            path,
+            className: e.dataTransfer.getData(OBJECT_DRAG_CLASS_TYPE),
+          },
         );
       else if (e.dataTransfer.files.length > 0) addImageFiles(e.dataTransfer.files);
     },
@@ -658,19 +602,20 @@ function ChatInput({
       "opencode",
       "anthropic",
       "github-copilot",
-      "openai",
+      OPENAI_OAUTH_PROVIDER,
+      OPENAI_API_PROVIDER,
       "google",
       "openrouter",
       "vercel",
     ];
     const query = modelSearch.toLowerCase().trim();
     const groups: Record<string, { providerName: string; models: ModelInfo[] }> = {};
-    for (const model of allModels) {
-      if (!connectedProviders.includes(model.providerId)) continue;
-      const modelKey = `${model.providerId}/${model.id}`;
-      if (hiddenModels.has(modelKey)) continue;
+    for (const model of eligibleModels) {
+      const pair = fastPairs.get(`${model.providerId}/${model.id}`);
+      if (pair?.fast === model) continue;
       if (query) {
-        const haystack = `${model.name} ${model.id} ${model.providerName}`.toLowerCase();
+        const haystack =
+          `${model.name} ${model.id} ${model.providerName} ${model.billingLabel ?? ""} ${pair?.fast.name ?? ""} ${pair?.fast.id ?? ""}`.toLowerCase();
         if (!haystack.includes(query)) continue;
       }
       if (!groups[model.providerId])
@@ -678,7 +623,7 @@ function ChatInput({
       groups[model.providerId].models.push(model);
     }
     for (const group of Object.values(groups))
-      group.models.sort((a, b) => a.name.localeCompare(b.name));
+      group.models.sort((a, b) => compareCatalogModels(a, b, modelCatalogOrder));
     // Sort provider groups: popular first, then alphabetical
     const entries = Object.entries(groups);
     entries.sort(([aId], [bId]) => {
@@ -690,9 +635,15 @@ function ChatInput({
       return groups[aId].providerName.localeCompare(groups[bId].providerName);
     });
     return entries;
-  }, [allModels, connectedProviders, hiddenModels, modelSearch]);
+  }, [eligibleModels, fastPairs, modelCatalogOrder, modelSearch]);
 
-  function handleSubmit() {
+  const paidModelRequired = hideFreeModels && !selectedModel;
+  const paidModelMessage = "Connect a paid provider or turn off Hide free models.";
+  const modelSendBlock = modelSelectionMessage ?? (paidModelRequired ? paidModelMessage : null);
+
+  function handleSubmit(delivery?: ComposerDelivery) {
+    if (!activeSessionId || activeSessionIdRef.current !== activeSessionId) return;
+    if (editorSessionRef.current !== activeSessionId) return;
     const editorText = promptEditorRef.current?.getText() ?? text;
     const trimmed = editorText.trim();
     if (!trimmed && attachments.length === 0) return;
@@ -701,8 +652,19 @@ function ChatInput({
       else notify.error(sendBlock);
       return;
     }
-    const submittedText = editorText;
-    const submittedAttachments = attachments;
+    const submittedDraft = { ...draftRef.current, text: editorText };
+    function restoreFailedDraft(sessionId: string) {
+      const stillOpen =
+        activeSessionIdRef.current === sessionId && editorSessionRef.current === sessionId
+          ? promptEditorRef.current
+          : null;
+      const current = stillOpen
+        ? { ...draftRef.current, text: stillOpen.getText() }
+        : readComposerDraft(sessionId);
+      const restored = mergeDrafts(submittedDraft, current);
+      saveComposerDraft(sessionId, restored);
+      if (stillOpen) restoreDraft(restored);
+    }
     const images =
       attachments.length > 0
         ? attachments.map((a) => ({ mime: a.mime, url: a.dataUrl, filename: a.filename }))
@@ -712,37 +674,54 @@ function ChatInput({
       system: studioTargetReference,
       onFailed: (error) => {
         notify.error("Command failed", { description: error.message });
-        if (activeSessionIdRef.current !== activeSessionId) return;
-        promptEditorRef.current?.insertText(submittedText);
-        setAttachments(submittedAttachments);
+        restoreFailedDraft(activeSessionId);
       },
     });
     if (ranCommand) {
-      setText("");
-      setAttachments([]);
+      replaceDraft(EMPTY_COMPOSER_DRAFT);
       promptEditorRef.current?.clear();
       return;
     }
-    if (isBusy) return;
-    // Only a message that goes to the agent uses a Studio. Commands like /model and /new run here,
-    // and a message typed while the chat is busy isn't sent.
-    if (needsStudio(trimmed)) studioTarget?.noteRouted?.();
-    failedSendRef.current = {
-      sessionId: activeSessionId,
-      text: submittedText,
-      attachments: submittedAttachments,
-    };
-    setText("");
-    setAttachments([]);
+    // A second request must wait for the first one's model, routing and prompt to reach OpenCode.
+    if ((isBusy && !delivery) || queryClient.isMutating(sendFilter) > 0) return;
+    if (!delivery && modelSendBlock) {
+      notify.error(modelSendBlock);
+      return;
+    }
+    if (!delivery && needsStudio(trimmed)) studioTarget?.noteRouted?.();
+    replaceDraft(EMPTY_COMPOSER_DRAFT);
     promptEditorRef.current?.clear();
     void sendMessage
-      .mutateAsync({ text: trimmed || " ", images, studioTargetReference })
-      .catch(() => undefined);
+      .mutateAsync({
+        text: trimmed || " ",
+        images,
+        studioTargetReference,
+        studioTargetID: studioTarget ? studioId : undefined,
+        delivery,
+      })
+      .catch((error: Error) => {
+        if (activeSessionIdRef.current === activeSessionId) {
+          notify.error("Message not sent", { description: error.message });
+        }
+        restoreFailedDraft(activeSessionId);
+      });
+  }
+
+  function handleEnter(event: KeyboardEvent) {
+    const delivery = isBusy ? getComposerDelivery(event, composerShortcuts) : undefined;
+    const normalEnter = !event.shiftKey && !event.ctrlKey && !event.metaKey && !event.altKey;
+    if (isBusy ? !delivery && !normalEnter : event.shiftKey) return false;
+    if (isBusy && !delivery) {
+      const command = parseSlashCommand((promptEditorRef.current?.getText() ?? text).trim());
+      if (!command || !commands.some(({ name }) => name === command.name)) return false;
+    }
+    if (!event.repeat) handleSubmit(delivery);
+    return true;
   }
 
   function handleModelClick(model: ModelInfo) {
     const fullId = `${model.providerId}/${model.id}`;
-    setSelectedModel(fullId);
+    if (!fastEnabled || fullId !== displayModelKey) setSelectedModel(fullId);
     setShowModelPicker(false);
     setModelSearch("");
   }
@@ -750,11 +729,11 @@ function ChatInput({
   const [selectedProviderId, selectedModelId] = selectedModel
     ? splitModelKey(selectedModel)
     : [undefined, undefined];
-  const modelDisplay = selectedModelId
-    ? (allModels.find(
-        (model) => model.providerId === selectedProviderId && model.id === selectedModelId,
-      )?.name ?? selectedModelId)
-    : "Select model";
+  const selected = allModels.find(
+    (model) => model.providerId === selectedProviderId && model.id === selectedModelId,
+  );
+  const modelDisplay =
+    fastPair?.standard.name ?? selected?.name ?? selectedModelId ?? "Select model";
 
   function renderProviderGroup(
     providerId: string,
@@ -769,13 +748,16 @@ function ChatInput({
           return (
             <MenuItem
               key={fullId}
-              checked={selectedModel === fullId}
+              checked={displayModelKey === fullId}
               disabled={refused}
               description={refused ? "Not offered in your region" : undefined}
               className={refused ? "opacity-60" : undefined}
               onClick={() => handleModelClick(model)}
             >
               <span className="truncate">{model.name}</span>
+              {model.billingLabel?.endsWith("Ultrafast") && (
+                <span className="shrink-0 text-xs text-muted-foreground">Ultrafast</span>
+              )}
               <ModelStatusBadge status={model.status} />
             </MenuItem>
           );
@@ -808,6 +790,7 @@ function ChatInput({
             {showTodos ? <TodoPill todos={todos} /> : null}
           </div>
         ) : null}
+        <QueuedMessages sessionID={activeSessionId} />
         <input
           ref={fileInputRef}
           type="file"
@@ -826,7 +809,7 @@ function ChatInput({
           onDragLeave={onDragLeave}
           onDrop={onDrop}
           data-composer=""
-          className={`relative rounded-xl border bg-card transition-colors focus-within:border-foreground/20 ${isDragging ? "ring-2 ring-blue-400 border-blue-300 bg-blue-50/30" : ""}`}
+          className={`relative rounded-xl border bg-card transition-colors focus-within:border-foreground/20 ${isDragging ? "border-brand/60 bg-brand/5 ring-2 ring-brand" : ""}`}
         >
           {attachments.length > 0 && (
             <div className="flex gap-2 overflow-x-auto px-3 pt-2 pb-1">
@@ -889,13 +872,19 @@ function ChatInput({
               }
               onObjectsWanted={requestSync}
               noStudio={!studioId}
+              predictionScope={
+                predictionsEnabled && !isBusy && !isSending && attachments.length === 0
+                  ? activeSessionId
+                  : null
+              }
               onChange={handleEditorChange}
               onSubmit={handleSubmit}
+              onEnter={handleEnter}
               onPaste={(e) => {
                 const items = e.clipboardData.items;
                 const imageFiles: File[] = [];
                 for (const item of Array.from(items)) {
-                  if (item.kind === "file" && ACCEPTED_IMAGE_TYPES.includes(item.type)) {
+                  if (item.kind === "file" && COMPOSER_IMAGE_TYPES.includes(item.type)) {
                     const file = item.getAsFile();
                     if (file) imageFiles.push(file);
                   }
@@ -935,6 +924,11 @@ function ChatInput({
                 <PopoverTrigger asChild>
                   <button type="button" className={MENU_TRIGGER}>
                     <span className="truncate">{modelDisplay}</span>
+                    {selected?.billingLabel && (
+                      <span className="shrink-0 text-[10px] text-muted-foreground">
+                        {selected.billingLabel}
+                      </span>
+                    )}
                     <MenuChevron />
                   </button>
                 </PopoverTrigger>
@@ -949,11 +943,37 @@ function ChatInput({
                     onChange={setModelSearch}
                     placeholder="Search models..."
                   />
+                  <label className="flex shrink-0 items-center justify-between gap-2 border-b px-3 py-2 text-xs">
+                    Hide free models
+                    <input
+                      type="checkbox"
+                      checked={hideFreeModels}
+                      disabled={savingModelSettings}
+                      onChange={(event) => setHideFreeModels(event.target.checked)}
+                    />
+                  </label>
+                  <label className="flex shrink-0 items-center justify-between gap-2 border-b px-3 py-2 text-xs">
+                    Model order
+                    <select
+                      value={modelCatalogOrder}
+                      onChange={(event) =>
+                        setModelCatalogOrder(event.target.value === "newest" ? "newest" : "name")
+                      }
+                      className="rounded-md border bg-background px-2 py-1"
+                    >
+                      <option value="name">Name (A–Z)</option>
+                      <option value="newest">Newest first</option>
+                    </select>
+                  </label>
                   <div className="min-h-0 flex-1 overflow-y-auto p-1">
                     {modelsByProvider.map(([id, group]) => renderProviderGroup(id, group))}
                     {modelsByProvider.length === 0 && (
                       <MenuLabel className="text-center">
-                        {modelSearch ? `No models matching "${modelSearch}"` : "No models yet"}
+                        {modelSearch
+                          ? `No models matching "${modelSearch}"`
+                          : hideFreeModels
+                            ? "No paid models connected"
+                            : "No models yet"}
                       </MenuLabel>
                     )}
                   </div>
@@ -979,41 +999,63 @@ function ChatInput({
                 </PopoverContent>
               </Popover>
 
-              {availableVariants.length > 0 && (
-                <Popover open={effortOpen} onOpenChange={setEffortOpen}>
-                  <PopoverTrigger asChild>
-                    <button type="button" className={MENU_TRIGGER}>
-                      {effortLabel(selectedVariant)} effort
-                      <MenuChevron />
-                    </button>
-                  </PopoverTrigger>
-                  <MenuContent side="top" align="start" className="w-56">
-                    <MenuLabel>
-                      How long the model thinks before it answers. More is slower.
-                    </MenuLabel>
-                    {[null, ...availableVariants].map((variant) => (
-                      <MenuItem
-                        key={variant ?? "auto"}
-                        checked={selectedVariant === variant}
-                        onClick={() => {
-                          setSelectedVariant(variant);
-                          setEffortOpen(false);
-                        }}
-                      >
-                        {effortLabel(variant)}
-                      </MenuItem>
-                    ))}
-                  </MenuContent>
-                </Popover>
-              )}
+              <EffortPicker
+                variants={availableVariants}
+                value={selectedVariant}
+                control={effortControl}
+                onChange={setSelectedVariant}
+                fast={
+                  fastPair && {
+                    enabled: Boolean(fastEnabled),
+                    onToggle: () => {
+                      const next = fastEnabled ? fastPair.standard : fastPair.fast;
+                      const variant =
+                        selectedVariant &&
+                        Object.keys(next.variants ?? {}).includes(selectedVariant)
+                          ? selectedVariant
+                          : null;
+                      setSelectedModel(`${next.providerId}/${next.id}`, variant);
+                    },
+                  }
+                }
+              />
+              {contextControl}
             </div>
-            <SendButton
-              text={text}
-              hasAttachments={attachments.length > 0}
-              isBusy={isBusy}
-              blockedReason={sendBlock && needsStudio(text.trim()) ? sendBlock : null}
-              onSend={handleSubmit}
-            />
+            <div className="flex shrink-0 items-center gap-1">
+              {isBusy &&
+                (["steer", "queue"] as const).map((delivery) => {
+                  const label = delivery === "steer" ? "Steer" : "Queue";
+                  const action =
+                    delivery === "steer"
+                      ? "Steer at the next step"
+                      : "Queue after the current turn";
+                  const shortcut = composerShortcuts[delivery];
+                  return (
+                    <button
+                      key={delivery}
+                      type="button"
+                      title={
+                        shortcut === "disabled"
+                          ? action
+                          : `${action} (${composerShortcutLabel(shortcut)})`
+                      }
+                      className="h-7 rounded-md px-2 text-xs text-foreground transition-colors hover:bg-accent disabled:opacity-40"
+                      disabled={(!text.trim() && attachments.length === 0) || isSending}
+                      onClick={() => handleSubmit(delivery)}
+                    >
+                      {label}
+                    </button>
+                  );
+                })}
+              <SendButton
+                text={text}
+                hasAttachments={attachments.length > 0}
+                isBusy={isBusy}
+                isSending={isSending}
+                blockedReason={modelSendBlock ?? (needsStudio(text.trim()) ? sendBlock : null)}
+                onSend={() => handleSubmit()}
+              />
+            </div>
           </div>
         </div>
       </div>

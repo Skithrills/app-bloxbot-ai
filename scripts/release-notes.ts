@@ -1,7 +1,8 @@
 import { readFile } from "node:fs/promises";
 import { pathToFileURL } from "node:url";
 
-const REPOSITORY_URL = "https://github.com/paralov/app-bloxbot-ai";
+export const releaseRepository = "Skithrills/app-bloxbot-ai";
+const REPOSITORY_URL = `https://github.com/${releaseRepository}`;
 
 export function releaseAssetNames(version: string): string[] {
   return [
@@ -9,6 +10,7 @@ export function releaseAssetNames(version: string): string[] {
     `BloxBot-${version}-arm64-mac.zip`,
     `BloxBot-Setup-${version}.exe`,
     `BloxBot-${version}-linux-amd64.deb`,
+    `BloxBot-Setup-${version}.exe.blockmap`,
     "latest-mac.yml",
     "latest.yml",
     "latest-linux.yml",

@@ -226,8 +226,109 @@ describe("StudioTargetProvider", () => {
       // Now it's tied, so another place doesn't take over when this one closes.
       mocks.discover.mockResolvedValue({ targets: [lobby], selectedKey: null });
       await act(() => vi.advanceTimersByTimeAsync(10_000));
+      // One list without it could be a blip, so it's only called closed once it stays gone.
+      expect(screen.getByText("selected: s1")).toBeInTheDocument();
+      await act(() => vi.advanceTimersByTimeAsync(8_000));
       expect(screen.getByText("selected: none")).toBeInTheDocument();
       expect(screen.getByText("missing: Dungeon")).toBeInTheDocument();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("keeps the chat's Studio through a moment out of the list, and lets go once it stays gone", async () => {
+    vi.useFakeTimers();
+    try {
+      const dungeon = { key: "s1", label: "Dungeon", detail: null, placeId: "1" };
+      mocks.loadConfig.mockResolvedValue({ studioTargetsBySession: { chat: dungeon } });
+      mocks.discover.mockResolvedValue({ targets: [dungeon], selectedKey: null });
+      mocks.select.mockResolvedValue({ selected: dungeon, verified: true });
+      let context: ReturnType<typeof useStudioTargetOptional> = null;
+      function Spy() {
+        context = useStudioTargetOptional();
+        return null;
+      }
+      render(
+        <StudioTargetProvider>
+          <Seen keys={[]} />
+          <Spy />
+        </StudioTargetProvider>,
+      );
+      await act(() => vi.advanceTimersByTimeAsync(0));
+      expect(screen.getByText("selected: s1")).toBeInTheDocument();
+
+      // The helper restarting lists nothing for a moment.
+      mocks.discover.mockResolvedValue({ targets: [], selectedKey: null });
+      await act(() => vi.advanceTimersByTimeAsync(10_000));
+      expect(screen.getByText("selected: s1")).toBeInTheDocument();
+      expect(screen.getByText("status: ready")).toBeInTheDocument();
+      expect(screen.getByText("missing: none")).toBeInTheDocument();
+      expect(context?.reconnecting).toBe(true);
+
+      // A check that fails meanwhile mustn't read that empty list as Studio being gone.
+      mocks.discover.mockRejectedValueOnce(new Error("helper restarting"));
+      await act(() => vi.advanceTimersByTimeAsync(2_000));
+      expect(screen.getByText("selected: s1")).toBeInTheDocument();
+      expect(screen.getByText("status: ready")).toBeInTheDocument();
+
+      mocks.discover.mockResolvedValue({ targets: [dungeon], selectedKey: null });
+      await act(() => vi.advanceTimersByTimeAsync(2_000));
+      expect(screen.getByText("selected: s1")).toBeInTheDocument();
+      expect(context?.reconnecting).toBe(false);
+
+      // Gone for good this time.
+      mocks.discover.mockResolvedValue({ targets: [], selectedKey: null });
+      await act(() => vi.advanceTimersByTimeAsync(10_000));
+      expect(screen.getByText("selected: s1")).toBeInTheDocument();
+      await act(() => vi.advanceTimersByTimeAsync(8_000));
+      expect(screen.getByText("selected: none")).toBeInTheDocument();
+      expect(screen.getByText("missing: Dungeon")).toBeInTheDocument();
+      expect(context?.reconnecting).toBe(false);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("doesn't warn about one check that didn't get through while a Studio is in use", async () => {
+    vi.useFakeTimers();
+    try {
+      const dungeon = { key: "s1", label: "Dungeon", detail: null, placeId: "1" };
+      mocks.loadConfig.mockResolvedValue({ studioTargetsBySession: { chat: dungeon } });
+      mocks.discover.mockResolvedValue({ targets: [dungeon], selectedKey: null });
+      mocks.select.mockResolvedValue({ selected: dungeon, verified: true });
+      let context: ReturnType<typeof useStudioTargetOptional> = null;
+      function Spy() {
+        context = useStudioTargetOptional();
+        return null;
+      }
+      render(
+        <StudioTargetProvider>
+          <Seen keys={[]} />
+          <Spy />
+        </StudioTargetProvider>,
+      );
+      await act(() => vi.advanceTimersByTimeAsync(0));
+
+      mocks.discover.mockRejectedValueOnce(new Error("timed out"));
+      await act(() => vi.advanceTimersByTimeAsync(10_000));
+      expect(context?.discoveryFailed).toBe(true);
+      expect(context?.error).toBeNull();
+      expect(screen.getByText("selected: s1")).toBeInTheDocument();
+
+      // The next check, sooner than usual, gets through.
+      await act(() => vi.advanceTimersByTimeAsync(2_000));
+      expect(context?.discoveryFailed).toBe(false);
+      expect(context?.error).toBeNull();
+      expect(
+        mocks.capture.mock.calls.filter(([name]) => name === "studio_target_discovery_failed"),
+      ).toHaveLength(0);
+
+      // A streak is worth saying.
+      mocks.discover.mockRejectedValue(new Error("timed out"));
+      await act(() => vi.advanceTimersByTimeAsync(10_000));
+      await act(() => vi.advanceTimersByTimeAsync(4_000));
+      expect(context?.error).toBe("Couldn't reach Roblox Studio. Refresh to try again.");
+      expect(screen.getByText("selected: s1")).toBeInTheDocument();
     } finally {
       vi.useRealTimers();
     }
@@ -695,6 +796,8 @@ describe("StudioTargetProvider", () => {
 
       mocks.discover.mockResolvedValue({ targets: [], selectedKey: null });
       await act(() => vi.advanceTimersByTimeAsync(10_000));
+      // It has to stay gone past the grace period, so a blip doesn't count as closing.
+      await act(() => vi.advanceTimersByTimeAsync(8_000));
 
       expect(screen.getByText("selected: none")).toBeInTheDocument();
       expect(screen.getByText("missing: Dungeon")).toBeInTheDocument();

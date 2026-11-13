@@ -1,8 +1,9 @@
 import { useEffect, useRef, useState } from "react";
 
+import { BloxBotMascot } from "@/components/BloxBotMascot";
 import { desktop } from "@/lib/desktop";
 import { scrubErrorMessage } from "@/lib/errorReporting";
-import type { UpdateInfo } from "@/types/desktop";
+import type { UpdateInfo } from "@/types/appUpdate";
 
 // Windows limits how long a link can be, and encoding can triple this.
 const REPORT_DETAIL_MAX_CHARS = 600;
@@ -49,15 +50,16 @@ type UpdateCheckStatus =
   | "available"
   | "downloading"
   | "up-to-date"
+  | "no-releases"
+  | "unsupported"
   | "error"
   | "install-error";
 
 /**
- * Full-screen loading state featuring the animated BloxBot face.
+ * Full-screen loading state featuring the animated BloxBot mascot.
  * Used during server startup and SDK initialization.
  *
- * When `error` is true, shows a sad face with a "Check for Updates"
- * button and a link to the BloxBot website for support.
+ * When `error` is true, shows a static mascot with update and support actions.
  */
 function LoadingScreen({
   message = "Starting up...",
@@ -83,7 +85,6 @@ function LoadingScreen({
   const downloadedBucket = quarter > 0 && quarter < 100 ? quarter : null;
   const updateRef = useRef<UpdateInfo | null>(null);
   const retryRef = useRef<HTMLButtonElement>(null);
-  // biome-ignore lint/correctness/useExhaustiveDependencies: moves focus once, when the error appears
   useEffect(() => {
     if (error) retryRef.current?.focus();
   }, [error]);
@@ -99,16 +100,16 @@ function LoadingScreen({
   async function checkForUpdates(automatic: boolean) {
     showUpdateStatus("checking");
     try {
-      const update = await desktop.checkForUpdate();
-      if (!update) {
-        showUpdateStatus("up-to-date");
+      const result = await desktop.checkForUpdate();
+      if (result.status !== "available") {
+        updateRef.current = null;
+        showUpdateStatus(result.status);
         return;
       }
-      updateRef.current = update;
-      setUpdateVersion(update.version);
+      updateRef.current = result.update;
+      setUpdateVersion(result.update.version);
       showUpdateStatus("available");
-    } catch (err) {
-      console.error("[loading] Failed to check for updates:", err);
+    } catch {
       // Nobody asked for the automatic one, so its failure isn't worth a retry of its own.
       showUpdateStatus(automatic ? "idle" : "error");
     }
@@ -123,12 +124,11 @@ function LoadingScreen({
 
   async function handleInstall() {
     const update = updateRef.current;
-    if (!update) return;
+    if (!update || updateStatus === "downloading") return;
     try {
       showUpdateStatus("downloading");
       await desktop.installUpdate();
-    } catch (err) {
-      console.error("[loading] Failed to install update:", err);
+    } catch {
       showUpdateStatus("install-error");
     }
   }
@@ -146,66 +146,7 @@ function LoadingScreen({
   return (
     <div className="flex h-full w-full overflow-y-auto px-6 py-10">
       <div className="animate-fade-in m-auto flex w-full max-w-sm flex-col items-center">
-        {/* BloxBot face  - inline SVG so we can animate individual parts */}
-        <svg
-          width="80"
-          height="80"
-          viewBox="0 0 512 512"
-          fill="none"
-          xmlns="http://www.w3.org/2000/svg"
-          className={error ? "" : "bloxbot-face"}
-          aria-hidden="true"
-        >
-          {/* Body */}
-          <rect
-            x="32"
-            y="32"
-            width="448"
-            height="448"
-            rx="112"
-            fill="currentColor"
-            className="text-foreground"
-          />
-
-          {/* Left eye */}
-          <rect
-            className={error ? "" : "bloxbot-eye"}
-            x="144"
-            y="176"
-            width="72"
-            height="72"
-            rx="24"
-            fill="var(--background)"
-          />
-
-          {/* Right eye */}
-          <rect
-            className={error ? "" : "bloxbot-eye"}
-            x="296"
-            y="176"
-            width="72"
-            height="72"
-            rx="24"
-            fill="var(--background)"
-          />
-
-          {/* Smile (happy) or frown (error) */}
-          {error ? (
-            <path
-              d="M176 368C176 368 208 332 256 332C304 332 336 368 336 368"
-              stroke="var(--background)"
-              strokeWidth="32"
-              strokeLinecap="round"
-            />
-          ) : (
-            <path
-              d="M168 328C168 328 204.8 376 256 376C307.2 376 344 328 344 328"
-              stroke="var(--background)"
-              strokeWidth="32"
-              strokeLinecap="round"
-            />
-          )}
-        </svg>
+        <BloxBotMascot size={80} animated={!error} />
 
         {/* Status text */}
         <div
@@ -271,15 +212,17 @@ function LoadingScreen({
                 ? `Update available: v${updateVersion}`
                 : updateStatus === "up-to-date"
                   ? "Up to date"
-                  : updateStatus === "downloading"
-                    ? "Installing the update"
-                    : updateStatus === "install-error"
-                      ? "Couldn't install the update"
-                      : updateStatus === "error"
-                        ? "Couldn't check for updates"
-                        : downloadedBucket
-                          ? `Downloaded ${downloadedBucket}%`
-                          : null}
+                  : updateStatus === "no-releases"
+                    ? "No stable BloxBot releases have been published yet"
+                    : updateStatus === "downloading"
+                      ? "Installing the update"
+                      : updateStatus === "install-error"
+                        ? "Couldn't install the update"
+                        : updateStatus === "error"
+                          ? "Couldn't check for updates"
+                          : downloadedBucket
+                            ? `Downloaded ${downloadedBucket}%`
+                            : null}
         </output>
 
         {/* Error state: help actions */}
@@ -383,6 +326,8 @@ function LoadingScreen({
               {updateStatus === "up-to-date" && (
                 <span className="text-emerald-700 dark:text-emerald-400">Up to date</span>
               )}
+
+              {updateStatus === "no-releases" && <span>No stable releases yet</span>}
 
               {updateStatus === "install-error" && (
                 <button

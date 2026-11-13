@@ -27,12 +27,14 @@ import { usePreferences } from "@/providers/PreferencesProvider";
 export function useGeneratePlaytestPlan() {
   const { client } = useOpenCodeClient();
   const { activeSessionId } = useActiveSession();
-  const { selectedModel, selectedVariant } = usePreferences();
+  const { selectedModel, selectedVariant, hideFreeModels, modelSelectionMessage } =
+    usePreferences();
   const queryClient = useQueryClient();
 
   return useMutation({
     mutationFn: async (): Promise<GeneratedPlaytestPlan> => {
       if (!client || !activeSessionId) throw new Error("Open a chat before creating a playtest.");
+      if (modelSelectionMessage) throw new Error(modelSelectionMessage);
       const cache = queryClient.getQueryData<MessagesCache>(qk.messages(activeSessionId));
       const messages = (cache?.messageIds ?? []).flatMap((id) => {
         const message = cache?.messagesById[id];
@@ -64,6 +66,7 @@ export function useGeneratePlaytestPlan() {
               {
                 sessionID: planningSessionId,
                 model,
+                ...(hideFreeModels && { requirePaidModel: true }),
                 variant: selectedVariant ?? undefined,
                 format: { type: "json_schema", schema: PLAYTEST_PLAN_SCHEMA, retryCount: 2 },
                 system:

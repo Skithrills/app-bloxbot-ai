@@ -1,6 +1,8 @@
 import { useQueryClient } from "@tanstack/react-query";
 import { createContext, type ReactNode, useCallback, useContext, useMemo, useState } from "react";
+import type { Session } from "@/lib/opencode/types";
 import { qk } from "@/lib/queryKeys";
+import { subagentsForSession } from "@/lib/sessionVisibility";
 
 interface ActiveSessionContextValue {
   activeSessionId: string | null;
@@ -39,15 +41,17 @@ export function ActiveSessionProvider({
 
       // Mark every session-owned snapshot stale. The newly mounted observers fetch
       // them once, while switching remains immediate and cannot race an older click.
+      const children = subagentsForSession(
+        queryClient.getQueryData<Session[]>(qk.sessions) ?? [],
+        sessionID,
+      );
+      const threadIds = [sessionID, ...children.map((session) => session.id)];
       await Promise.all(
-        [
-          qk.messages(sessionID),
-          qk.todos(sessionID),
-          qk.questions(sessionID),
-          qk.permissions(sessionID),
-        ].map((queryKey) =>
-          queryClient.invalidateQueries({ queryKey, exact: true, refetchType: "none" }),
-        ),
+        threadIds
+          .flatMap((id) => [qk.messages(id), qk.todos(id), qk.questions(id), qk.permissions(id)])
+          .map((queryKey) =>
+            queryClient.invalidateQueries({ queryKey, exact: true, refetchType: "none" }),
+          ),
       );
     },
     [queryClient, activeSessionIdRef],

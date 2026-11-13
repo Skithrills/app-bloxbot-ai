@@ -8,6 +8,8 @@ const host = process.env.VITE_DEV_HOST;
 
 // https://vitejs.dev/config/
 export default defineConfig({
+  // Packaged Electron loads the renderer from file://.
+  base: "./",
   plugins: [
     react(),
     tailwindcss(),

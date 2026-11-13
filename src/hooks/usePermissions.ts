@@ -7,8 +7,9 @@ import { useOpenCodeClient } from "@/providers/OpenCodeClientProvider";
 
 const NOOP_KEY = ["__noop-permission__"] as const;
 
-export function useActivePermission(): PermissionRequest | null {
-  const { activeSessionId } = useActiveSession();
+export function useActivePermission(targetSessionId?: string | null): PermissionRequest | null {
+  const { activeSessionId: rootSessionId } = useActiveSession();
+  const activeSessionId = targetSessionId === undefined ? rootSessionId : targetSessionId;
   const { client, ready } = useOpenCodeClient();
   const queryClient = useQueryClient();
   const { data } = useQuery<PermissionRequest | null>({
@@ -18,7 +19,10 @@ export function useActivePermission(): PermissionRequest | null {
       const queryKey = qk.permissions(activeSessionId);
       const beforeRevision =
         queryClient.getQueryState<PermissionRequest | null>(queryKey)?.dataUpdateCount ?? 0;
-      const response = await client.permission.list({}, { throwOnError: true });
+      const response = await client.permission.list(
+        { sessionID: activeSessionId },
+        { throwOnError: true },
+      );
       const afterState = queryClient.getQueryState<PermissionRequest | null>(queryKey);
       if ((afterState?.dataUpdateCount ?? 0) !== beforeRevision) return afterState?.data ?? null;
       return response.data?.find((permission) => permission.sessionID === activeSessionId) ?? null;

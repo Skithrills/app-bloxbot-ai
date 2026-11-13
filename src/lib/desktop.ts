@@ -1,4 +1,4 @@
-import { Data, Effect, Schema } from "effect";
+import { Data, Effect, Either, Schema } from "effect";
 import {
   type ExplorerDetailsRequest,
   type ExplorerEdit,
@@ -10,6 +10,7 @@ import {
   type ExplorerSyncResult,
   ExplorerSyncResultSchema,
 } from "@/lib/explorer";
+import { type AppUpdateCheck, AppUpdateCheckSchema } from "@/types/appUpdate";
 import {
   type AppConfig,
   AppConfigPatchSchema,
@@ -20,6 +21,7 @@ import {
   type InstructionFile,
   InstructionFileSchema,
   type ModelFileInfo,
+  type ModelSettingsPatch,
   type ModelUploadResult,
   type OpenCodeInfo,
   OpenCodeInfoSchema,
@@ -27,8 +29,7 @@ import {
   type StudioMcpStatus,
   StudioMcpStatusSchema,
   type SystemNotification,
-  type UpdateInfo,
-  UpdateInfoSchema,
+  type ToolImageExport,
   type UploadAccess,
 } from "@/types/desktop";
 import {
@@ -37,6 +38,11 @@ import {
   type StudioTargetSelection,
   StudioTargetSelectionSchema,
 } from "@/types/studioTarget";
+import {
+  type SubscriptionProvider,
+  type SubscriptionUsageResult,
+  SubscriptionUsageSchema,
+} from "@/types/subscriptionUsage";
 
 const CONFIG_KEY = "bloxbot-config";
 const DEFAULT_CONFIG: AppConfig = DEFAULT_APP_CONFIG;
@@ -61,6 +67,10 @@ interface DesktopEffects {
   ) => Effect.Effect<ExplorerSyncResult, DesktopError>;
   readonly getOpenCodeInfo: Effect.Effect<OpenCodeInfo, DesktopError>;
   readonly getOpenCodeInstallFolder: Effect.Effect<string | null, DesktopError>;
+  readonly chooseProjectFolder: Effect.Effect<string | null, DesktopError>;
+  readonly getSubscriptionUsage: (
+    provider: SubscriptionProvider,
+  ) => Effect.Effect<SubscriptionUsageResult, DesktopError>;
   readonly getStudioMcpStatus: Effect.Effect<StudioMcpStatus, DesktopError>;
   readonly getVersion: Effect.Effect<string, DesktopError>;
   readonly getInstructionFiles: Effect.Effect<readonly InstructionFile[], DesktopError>;
@@ -68,10 +78,12 @@ interface DesktopEffects {
   readonly showSystemNotification: (
     notification: SystemNotification,
   ) => Effect.Effect<boolean, DesktopError>;
+  readonly exportToolImage: (image: ToolImageExport) => Effect.Effect<boolean, DesktopError>;
   readonly loadConfig: Effect.Effect<AppConfig, DesktopError>;
   readonly patchConfig: (patch: Partial<AppConfig>) => Effect.Effect<void, DesktopError>;
+  readonly setModelSettings: (patch: ModelSettingsPatch) => Effect.Effect<void, DesktopError>;
   readonly setSystemPrompt: (systemPrompt: string | null) => Effect.Effect<void, DesktopError>;
-  readonly checkForUpdate: Effect.Effect<UpdateInfo | null, DesktopError>;
+  readonly checkForUpdate: Effect.Effect<AppUpdateCheck, DesktopError>;
   readonly installUpdate: Effect.Effect<void, DesktopError>;
   readonly relaunch: Effect.Effect<void, DesktopError>;
   readonly getBlenderToolsState: Effect.Effect<BlenderToolsState, DesktopError>;
@@ -130,6 +142,10 @@ const browserEffects: DesktopEffects = {
     }),
   ),
   getOpenCodeInstallFolder: Effect.succeed(null),
+  chooseProjectFolder: Effect.fail(
+    new DesktopError({ message: "Project folders require the desktop app." }),
+  ),
+  getSubscriptionUsage: () => Effect.succeed({ status: "unavailable" }),
   getStudioMcpStatus: Effect.succeed({ state: "starting" }),
   getVersion: Effect.succeed("0.5.2"),
   getInstructionFiles: Effect.succeed([]),
@@ -152,8 +168,9 @@ const browserEffects: DesktopEffects = {
           new DesktopError({ message: "Failed to save browser configuration", cause }),
       });
     }),
+  setModelSettings: (patch) => browserEffects.patchConfig(patch),
   setSystemPrompt: (systemPrompt) => browserEffects.patchConfig({ systemPrompt }),
-  checkForUpdate: Effect.succeed(null),
+  checkForUpdate: Effect.succeed({ status: "unsupported" }),
   installUpdate: Effect.fail(
     new DesktopError({ message: "Updates are only available in the desktop app." }),
   ),
@@ -176,6 +193,8 @@ const browserEffects: DesktopEffects = {
       folderUrl: "",
     }),
   readModelFile: () => Effect.succeed(null),
+  exportToolImage: () =>
+    Effect.fail(new DesktopError({ message: "Image export requires the desktop app." })),
   uploadModelToPlace: () => Effect.succeed({ status: "needs_setup", access: "no_studio" }),
   discoverStudioTargets: Effect.fail(
     new DesktopError({ message: "Studio targets are only available in the desktop app." }),
@@ -194,6 +213,18 @@ const invoke = <A>(message: string, operation: () => Promise<A>) =>
         message: cause instanceof Error ? `${message}: ${cause.message}` : message,
         cause,
       }),
+  });
+
+const invokeUpdater = <A>(fallback: string, operation: () => Promise<A>) =>
+  Effect.tryPromise({
+    try: operation,
+    catch: (cause) => {
+      const message =
+        cause instanceof Error
+          ? cause.message.replace(/^Error invoking remote method '[^']+': (?:Error: )?/, "")
+          : fallback;
+      return new DesktopError({ message, cause });
+    },
   });
 
 const decodeBridgeValue =
@@ -228,6 +259,13 @@ function makeBridgeEffects(api: DesktopApi): DesktopEffects {
     getOpenCodeInstallFolder: invoke("Failed to get the OpenCode folder", () =>
       api.getOpenCodeInstallFolder(),
     ).pipe(decodeBridgeValue("OpenCode folder is invalid", Schema.NullOr(Schema.String))),
+    chooseProjectFolder: invoke("Couldn't open the project folder picker", () =>
+      api.chooseProjectFolder(),
+    ).pipe(decodeBridgeValue("Project folder is invalid", Schema.NullOr(Schema.String))),
+    getSubscriptionUsage: (provider) =>
+      invoke("Failed to read subscription usage", () => api.getSubscriptionUsage(provider)).pipe(
+        decodeBridgeValue("Subscription usage is invalid", SubscriptionUsageSchema),
+      ),
     getStudioMcpStatus: invoke("Failed to get the Studio MCP status", () =>
       api.getStudioMcpStatus(),
     ).pipe(decodeBridgeValue("Studio MCP status is invalid", StudioMcpStatusSchema)),
@@ -246,12 +284,14 @@ function makeBridgeEffects(api: DesktopApi): DesktopEffects {
       decodeBridgeValue("Desktop configuration is invalid", AppConfigSchema),
     ),
     patchConfig: (patch) => invoke("Failed to save configuration", () => api.patchConfig(patch)),
+    setModelSettings: (patch) =>
+      invoke("Failed to save model settings", () => api.setModelSettings(patch)),
     setSystemPrompt: (systemPrompt) =>
       invoke("Failed to save the system prompt", () => api.setSystemPrompt(systemPrompt)),
-    checkForUpdate: invoke("Failed to check for updates", () => api.checkForUpdate()).pipe(
-      decodeBridgeValue("Update information is invalid", Schema.NullOr(UpdateInfoSchema)),
+    checkForUpdate: invokeUpdater("Could not check for updates.", () => api.checkForUpdate()).pipe(
+      decodeBridgeValue("Update information is invalid.", AppUpdateCheckSchema),
     ),
-    installUpdate: invoke("Failed to install the update", () => api.installUpdate()),
+    installUpdate: invokeUpdater("Could not install the update.", () => api.installUpdate()),
     relaunch: invoke("Failed to relaunch the app", () => api.relaunch()),
     getBlenderToolsState: invoke("Failed to check Blender", () => api.getBlenderToolsState()),
     installBlenderTools: invoke("Failed to set up Blender", () => api.installBlenderTools()),
@@ -261,6 +301,10 @@ function makeBridgeEffects(api: DesktopApi): DesktopEffects {
     getUploadAccess: (studioKey, modelUrl) =>
       invoke("Failed to check uploads", () => api.getUploadAccess(studioKey, modelUrl)),
     readModelFile: (url) => invoke("Failed to read the model", () => api.readModelFile(url)),
+    exportToolImage: (image) =>
+      invoke("Failed to export the image", () => api.exportToolImage(image)).pipe(
+        decodeBridgeValue("Image export result is invalid", Schema.Boolean),
+      ),
     uploadModelToPlace: (url, studioKey, hash, addOnly) =>
       invoke("Failed to upload the model", () =>
         api.uploadModelToPlace(url, studioKey, hash, addOnly),
@@ -282,6 +326,12 @@ export const desktopEffects: DesktopEffects = window.bloxbot
 const runPromise = <A>(effect: Effect.Effect<A, DesktopError>): Promise<A> =>
   Effect.runPromise(effect);
 
+async function runUpdaterPromise<A>(effect: Effect.Effect<A, DesktopError>): Promise<A> {
+  const result = await runPromise(Effect.either(effect));
+  if (Either.isLeft(result)) throw new Error(result.left.message);
+  return result.right;
+}
+
 /** Promise-only adapter consumed by React and exposed by the Electron bridge contract. */
 export const desktop: DesktopApi = {
   syncExplorerTree: (studioId, request) =>
@@ -290,12 +340,22 @@ export const desktop: DesktopApi = {
   onExplorerTreeUpdate: (listener) => window.bloxbot?.onExplorerTreeUpdate(listener) ?? (() => {}),
   readInstructions: () => window.bloxbot?.readInstructions() ?? Promise.resolve(""),
   saveInstructions: (text) => window.bloxbot?.saveInstructions(text) ?? Promise.resolve(),
+  // A browser has no folders to copy from, which Settings says rather than offering the import.
+  listImportableSkills: () =>
+    window.bloxbot?.listImportableSkills() ??
+    Promise.resolve({ available: false, folder: "", importable: [], installed: [], skipped: [] }),
+  importSkills: (names) =>
+    window.bloxbot?.importSkills(names) ??
+    Promise.reject(new DesktopError({ message: "Importing skills requires the desktop app." })),
   getExplorerNodeDetails: (studioId, request) =>
     runPromise(desktopEffects.getExplorerNodeDetails(studioId, request)),
   editExplorerObject: (studioId, edit) =>
     runPromise(desktopEffects.editExplorerObject(studioId, edit)),
   getOpenCodeInfo: () => runPromise(desktopEffects.getOpenCodeInfo),
+  getSubscriptionUsage: (provider: SubscriptionProvider) =>
+    runPromise(desktopEffects.getSubscriptionUsage(provider)),
   getOpenCodeInstallFolder: () => runPromise(desktopEffects.getOpenCodeInstallFolder),
+  chooseProjectFolder: () => runPromise(desktopEffects.chooseProjectFolder),
   getStudioMcpStatus: () => runPromise(desktopEffects.getStudioMcpStatus),
   onOpenCodeStartupProgress: (listener: StartupProgressListener) =>
     window.bloxbot?.onOpenCodeStartupProgress(listener) ?? (() => {}),
@@ -309,9 +369,10 @@ export const desktop: DesktopApi = {
   openNotificationSettings: () => window.bloxbot?.openNotificationSettings() ?? Promise.resolve(),
   loadConfig: () => runPromise(desktopEffects.loadConfig),
   patchConfig: (patch) => runPromise(desktopEffects.patchConfig(patch)),
+  setModelSettings: (patch) => runPromise(desktopEffects.setModelSettings(patch)),
   setSystemPrompt: (systemPrompt) => runPromise(desktopEffects.setSystemPrompt(systemPrompt)),
-  checkForUpdate: () => runPromise(desktopEffects.checkForUpdate),
-  installUpdate: () => runPromise(desktopEffects.installUpdate),
+  checkForUpdate: () => runUpdaterPromise(desktopEffects.checkForUpdate),
+  installUpdate: () => runUpdaterPromise(desktopEffects.installUpdate),
   relaunch: () => runPromise(desktopEffects.relaunch),
   getBlenderToolsState: () => runPromise(desktopEffects.getBlenderToolsState),
   installBlenderTools: () => runPromise(desktopEffects.installBlenderTools),
@@ -321,6 +382,7 @@ export const desktop: DesktopApi = {
   getUploadAccess: (studioKey, modelUrl) =>
     runPromise(desktopEffects.getUploadAccess(studioKey, modelUrl)),
   readModelFile: (url) => runPromise(desktopEffects.readModelFile(url)),
+  exportToolImage: (image) => runPromise(desktopEffects.exportToolImage(image)),
   uploadModelToPlace: (url, studioKey, hash, addOnly) =>
     runPromise(desktopEffects.uploadModelToPlace(url, studioKey, hash, addOnly)),
   onModelUploadStep: (listener) => window.bloxbot?.onModelUploadStep(listener) ?? (() => {}),

@@ -14,6 +14,8 @@ import { channels } from "./channels";
 const api: DesktopApi = {
   getOpenCodeInfo: () => ipcRenderer.invoke(channels.getOpenCodeInfo),
   getOpenCodeInstallFolder: () => ipcRenderer.invoke(channels.getOpenCodeInstallFolder),
+  chooseProjectFolder: () => ipcRenderer.invoke(channels.chooseProjectFolder),
+  getSubscriptionUsage: (provider) => ipcRenderer.invoke(channels.getSubscriptionUsage, provider),
   getStudioMcpStatus: () => ipcRenderer.invoke(channels.getStudioMcpStatus),
   onOpenCodeStartupProgress: (listener) => {
     const handleProgress = (_event: Electron.IpcRendererEvent, progress: OpenCodeStartupProgress) =>
@@ -26,6 +28,7 @@ const api: DesktopApi = {
   openUrl: (url) => ipcRenderer.invoke(channels.openUrl, url),
   loadConfig: () => ipcRenderer.invoke(channels.loadConfig),
   patchConfig: (patch: Partial<AppConfig>) => ipcRenderer.invoke(channels.patchConfig, patch),
+  setModelSettings: (patch) => ipcRenderer.invoke(channels.setModelSettings, patch),
   setSystemPrompt: (systemPrompt) => ipcRenderer.invoke(channels.setSystemPrompt, systemPrompt),
   checkForUpdate: () => ipcRenderer.invoke(channels.checkForUpdate),
   installUpdate: () => ipcRenderer.invoke(channels.installUpdate),
@@ -53,6 +56,7 @@ const api: DesktopApi = {
   showSystemNotification: (notification) =>
     ipcRenderer.invoke(channels.showSystemNotification, notification),
   openNotificationSettings: () => ipcRenderer.invoke(channels.openNotificationSettings),
+  exportToolImage: (image) => ipcRenderer.invoke(channels.exportToolImage, image),
   onSystemNotificationClick: (listener) => {
     const handleClick = (_event: Electron.IpcRendererEvent, id: string) => listener(id);
     ipcRenderer.on(channels.systemNotificationClicked, handleClick);
@@ -68,6 +72,8 @@ const api: DesktopApi = {
   },
   readInstructions: () => ipcRenderer.invoke(channels.readInstructions),
   saveInstructions: (text) => ipcRenderer.invoke(channels.saveInstructions, text),
+  listImportableSkills: () => ipcRenderer.invoke(channels.listImportableSkills),
+  importSkills: (names) => ipcRenderer.invoke(channels.importSkills, names),
   getExplorerNodeDetails: (studioId, request) =>
     ipcRenderer.invoke(channels.getExplorerNodeDetails, studioId, request),
   editExplorerObject: (studioId, edit) =>

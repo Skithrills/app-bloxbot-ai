@@ -1,16 +1,36 @@
-import { useQuery } from "@tanstack/react-query";
-import { Box, Building2, ChevronRight, FileText, Globe, Search, Shield } from "lucide-react";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import {
+  Box,
+  Building2,
+  ChevronRight,
+  FileText,
+  Globe,
+  LoaderCircle,
+  Palette,
+  PartyPopper,
+  RefreshCw,
+  Search,
+  Shield,
+  UsersRound,
+} from "lucide-react";
 import posthog from "posthog-js/dist/module.full.no-external.js";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { FunSettings } from "@/components/AudioVisualizer";
+import PersonalisationSettings from "@/components/PersonalisationSettings";
 import ProviderCheckPopover from "@/components/ProviderCheckPopover";
 import ProviderConnectDialog from "@/components/ProviderConnectDialog";
 import ProviderLogo from "@/components/ProviderLogo";
+import SkillsSettings from "@/components/SkillsSettings";
+import SubagentsSettings from "@/components/SubagentsSettings";
+import { SubscriptionUsage } from "@/components/SubscriptionUsage";
 import { ThreeDToolsTab } from "@/components/ThreeDToolsTab";
 import { THEME_OPTIONS, type Theme, useTheme } from "@/components/theme-provider";
 import { useCheckProvider } from "@/hooks/mutations/useCheckProvider";
 import { useSaveInstructions } from "@/hooks/mutations/useSaveInstructions";
+import { useSaveModelSettings } from "@/hooks/mutations/useSaveModelSettings";
 import { useSaveSystemPrompt } from "@/hooks/mutations/useSaveSystemPrompt";
 import { useDisconnectProvider } from "@/hooks/mutations/useSetApiKey";
+import { useEligibleModels } from "@/hooks/useEligibleModels";
 import {
   useAllModels,
   useAllProviders,
@@ -19,12 +39,24 @@ import {
   useProviderList,
 } from "@/hooks/useProviders";
 import { useAnyChatBusy } from "@/hooks/useSessionStatuses";
+import { useUpdater } from "@/hooks/useUpdater";
 import { analyticsDeviceId, analyticsProperties } from "@/lib/analytics";
 import { appLink } from "@/lib/appLink";
 import { playChime } from "@/lib/chime";
-import { type AppConfig, loadConfig } from "@/lib/config";
+import {
+  COMPOSER_SHORTCUTS,
+  type ComposerShortcut,
+  composerShortcutLabel,
+} from "@/lib/composerDelivery";
+import { type AppConfig, loadConfig, patchConfig } from "@/lib/config";
 import { desktop } from "@/lib/desktop";
+import { compareCatalogModels, isPaidModel, modelLabel } from "@/lib/modelChoice";
 import { canOpenNotificationSettings, notify, openNotificationSettings } from "@/lib/notifications";
+import {
+  OPENAI_API_PROVIDER,
+  OPENAI_OAUTH_PROVIDER,
+  OPENAI_SERVICE_TIERS,
+} from "@/lib/openAiProfiles";
 import type { Model } from "@/lib/opencode/types";
 import { OPENCODE_GO, shouldRecommendOpenCodeGo } from "@/lib/opencodeGo";
 import { connectHint, isFreeTier, providerDisplayName } from "@/lib/providerAuth";
@@ -33,7 +65,7 @@ import { qk } from "@/lib/queryKeys";
 import { DEFAULT_SYSTEM_PROMPT } from "@/lib/systemPrompt";
 import { usePreferences } from "@/providers/PreferencesProvider";
 import type { ModelInfo, ProviderInfo } from "@/types";
-import type { NotificationKinds, UpdateInfo } from "@/types/desktop";
+import type { NotificationKinds } from "@/types/desktop";
 
 // ── Popular providers (same order as OpenCode's web UI) ──────────────
 const POPULAR_PROVIDERS = [
@@ -61,6 +93,8 @@ function hasOutsideZenKey(provider: ProviderInfo): boolean {
   return provider.id === "opencode" && !isFreeZen(provider) && !hasZenKey(provider);
 }
 
+const PROVIDER_SKELETON_WIDTHS = ["w-1/3", "w-1/2", "w-1/4", "w-2/5"] as const;
+
 const TECHNOLOGIES = [
   { name: "OpenCode", url: "https://opencode.ai", description: "AI coding engine" },
   {
@@ -72,8 +106,11 @@ const TECHNOLOGIES = [
 
 type SettingsTab =
   | "providers"
+  | "subagents"
   | "threeD"
   | "appearance"
+  | "personalisation"
+  | "fun"
   | "instructions"
   | "notifications"
   | "privacy"
@@ -145,6 +182,18 @@ function Settings({ onClose }: SettingsProps) {
                 <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z" />
               </svg>
               Providers
+            </button>
+            <button
+              type="button"
+              onClick={() => setTab("subagents")}
+              className={`flex h-8 shrink-0 items-center gap-2 whitespace-nowrap rounded-md px-2 text-left text-sm transition-colors ${
+                tab === "subagents"
+                  ? "bg-accent font-medium text-foreground"
+                  : "text-muted-foreground hover:bg-accent hover:text-foreground"
+              }`}
+            >
+              <UsersRound aria-hidden="true" size={13} />
+              Subagents
             </button>
             <button
               type="button"
@@ -236,6 +285,30 @@ function Settings({ onClose }: SettingsProps) {
               Appearance
             </button>
             <button
+              type="button"
+              onClick={() => setTab("personalisation")}
+              className={`flex h-8 shrink-0 items-center gap-2 whitespace-nowrap rounded-md px-2 text-left text-sm transition-colors ${
+                tab === "personalisation"
+                  ? "bg-accent font-medium text-foreground"
+                  : "text-muted-foreground hover:bg-accent hover:text-foreground"
+              }`}
+            >
+              <Palette size={13} aria-hidden="true" />
+              Personalisation
+            </button>
+            <button
+              type="button"
+              onClick={() => setTab("fun")}
+              className={`flex h-8 shrink-0 items-center gap-2 whitespace-nowrap rounded-md px-2 text-left text-sm transition-colors ${
+                tab === "fun"
+                  ? "bg-accent font-medium text-foreground"
+                  : "text-muted-foreground hover:bg-accent hover:text-foreground"
+              }`}
+            >
+              <PartyPopper size={13} aria-hidden="true" />
+              Fun
+            </button>
+            <button
               onClick={() => setTab("about")}
               className={`flex shrink-0 items-center gap-2 whitespace-nowrap rounded-md px-2 h-8 text-left text-sm transition-colors ${
                 tab === "about"
@@ -288,8 +361,11 @@ function Settings({ onClose }: SettingsProps) {
         {/* Content area */}
         <div className="min-h-0 min-w-0 flex-1 overflow-y-auto rounded-t-xl border-x border-t bg-background">
           {tab === "providers" && <ProvidersTab />}
+          {tab === "subagents" && <SubagentsSettings />}
           {tab === "threeD" && <ThreeDToolsTab />}
           {tab === "appearance" && <AppearanceTab />}
+          {tab === "personalisation" && <PersonalisationSettings />}
+          {tab === "fun" && <FunSettings />}
           {tab === "instructions" && <InstructionsTab />}
           {tab === "notifications" && <NotificationsTab />}
           {tab === "privacy" && <PrivacyTab />}
@@ -316,7 +392,29 @@ function ProvidersTab() {
   const [checks, setChecks] = useState<Record<string, "checking" | ProviderCheckResult>>({});
   const checkMutation = useCheckProvider();
   const providerList = useProviderList();
-  const { selectedModel, hiddenModels, toggleModelVisibility } = usePreferences();
+  const {
+    selectedModel,
+    hiddenModels,
+    hideFreeModels,
+    modelCatalogOrder,
+    paidDefaultModel,
+    savingModelSettings,
+    setHideFreeModels,
+    setModelCatalogOrder,
+    setPaidDefaultModel,
+    toggleModelVisibility,
+  } = usePreferences();
+  const paidModels = useEligibleModels()
+    .filter((model) => providerList && isPaidModel(providerList, `${model.providerId}/${model.id}`))
+    .sort(
+      (a, b) =>
+        a.providerName.localeCompare(b.providerName) ||
+        a.providerId.localeCompare(b.providerId) ||
+        compareCatalogModels(a, b, modelCatalogOrder),
+    );
+  const { data: appConfig } = useQuery({ queryKey: qk.config, queryFn: loadConfig });
+  const saveModelSettings = useSaveModelSettings();
+  const chatBusy = useAnyChatBusy();
   const allModels = useAllModels();
   const [expanded, setExpanded] = useState<ReadonlySet<string>>(() => new Set());
 
@@ -339,9 +437,11 @@ function ProvidersTab() {
   const checkModelsFor = useRef<(providerId: string) => Model[]>(() => []);
   checkModelsFor.current = (providerId) => {
     const provider = providerList?.all.find((p) => p.id === providerId);
-    return provider
-      ? checkModels(provider, checkPreference(providerId, selectedModel, providerList?.default))
-      : [];
+    if (!provider || !providerList) return [];
+    return checkModels(
+      provider,
+      checkPreference(providerId, selectedModel, providerList.default),
+    ).filter((model) => !hideFreeModels || isPaidModel(providerList, `${providerId}/${model.id}`));
   };
 
   async function runCheck(provider: ProviderInfo, model: Model | undefined) {
@@ -392,7 +492,7 @@ function ProvidersTab() {
       await disconnectMutation.mutateAsync(provider.id);
       forgetCheck(provider.id);
       notify.success(
-        hasZenKey(provider)
+        hasZenKey(provider) && !hideFreeModels
           ? "OpenCode Zen key removed. The free models are still available."
           : "Provider disconnected",
       );
@@ -413,25 +513,42 @@ function ProvidersTab() {
   const modelsByProvider = useMemo(() => {
     const groups = new Map<string, ModelInfo[]>();
     for (const model of allModels) {
+      if (
+        hideFreeModels &&
+        (!providerList || !isPaidModel(providerList, `${model.providerId}/${model.id}`))
+      ) {
+        continue;
+      }
       groups.set(model.providerId, [...(groups.get(model.providerId) ?? []), model]);
     }
-    for (const models of groups.values()) models.sort((a, b) => a.name.localeCompare(b.name));
+    for (const models of groups.values()) {
+      models.sort((a, b) => compareCatalogModels(a, b, modelCatalogOrder));
+    }
     return groups;
-  }, [allModels]);
+  }, [allModels, hideFreeModels, modelCatalogOrder, providerList]);
   const matchingModels = (providerId: string) =>
     (modelsByProvider.get(providerId) ?? []).filter((model) =>
       `${model.name} ${model.id}`.toLowerCase().includes(needle),
     );
 
+  const matchesProvider = (p: ProviderInfo) =>
+    matches(p, providerDisplayName(p)) || (needle && matchingModels(p.id).length > 0);
+  const openAiProfiles = [OPENAI_OAUTH_PROVIDER, OPENAI_API_PROVIDER].flatMap((id) =>
+    allProviders.filter((p) => p.id === id && matchesProvider(p)),
+  );
   const connected = allProviders.filter(
     (p) =>
       connectedProviders.includes(p.id) &&
-      (matches(p, providerDisplayName(p)) || (needle && matchingModels(p.id).length > 0)),
+      p.id !== OPENAI_OAUTH_PROVIDER &&
+      p.id !== OPENAI_API_PROVIDER &&
+      (!hideFreeModels || !isFreeZen(p)) &&
+      matchesProvider(p),
   );
 
   const goProvider = allProviders.find((p) => p.id === OPENCODE_GO.providerId);
   const recommendGo =
     !!goProvider &&
+    !hideFreeModels &&
     !needle &&
     shouldRecommendOpenCodeGo(allProviders.filter((p) => connectedProviders.includes(p.id)));
 
@@ -449,6 +566,7 @@ function ProvidersTab() {
     const pop: ProviderInfo[] = [];
     const oth: ProviderInfo[] = [];
     for (const p of allProviders) {
+      if (p.id === OPENAI_OAUTH_PROVIDER || p.id === OPENAI_API_PROVIDER) continue;
       // With only the free models connected, Zen is still offered as its own
       // provider: a key turns the same OpenCode provider into a Zen account.
       if ((connectedProviders.includes(p.id) && !isFreeZen(p)) || !matches(p)) continue;
@@ -466,7 +584,8 @@ function ProvidersTab() {
   }, [allProviders, connectedProviders, matches, recommendGo]);
 
   const nothingMatches =
-    allProviders.length > 0 && connected.length + popular.length + others.length === 0;
+    allProviders.length > 0 &&
+    openAiProfiles.length + connected.length + popular.length + others.length === 0;
 
   function renderAvailable(provider: ProviderInfo) {
     return (
@@ -479,6 +598,11 @@ function ProvidersTab() {
           </div>
         </div>
         <button
+          aria-label={
+            provider.id === OPENAI_API_PROVIDER || provider.id === OPENAI_OAUTH_PROVIDER
+              ? `Connect ${provider.name}`
+              : undefined
+          }
           onClick={() =>
             provider.id === OPENCODE_GO.providerId ? setUpGo("list") : setConnecting(provider)
           }
@@ -490,9 +614,223 @@ function ProvidersTab() {
     );
   }
 
+  function renderConnected(provider: ProviderInfo) {
+    const check = checks[provider.id];
+    const models = modelsByProvider.get(provider.id) ?? [];
+    const nameMatches = matches(provider, providerDisplayName(provider));
+    const listed = needle && !nameMatches ? matchingModels(provider.id) : models;
+    const modelsOpen = expanded.has(provider.id) || (!!needle && !nameMatches);
+    const shownCount = models.filter(
+      (model) => !hiddenModels.has(`${model.providerId}/${model.id}`),
+    ).length;
+    return (
+      <div key={provider.id} className="px-3 py-2.5">
+        <div className="flex flex-wrap items-center gap-x-3 gap-y-1.5">
+          <ProviderLogo providerId={provider.id} />
+          <div className="min-w-[7rem] flex-1">
+            <div className="truncate text-sm font-medium">{providerDisplayName(provider)}</div>
+            {isFreeZen(provider) && (
+              <div className="truncate text-xs text-muted-foreground">Provided by OpenCode</div>
+            )}
+            {provider.id === OPENAI_API_PROVIDER && provider.source === "env" && (
+              <div className="truncate text-xs text-muted-foreground">From OPENAI_API_KEY</div>
+            )}
+          </div>
+          {check && check !== "checking" && (
+            <span
+              className={`flex shrink-0 items-center gap-1.5 whitespace-nowrap rounded-full px-2 py-0.5 text-xs font-medium ${
+                check.ok
+                  ? "bg-emerald-50 text-emerald-700 dark:bg-emerald-500/10 dark:text-emerald-400"
+                  : "bg-red-50 text-red-700 dark:bg-red-500/10 dark:text-red-400"
+              }`}
+            >
+              <span
+                className={`h-1.5 w-1.5 rounded-full ${check.ok ? "bg-emerald-500" : "bg-red-500"}`}
+              />
+              {check.ok ? "Working" : "Not working"}
+            </span>
+          )}
+          <ProviderCheckPopover
+            providerName={providerDisplayName(provider)}
+            models={checkModelsFor.current(provider.id)}
+            checking={check === "checking"}
+            open={checkPickerFor === provider.id}
+            onOpenChange={(open) => setCheckPickerFor(open ? provider.id : null)}
+            onCheck={(model) => runCheck(provider, model)}
+          />
+          {provider.id === OPENAI_API_PROVIDER && (
+            <button
+              type="button"
+              onClick={() => setConnecting(provider)}
+              className="shrink-0 whitespace-nowrap text-xs text-muted-foreground hover:text-foreground"
+            >
+              {provider.source === "env" ? "Add key" : "Change key"}
+            </button>
+          )}
+          {isFreeZen(provider) ||
+          hasOutsideZenKey(provider) ||
+          (provider.id === OPENAI_API_PROVIDER && provider.source === "env") ? null : (
+            <button
+              aria-label={
+                provider.id === OPENAI_API_PROVIDER || provider.id === OPENAI_OAUTH_PROVIDER
+                  ? `Disconnect ${provider.name}`
+                  : undefined
+              }
+              onClick={() => handleDisconnect(provider)}
+              disabled={disconnecting === provider.id}
+              className="shrink-0 whitespace-nowrap text-xs text-muted-foreground transition-colors hover:text-red-600 disabled:opacity-50"
+            >
+              {disconnecting === provider.id
+                ? "..."
+                : hasZenKey(provider)
+                  ? "Remove key"
+                  : "Disconnect"}
+            </button>
+          )}
+        </div>
+        {check && check !== "checking" && (
+          <p className="mt-1.5 text-xs leading-relaxed text-muted-foreground @md:pl-8">
+            {check.ok ? (
+              `Works with ${check.modelName}.`
+            ) : (
+              <>
+                {check.modelName && `Didn't work with ${check.modelName}. `}
+                <span className="text-red-700 dark:text-red-400">{check.message}</span>
+                {check.keyRejected && !isFreeZen(provider) && (
+                  <button
+                    onClick={() => setConnecting(provider)}
+                    className="ml-1.5 font-medium text-foreground underline-offset-2 hover:underline"
+                  >
+                    Reconnect
+                  </button>
+                )}
+              </>
+            )}
+          </p>
+        )}
+        {models.length > 0 && (
+          <div className="mt-1.5 @md:pl-8">
+            <button
+              type="button"
+              aria-expanded={modelsOpen}
+              onClick={() =>
+                setExpanded((current) => {
+                  const next = new Set(current);
+                  if (next.has(provider.id)) next.delete(provider.id);
+                  else next.add(provider.id);
+                  return next;
+                })
+              }
+              className="flex items-center gap-1 text-xs text-muted-foreground transition-colors hover:text-foreground"
+            >
+              <ChevronRight
+                aria-hidden="true"
+                size={12}
+                className={`transition-transform ${modelsOpen ? "rotate-90" : ""}`}
+              />
+              {shownCount === models.length
+                ? `${models.length} ${models.length === 1 ? "model" : "models"}`
+                : `${shownCount} of ${models.length} models shown`}
+            </button>
+            {modelsOpen && (
+              <div className="mt-1 space-y-0.5">
+                {listed.map((model) => {
+                  const modelKey = `${model.providerId}/${model.id}`;
+                  const isVisible = !hiddenModels.has(modelKey);
+                  return (
+                    <button
+                      key={modelKey}
+                      type="button"
+                      role="switch"
+                      aria-checked={isVisible}
+                      aria-label={`Show ${model.name} in the chat`}
+                      onClick={() => toggleModelVisibility(modelKey)}
+                      className="flex w-full items-center justify-between gap-3 rounded-md px-1.5 py-1 text-left transition-colors hover:bg-accent/60"
+                    >
+                      <span className="truncate text-xs">{model.name}</span>
+                      <span
+                        className={`relative inline-flex h-4 w-7 shrink-0 items-center rounded-full transition-colors ${
+                          isVisible ? "bg-foreground" : "bg-border"
+                        }`}
+                      >
+                        <span
+                          className={`inline-block h-3 w-3 rounded-full bg-background transition-transform ${
+                            isVisible ? "translate-x-3.5" : "translate-x-0.5"
+                          }`}
+                        />
+                      </span>
+                    </button>
+                  );
+                })}
+              </div>
+            )}
+          </div>
+        )}
+      </div>
+    );
+  }
+
   return (
     <div className="mx-auto w-full max-w-md px-4 py-6 @xl:px-6 @xl:py-8">
       <h4 className="text-lg font-medium text-foreground">Providers</h4>
+
+      <SubscriptionUsage />
+
+      <section className="mt-4" aria-labelledby="model-preferences-heading">
+        <h5
+          id="model-preferences-heading"
+          className="mb-1.5 text-xs font-medium text-muted-foreground"
+        >
+          Models
+        </h5>
+        <div className="divide-y overflow-hidden rounded-lg border bg-card">
+          <SettingSwitch
+            label="Hide free models"
+            checked={Boolean(hideFreeModels)}
+            disabled={savingModelSettings}
+            onChange={setHideFreeModels}
+          />
+          <label className="flex flex-wrap items-center justify-between gap-2 px-3.5 py-2.5 text-xs">
+            <span>Model order</span>
+            <select
+              value={modelCatalogOrder}
+              onChange={(event) =>
+                setModelCatalogOrder(event.target.value === "newest" ? "newest" : "name")
+              }
+              className="rounded-md border bg-background px-2 py-1"
+            >
+              <option value="name">Name (A–Z)</option>
+              <option value="newest">Newest first</option>
+            </select>
+          </label>
+          <label className="flex flex-wrap items-center justify-between gap-2 px-3.5 py-2.5 text-xs">
+            <span>Paid default model</span>
+            <select
+              value={paidDefaultModel ?? ""}
+              onChange={(event) => setPaidDefaultModel(event.target.value || null)}
+              className="min-w-0 max-w-full rounded-md border bg-background px-2 py-1"
+            >
+              <option value="">Automatic</option>
+              {paidDefaultModel &&
+                !paidModels.some(
+                  (model) => `${model.providerId}/${model.id}` === paidDefaultModel,
+                ) && (
+                  <option value={paidDefaultModel} disabled>
+                    Saved model unavailable
+                  </option>
+                )}
+              {paidModels.map((model) => (
+                <option
+                  key={`${model.providerId}/${model.id}`}
+                  value={`${model.providerId}/${model.id}`}
+                >
+                  {modelLabel(model)}
+                </option>
+              ))}
+            </select>
+          </label>
+        </div>
+      </section>
 
       {allProviders.length > 0 && (
         <div className="relative mt-5">
@@ -539,154 +877,52 @@ function ProvidersTab() {
         </div>
       )}
 
+      {openAiProfiles.length > 0 && (
+        <section className="mt-6" aria-labelledby="openai-profiles-heading">
+          <h5
+            id="openai-profiles-heading"
+            className="mb-1.5 text-xs font-medium text-muted-foreground"
+          >
+            OpenAI
+          </h5>
+          <div className="divide-y rounded-lg border bg-card">
+            {openAiProfiles.map((provider) =>
+              connectedProviders.includes(provider.id)
+                ? renderConnected(provider)
+                : renderAvailable(provider),
+            )}
+            {openAiProfiles.some((provider) => provider.id === OPENAI_API_PROVIDER) && (
+              <label className="flex flex-wrap items-center justify-between gap-2 px-3.5 py-2.5 text-xs">
+                <div>
+                  <span className="block">API service tier</span>
+                  <span className="mt-0.5 block text-muted-foreground">
+                    GPT-6.1 Sol and GPT-6 Astra
+                  </span>
+                </div>
+                <select
+                  value={appConfig?.openAiApiServiceTier ?? "auto"}
+                  disabled={chatBusy || saveModelSettings.isPending}
+                  onChange={(event) => {
+                    const tier = OPENAI_SERVICE_TIERS.find((entry) => entry === event.target.value);
+                    if (tier) saveModelSettings.mutate({ openAiApiServiceTier: tier });
+                  }}
+                  className="rounded-md border bg-background px-2 py-1 disabled:opacity-50"
+                >
+                  <option value="auto">Auto (project default)</option>
+                  <option value="default">Default (standard)</option>
+                  <option value="ultrafast">Ultrafast</option>
+                </select>
+              </label>
+            )}
+          </div>
+        </section>
+      )}
+
       {/* Connected providers */}
       {connected.length > 0 && (
         <div className="mt-6">
           <div className="mb-1.5 text-xs font-medium text-muted-foreground">Connected</div>
-          <div className="divide-y rounded-lg border bg-card">
-            {connected.map((provider) => {
-              const check = checks[provider.id];
-              const models = modelsByProvider.get(provider.id) ?? [];
-              const nameMatches = matches(provider, providerDisplayName(provider));
-              const listed = needle && !nameMatches ? matchingModels(provider.id) : models;
-              const modelsOpen = expanded.has(provider.id) || (!!needle && !nameMatches);
-              const shownCount = models.filter(
-                (model) => !hiddenModels.has(`${model.providerId}/${model.id}`),
-              ).length;
-              return (
-                <div key={provider.id} className="px-3 py-2.5">
-                  <div className="flex flex-wrap items-center gap-x-3 gap-y-1.5">
-                    <ProviderLogo providerId={provider.id} />
-                    <div className="min-w-[7rem] flex-1">
-                      <div className="truncate text-sm font-medium">
-                        {providerDisplayName(provider)}
-                      </div>
-                      {isFreeZen(provider) && (
-                        <div className="truncate text-xs text-muted-foreground">
-                          Provided by OpenCode
-                        </div>
-                      )}
-                    </div>
-                    {check && check !== "checking" && (
-                      <span
-                        className={`flex shrink-0 items-center gap-1.5 whitespace-nowrap rounded-full px-2 py-0.5 text-xs font-medium ${
-                          check.ok
-                            ? "bg-emerald-50 text-emerald-700 dark:bg-emerald-500/10 dark:text-emerald-400"
-                            : "bg-red-50 text-red-700 dark:bg-red-500/10 dark:text-red-400"
-                        }`}
-                      >
-                        <span
-                          className={`h-1.5 w-1.5 rounded-full ${check.ok ? "bg-emerald-500" : "bg-red-500"}`}
-                        />
-                        {check.ok ? "Working" : "Not working"}
-                      </span>
-                    )}
-                    <ProviderCheckPopover
-                      providerName={providerDisplayName(provider)}
-                      models={checkModelsFor.current(provider.id)}
-                      checking={check === "checking"}
-                      open={checkPickerFor === provider.id}
-                      onOpenChange={(open) => setCheckPickerFor(open ? provider.id : null)}
-                      onCheck={(model) => runCheck(provider, model)}
-                    />
-                    {/* The free models can't be disconnected, and BloxBot can't
-                        remove a Zen key it didn't store. */}
-                    {isFreeZen(provider) || hasOutsideZenKey(provider) ? null : (
-                      <button
-                        onClick={() => handleDisconnect(provider)}
-                        disabled={disconnecting === provider.id}
-                        className="shrink-0 whitespace-nowrap text-xs text-muted-foreground transition-colors hover:text-red-600 disabled:opacity-50"
-                      >
-                        {disconnecting === provider.id
-                          ? "..."
-                          : hasZenKey(provider)
-                            ? "Remove key"
-                            : "Disconnect"}
-                      </button>
-                    )}
-                  </div>
-                  {check && check !== "checking" && (
-                    <p className="mt-1.5 text-xs leading-relaxed text-muted-foreground @md:pl-8">
-                      {check.ok ? (
-                        `Works with ${check.modelName}.`
-                      ) : (
-                        <>
-                          {check.modelName && `Didn't work with ${check.modelName}. `}
-                          <span className="text-red-700 dark:text-red-400">{check.message}</span>
-                          {check.keyRejected && !isFreeZen(provider) && (
-                            <button
-                              onClick={() => setConnecting(provider)}
-                              className="ml-1.5 font-medium text-foreground underline-offset-2 hover:underline"
-                            >
-                              Reconnect
-                            </button>
-                          )}
-                        </>
-                      )}
-                    </p>
-                  )}
-                  {models.length > 0 && (
-                    <div className="mt-1.5 @md:pl-8">
-                      <button
-                        type="button"
-                        aria-expanded={modelsOpen}
-                        onClick={() =>
-                          setExpanded((current) => {
-                            const next = new Set(current);
-                            if (next.has(provider.id)) next.delete(provider.id);
-                            else next.add(provider.id);
-                            return next;
-                          })
-                        }
-                        className="flex items-center gap-1 text-xs text-muted-foreground transition-colors hover:text-foreground"
-                      >
-                        <ChevronRight
-                          aria-hidden="true"
-                          size={12}
-                          className={`transition-transform ${modelsOpen ? "rotate-90" : ""}`}
-                        />
-                        {shownCount === models.length
-                          ? `${models.length} ${models.length === 1 ? "model" : "models"}`
-                          : `${shownCount} of ${models.length} models shown`}
-                      </button>
-                      {modelsOpen && (
-                        <div className="mt-1 space-y-0.5">
-                          {listed.map((model) => {
-                            const modelKey = `${model.providerId}/${model.id}`;
-                            const isVisible = !hiddenModels.has(modelKey);
-                            return (
-                              <button
-                                key={modelKey}
-                                type="button"
-                                role="switch"
-                                aria-checked={isVisible}
-                                aria-label={`Show ${model.name} in the chat`}
-                                onClick={() => toggleModelVisibility(modelKey)}
-                                className="flex w-full items-center justify-between gap-3 rounded-md px-1.5 py-1 text-left transition-colors hover:bg-accent/60"
-                              >
-                                <span className="truncate text-xs">{model.name}</span>
-                                <span
-                                  className={`relative inline-flex h-4 w-7 shrink-0 items-center rounded-full transition-colors ${
-                                    isVisible ? "bg-foreground" : "bg-border"
-                                  }`}
-                                >
-                                  <span
-                                    className={`inline-block h-3 w-3 rounded-full bg-background transition-transform ${
-                                      isVisible ? "translate-x-3.5" : "translate-x-0.5"
-                                    }`}
-                                  />
-                                </span>
-                              </button>
-                            );
-                          })}
-                        </div>
-                      )}
-                    </div>
-                  )}
-                </div>
-              );
-            })}
-          </div>
+          <div className="divide-y rounded-lg border bg-card">{connected.map(renderConnected)}</div>
         </div>
       )}
 
@@ -719,8 +955,21 @@ function ProvidersTab() {
       )}
 
       {allProviders.length === 0 && (
-        <div className="mt-8 py-4 text-center text-xs text-muted-foreground">
-          Loading providers...
+        <div className="mt-6 space-y-2" aria-busy="true">
+          <span className="sr-only">Loading providers</span>
+          {PROVIDER_SKELETON_WIDTHS.map((width) => (
+            <div
+              key={width}
+              className="flex items-center gap-3 rounded-lg border bg-card px-3 py-3"
+            >
+              <div className="skeleton size-7 shrink-0 rounded-md" />
+              <div className="min-w-0 flex-1 space-y-1.5">
+                <div className={`skeleton h-3 rounded ${width}`} />
+                <div className="skeleton h-2.5 w-2/5 rounded" />
+              </div>
+              <div className="skeleton h-7 w-16 shrink-0 rounded-md" />
+            </div>
+          ))}
         </div>
       )}
 
@@ -741,6 +990,24 @@ function ProvidersTab() {
 
 function AppearanceTab() {
   const { theme, setTheme } = useTheme();
+  const queryClient = useQueryClient();
+  const { data: config } = useQuery({ queryKey: qk.config, queryFn: loadConfig });
+  const predictions = useMutation({
+    mutationFn: (enabled: boolean) => patchConfig({ composerPredictions: enabled }),
+    onSuccess: (_result, enabled) => {
+      queryClient.setQueryData<AppConfig>(qk.config, (current) =>
+        current ? { ...current, composerPredictions: enabled } : current,
+      );
+    },
+    onError: () => notify.error("Couldn't save composer predictions"),
+  });
+  const {
+    effortControl,
+    setEffortControl,
+    composerShortcuts,
+    savingComposerShortcuts,
+    setComposerShortcuts,
+  } = usePreferences();
 
   return (
     <div className="mx-auto w-full max-w-md px-4 py-6 @xl:px-6 @xl:py-8">
@@ -769,6 +1036,75 @@ function AppearanceTab() {
             );
           })}
         </div>
+      </div>
+
+      <fieldset className="mt-6">
+        <legend className="mb-1.5 text-xs font-medium text-muted-foreground">
+          Reasoning effort control
+        </legend>
+        <div className="grid grid-cols-2 gap-2">
+          {(["slider", "dropdown"] as const).map((control) => (
+            <button
+              key={control}
+              type="button"
+              onClick={() => setEffortControl(control)}
+              aria-pressed={effortControl === control}
+              className="rounded-lg border border-border bg-card px-3 py-2.5 text-center text-xs text-muted-foreground capitalize transition-colors hover:bg-accent hover:text-foreground focus-visible:outline-2 focus-visible:outline-ring aria-pressed:border-foreground/40 aria-pressed:bg-accent aria-pressed:font-medium aria-pressed:text-foreground"
+            >
+              {control}
+            </button>
+          ))}
+        </div>
+      </fieldset>
+      <fieldset className="mt-6" disabled={savingComposerShortcuts}>
+        <legend className="mb-1.5 text-xs font-medium text-muted-foreground">
+          Busy chat shortcuts
+        </legend>
+        <div className="divide-y rounded-lg border bg-card">
+          {(["steer", "queue"] as const).map((action) => (
+            <label
+              key={action}
+              className="flex items-center justify-between gap-3 px-3 py-2 text-sm"
+            >
+              {action === "steer" ? "Steer at next step" : "Queue after current turn"}
+              <select
+                value={composerShortcuts[action]}
+                className="rounded-md border bg-background px-2 py-1 text-xs disabled:opacity-50"
+                onChange={(event) => {
+                  const shortcut = event.target.value as ComposerShortcut;
+                  const other = action === "steer" ? "queue" : "steer";
+                  const next = { ...composerShortcuts, [action]: shortcut };
+                  if (shortcut !== "disabled" && next[other] === shortcut) {
+                    next[other] = composerShortcuts[action];
+                  }
+                  setComposerShortcuts(next);
+                }}
+              >
+                {COMPOSER_SHORTCUTS.map((shortcut) => (
+                  <option key={shortcut} value={shortcut}>
+                    {composerShortcutLabel(shortcut)}
+                  </option>
+                ))}
+              </select>
+            </label>
+          ))}
+        </div>
+        <p className="mt-1.5 text-xs text-muted-foreground">
+          These apply while a turn is running. Assigning a shortcut in use swaps the two.
+        </p>
+      </fieldset>
+      <div className="mt-6">
+        <div className="overflow-hidden rounded-lg border bg-card">
+          <SettingSwitch
+            label="Composer predictions"
+            checked={config?.composerPredictions === true}
+            disabled={!config || predictions.isPending}
+            onChange={predictions.mutate}
+          />
+        </div>
+        <p className="mt-1.5 text-xs text-muted-foreground">
+          A free OpenCode Zen model uses your draft to suggest a continuation. Press Tab to accept.
+        </p>
       </div>
     </div>
   );
@@ -871,6 +1207,8 @@ function InstructionsTab() {
         </button>
       </div>
 
+      <SkillsSettings chatRunning={chatRunning} />
+
       <SystemPromptSection chatRunning={chatRunning} />
     </div>
   );
@@ -966,10 +1304,12 @@ const NOTIFICATION_KINDS: ReadonlyArray<{ kind: keyof NotificationKinds; label: 
 function SettingSwitch({
   label,
   checked,
+  disabled,
   onChange,
 }: {
   label: string;
   checked: boolean;
+  disabled?: boolean;
   onChange: (checked: boolean) => void;
 }) {
   return (
@@ -977,13 +1317,14 @@ function SettingSwitch({
       type="button"
       role="switch"
       aria-checked={checked}
+      disabled={disabled}
       onClick={() => onChange(!checked)}
-      className="flex w-full items-center justify-between gap-4 px-3.5 py-2.5 text-left transition-colors hover:bg-accent/60"
+      className="flex w-full items-center justify-between gap-4 px-3.5 py-2.5 text-left transition-colors hover:bg-accent/60 disabled:opacity-50"
     >
       <span className="text-xs">{label}</span>
       <span
         className={`relative inline-flex h-5 w-9 shrink-0 items-center rounded-full transition-colors ${
-          checked ? "bg-foreground" : "bg-border"
+          checked ? "bg-brand" : "bg-border"
         }`}
       >
         <span
@@ -1177,8 +1518,6 @@ function PrivacyDetails() {
 // About Tab
 // ═══════════════════════════════════════════════════════════════════════
 
-type UpdateCheckStatus = "idle" | "checking" | "available" | "downloading" | "up-to-date" | "error";
-
 const ABOUT_LINKS = [
   { name: "Paralov", url: appLink("https://paralov.com", "about"), icon: Building2 },
   { name: "Studs.gg", url: appLink("https://studs.gg", "about"), icon: Globe },
@@ -1187,45 +1526,17 @@ const ABOUT_LINKS = [
 ];
 
 function AboutTab({ appVersion }: { appVersion: string | null }) {
-  const [updateStatus, setUpdateStatus] = useState<UpdateCheckStatus>("idle");
-  const [updateVersion, setUpdateVersion] = useState<string | null>(null);
-  const [updateError, setUpdateError] = useState<string | null>(null);
-
-  // Hold on to the Update handle so we can download it later
-  const updateRef = useRef<UpdateInfo | null>(null);
-
-  async function handleCheckForUpdates() {
-    setUpdateStatus("checking");
-    setUpdateError(null);
-    setUpdateVersion(null);
-    try {
-      const update = await desktop.checkForUpdate();
-      if (!update) {
-        setUpdateStatus("up-to-date");
-        return;
-      }
-      updateRef.current = update;
-      setUpdateVersion(update.version);
-      setUpdateStatus("available");
-    } catch (err) {
-      console.error("[about] Failed to check for updates:", err);
-      setUpdateError(err instanceof Error ? err.message : "Could not reach update server");
-      setUpdateStatus("error");
-    }
-  }
-
-  async function handleInstall() {
-    const update = updateRef.current;
-    if (!update) return;
-    try {
-      setUpdateStatus("downloading");
-      await desktop.installUpdate();
-    } catch (err) {
-      console.error("[about] Failed to install update:", err);
-      setUpdateError(err instanceof Error ? err.message : "Installation failed");
-      setUpdateStatus("error");
-    }
-  }
+  const {
+    result,
+    update,
+    checking,
+    downloading,
+    checkError,
+    installError,
+    checkForUpdates,
+    installUpdate,
+  } = useUpdater();
+  const updateError = downloading ? undefined : (checkError ?? (update ? installError : undefined));
 
   return (
     <div className="mx-auto w-full max-w-md px-4 py-6 @xl:px-6 @xl:py-8">
@@ -1241,103 +1552,65 @@ function AboutTab({ appVersion }: { appVersion: string | null }) {
                 BloxBot{appVersion && <span> v{appVersion}</span>}
               </span>
             </div>
-            {updateStatus === "idle" && (
+            {!downloading && result?.status !== "unsupported" && (
               <button
-                onClick={handleCheckForUpdates}
-                className="flex items-center gap-1.5 rounded-md bg-secondary px-2.5 py-1 text-xs font-medium transition-colors hover:bg-accent"
+                type="button"
+                onClick={checkForUpdates}
+                disabled={checking}
+                aria-busy={checking}
+                className="flex items-center gap-1.5 rounded-md bg-secondary px-2.5 py-1 text-xs font-medium transition-colors hover:bg-accent disabled:opacity-60"
               >
-                <svg
-                  width="11"
-                  height="11"
-                  viewBox="0 0 24 24"
-                  fill="none"
-                  stroke="currentColor"
-                  strokeWidth="2"
-                  strokeLinecap="round"
-                  strokeLinejoin="round"
-                >
-                  <polyline points="23 4 23 10 17 10" />
-                  <path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10" />
-                </svg>
-                Check for updates
+                <RefreshCw
+                  size={11}
+                  className={checking ? "motion-safe:animate-spin" : undefined}
+                  aria-hidden="true"
+                />
+                {checking ? "Checking..." : "Check for updates"}
               </button>
             )}
-            {updateStatus === "checking" && (
-              <span className="flex items-center gap-1.5 text-xs text-muted-foreground">
-                <svg
-                  className="h-3 w-3 animate-spin"
-                  viewBox="0 0 24 24"
-                  fill="none"
-                  stroke="currentColor"
-                  strokeWidth="2"
-                >
-                  <path d="M12 2a10 10 0 0 1 10 10" strokeLinecap="round" />
-                </svg>
-                Checking...
-              </span>
-            )}
-            {updateStatus === "up-to-date" && (
-              <span className="flex items-center gap-1.5 text-xs text-emerald-600">
-                <svg
-                  width="11"
-                  height="11"
-                  viewBox="0 0 24 24"
-                  fill="none"
-                  stroke="currentColor"
-                  strokeWidth="2"
-                  strokeLinecap="round"
-                  strokeLinejoin="round"
-                >
-                  <polyline points="20 6 9 17 4 12" />
-                </svg>
-                Up to date
-              </span>
-            )}
-            {updateStatus === "downloading" && (
-              <span className="flex items-center gap-1.5 text-xs text-muted-foreground">
-                <svg
-                  className="h-3 w-3 animate-spin"
-                  viewBox="0 0 24 24"
-                  fill="none"
-                  stroke="currentColor"
-                  strokeWidth="2"
-                >
-                  <path d="M12 2a10 10 0 0 1 10 10" strokeLinecap="round" />
-                </svg>
+            {downloading && (
+              <output className="flex items-center gap-1.5 text-xs text-muted-foreground">
+                <LoaderCircle size={12} className="motion-safe:animate-spin" aria-hidden="true" />
                 Installing...
-              </span>
+              </output>
             )}
           </div>
 
-          {/* Update available */}
-          {updateStatus === "available" && updateVersion && (
+          {result?.status === "up-to-date" && !checkError && (
+            <output className="mt-2 block text-xs text-emerald-700 dark:text-emerald-400">
+              Up to date. Latest release v{result.version}.
+            </output>
+          )}
+          {result?.status === "no-releases" && !checkError && (
+            <output className="mt-2 block text-xs text-muted-foreground">
+              No stable BloxBot releases have been published yet.
+            </output>
+          )}
+          {result?.status === "unsupported" && (
+            <output className="mt-2 block text-xs text-muted-foreground">
+              Update checks are available in installed BloxBot builds.
+            </output>
+          )}
+          {update && !downloading && (
             <div className="mt-3 flex items-center justify-between rounded-md border px-3 py-2">
               <span className="text-xs">
-                <span className="font-medium">v{updateVersion}</span>{" "}
+                <span className="font-medium">v{update.version}</span>{" "}
                 <span className="text-muted-foreground">is available</span>
               </span>
               <button
-                onClick={handleInstall}
+                type="button"
+                onClick={installUpdate}
                 className="rounded-md bg-foreground px-3 py-1 text-xs font-medium text-background transition-opacity hover:opacity-90"
               >
-                Install & Restart
+                {installError ? "Retry install" : "Install & Restart"}
               </button>
             </div>
           )}
 
-          {/* Error */}
-          {updateStatus === "error" && updateError && (
-            <div className="mt-3">
-              <p className="rounded-md bg-red-50 px-2 py-1 text-xs text-red-600 dark:bg-red-950/40 dark:text-red-400">
-                {updateError}
-              </p>
-              <button
-                onClick={handleCheckForUpdates}
-                className="mt-2 text-xs text-muted-foreground underline hover:text-foreground"
-              >
-                Try again
-              </button>
-            </div>
+          {updateError && (
+            <output className="mt-3 block rounded-md bg-red-50 px-2 py-1 text-xs text-red-600 dark:bg-red-950/40 dark:text-red-400">
+              {updateError}
+            </output>
           )}
         </div>
       </div>

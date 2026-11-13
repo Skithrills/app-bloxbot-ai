@@ -10,6 +10,7 @@ import {
 import { useSetApiKey } from "@/hooks/mutations/useSetApiKey";
 import { useAuthMethods, useConnectedProviders } from "@/hooks/useProviders";
 import { desktop } from "@/lib/desktop";
+import { OPENAI_API_PROVIDER } from "@/lib/openAiProfiles";
 import { OPENCODE_GO } from "@/lib/opencodeGo";
 import {
   type AuthMethodOption,
@@ -316,7 +317,7 @@ function ProviderConnectDialog({ provider, onClose, onConnected }: ProviderConne
     if (options.length === 1) choose(options[0]);
   }, []);
 
-  const meta = PROVIDER_META[provider.id];
+  const meta = PROVIDER_META[provider.id === OPENAI_API_PROVIDER ? "openai" : provider.id];
   const canGoBack = options.length > 1 && state.step !== "methods";
 
   return (
@@ -367,6 +368,11 @@ function ProviderConnectDialog({ provider, onClose, onConnected }: ProviderConne
 
         {state.step === "methods" && (
           <div className="mt-4 space-y-1.5">
+            {options.length === 0 && (
+              <p className="text-xs text-muted-foreground">
+                OpenCode hasn’t loaded the ChatGPT sign-in methods yet.
+              </p>
+            )}
             {options.map((option) => (
               <button
                 key={option.index}

@@ -1,11 +1,12 @@
 import { useRef } from "react";
 
+import { useRestoreAudioVisualizer } from "@/components/AudioVisualizer";
 import Chat from "@/components/Chat";
 import ErrorBoundary from "@/components/ErrorBoundary";
 import { ThemeProvider } from "@/components/theme-provider";
+import { UpdateButton } from "@/components/UpdateButton";
 import { Toaster } from "@/components/ui/sonner";
 import { useStarCalloutForReturningUsers } from "@/hooks/useStarCalloutForReturningUsers";
-import { useUpdater } from "@/hooks/useUpdater";
 import { ActiveSessionProvider } from "@/providers/ActiveSessionProvider";
 import { ExplorerReferenceProvider } from "@/providers/ExplorerReferenceProvider";
 import { OpenCodeClientProvider } from "@/providers/OpenCodeClientProvider";
@@ -14,7 +15,7 @@ import { QueryProvider } from "@/providers/QueryProvider";
 import { StudioTargetProvider } from "@/providers/StudioTargetProvider";
 
 function AppInner() {
-  useUpdater();
+  useRestoreAudioVisualizer();
   useStarCalloutForReturningUsers();
 
   return (
@@ -22,7 +23,9 @@ function AppInner() {
       <div
         id="titlebar-actions"
         className="app-titlebar flex h-9 shrink-0 items-center justify-end gap-1 bg-sidebar px-2"
-      />
+      >
+        <UpdateButton />
+      </div>
       <ErrorBoundary>
         <Chat />
       </ErrorBoundary>

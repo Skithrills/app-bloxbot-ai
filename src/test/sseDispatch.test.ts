@@ -212,6 +212,73 @@ describe("sseDispatch", () => {
 
   // ── Message events ─────────────────────────────────────────────────
 
+  it("streams child text and errors only into the current thread's child transcript", () => {
+    qc.setQueryData(qk.sessions, [
+      makeSession("root", "Main"),
+      { ...makeSession("child", "Planner"), parentID: "root" },
+      { ...makeSession("nested", "UI Builder"), parentID: "child" },
+      { ...makeSession("other", "Other planner"), parentID: "another-root" },
+    ]);
+    for (const sessionID of ["root", "nested", "other"]) {
+      dispatch(
+        qc,
+        {
+          type: "message.updated",
+          properties: {
+            sessionID,
+            info: {
+              id: "same-id",
+              sessionID,
+              role: "user",
+              time: { created: 1 },
+              agent: "planner",
+              model: { providerID: "", modelID: "" },
+            },
+          },
+        },
+        "root",
+      );
+      dispatch(
+        qc,
+        {
+          type: "message.part.updated",
+          properties: {
+            sessionID,
+            time: 1,
+            part: { id: "part", sessionID, messageID: "same-id", type: "text", text: sessionID },
+          },
+        },
+        "root",
+      );
+    }
+    dispatch(
+      qc,
+      {
+        type: "message.part.delta",
+        properties: {
+          sessionID: "nested",
+          messageID: "same-id",
+          partID: "part",
+          field: "text",
+          delta: " reply",
+        },
+      },
+      "root",
+    );
+    const error = { name: "UnknownError" as const, data: { message: "Child failed" } };
+    dispatch(qc, { type: "session.error", properties: { sessionID: "nested", error } }, "root");
+
+    expect(
+      qc.getQueryData<MessagesCache>(qk.messages("root"))?.messagesById["same-id"]?.parts,
+    ).toMatchObject([{ text: "root" }]);
+    expect(
+      qc.getQueryData<MessagesCache>(qk.messages("nested"))?.messagesById["same-id"]?.parts,
+    ).toMatchObject([{ text: "nested reply" }]);
+    expect(qc.getQueryData(qk.messages("other"))).toBeUndefined();
+    expect(qc.getQueryData(qk.sessionError("nested"))).toEqual(error);
+    expect(qc.getQueryData(qk.sessionError("root"))).toBeUndefined();
+  });
+
   describe("message.updated", () => {
     it("adds a new message to the cache", () => {
       qc.setQueryData<MessagesCache>(qk.messages("s1"), { messageIds: [], messagesById: {} });

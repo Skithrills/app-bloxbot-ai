@@ -1,4 +1,4 @@
-import { useQuery } from "@tanstack/react-query";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   createContext,
   type ReactNode,
@@ -9,9 +9,10 @@ import {
   useState,
 } from "react";
 
-import { loadConfig, patchConfig } from "@/lib/config";
+import { type AppConfig, loadConfig, patchConfig } from "@/lib/config";
+import { notify } from "@/lib/notifications";
 import { qk } from "@/lib/queryKeys";
-import type { ThemePreference } from "@/types/desktop";
+import { type AccentColor, DEFAULT_ACCENT_COLOR, type ThemePreference } from "@/types/desktop";
 
 export type Theme = ThemePreference;
 export type ResolvedTheme = "light" | "dark";
@@ -20,6 +21,18 @@ export const THEME_OPTIONS: ReadonlyArray<{ value: Theme; label: string }> = [
   { value: "light", label: "Light" },
   { value: "dark", label: "Dark" },
   { value: "system", label: "System" },
+];
+
+/** The colours themselves live in index.css under `[data-accent]`. */
+export const ACCENT_OPTIONS: ReadonlyArray<{ value: AccentColor; label: string }> = [
+  { value: "blue", label: "Blue" },
+  { value: "violet", label: "Violet" },
+  { value: "pink", label: "Pink" },
+  { value: "red", label: "Red" },
+  { value: "orange", label: "Orange" },
+  { value: "amber", label: "Amber" },
+  { value: "green", label: "Green" },
+  { value: "teal", label: "Teal" },
 ];
 
 type ThemeProviderProps = {
@@ -31,6 +44,8 @@ type ThemeProviderState = {
   theme: Theme;
   resolvedTheme: ResolvedTheme;
   setTheme: (theme: Theme) => void;
+  accent: AccentColor;
+  setAccent: (accent: AccentColor) => void;
 };
 
 const ThemeProviderContext = createContext<ThemeProviderState | undefined>(undefined);
@@ -76,15 +91,41 @@ export function ThemeProvider({ children, defaultTheme = "system" }: ThemeProvid
     queryFn: loadConfig,
   });
 
+  const queryClient = useQueryClient();
   const [theme, setThemeState] = useState<Theme>(defaultTheme);
   const [resolvedTheme, setResolvedTheme] = useState<ResolvedTheme>(() =>
     resolveTheme(defaultTheme),
   );
+  // Follows the saved config, which setAccent updates before the file is written.
+  const accent = configData?.accentColor ?? DEFAULT_ACCENT_COLOR;
 
   useEffect(() => {
     if (!configData) return;
     setThemeState(configData.theme);
   }, [configData]);
+
+  useEffect(() => {
+    window.document.documentElement.dataset.accent = accent;
+  }, [accent]);
+
+  const setAccent = useCallback(
+    (next: AccentColor) => {
+      const previous = queryClient.getQueryData<AppConfig>(qk.config)?.accentColor;
+      const show = (accentColor: AccentColor) =>
+        queryClient.setQueryData<AppConfig>(qk.config, (config) =>
+          config ? { ...config, accentColor } : config,
+        );
+      show(next);
+      patchConfig({ accentColor: next }).catch(() => {
+        // Only undo our own choice: a later pick may already have replaced it.
+        if (previous && queryClient.getQueryData<AppConfig>(qk.config)?.accentColor === next) {
+          show(previous);
+        }
+        notify.error("Couldn't save the accent colour");
+      });
+    },
+    [queryClient],
+  );
 
   useEffect(() => {
     const sync = () => setResolvedTheme(applyTheme(theme));
@@ -94,15 +135,22 @@ export function ThemeProvider({ children, defaultTheme = "system" }: ThemeProvid
     return subscribePrefersColorScheme(sync);
   }, [theme]);
 
-  const setTheme = useCallback((next: Theme) => {
-    setThemeState(next);
-    setResolvedTheme(applyTheme(next));
-    patchConfig({ theme: next }).catch(() => {});
-  }, []);
+  const setTheme = useCallback(
+    (next: Theme) => {
+      setThemeState(next);
+      setResolvedTheme(applyTheme(next));
+      // Keep the cached config in step, or the next setting saved would bring the old theme back.
+      queryClient.setQueryData<AppConfig>(qk.config, (config) =>
+        config ? { ...config, theme: next } : config,
+      );
+      patchConfig({ theme: next }).catch(() => {});
+    },
+    [queryClient],
+  );
 
   const value = useMemo(
-    () => ({ theme, resolvedTheme, setTheme }),
-    [theme, resolvedTheme, setTheme],
+    () => ({ theme, resolvedTheme, setTheme, accent, setAccent }),
+    [theme, resolvedTheme, setTheme, accent, setAccent],
   );
 
   return <ThemeProviderContext.Provider value={value}>{children}</ThemeProviderContext.Provider>;
@@ -114,4 +162,8 @@ export function useTheme() {
     throw new Error("useTheme must be used within a ThemeProvider");
   }
   return context;
+}
+
+export function useResolvedTheme(): ResolvedTheme {
+  return useContext(ThemeProviderContext)?.resolvedTheme ?? "light";
 }

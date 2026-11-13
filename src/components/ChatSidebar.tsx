@@ -1,17 +1,38 @@
+import { useMutation, useQueryClient } from "@tanstack/react-query";
+import {
+  ChevronRight,
+  Ellipsis,
+  Folder,
+  FolderOpen,
+  FolderPlus,
+  Plus,
+  Settings2,
+} from "lucide-react";
 import posthog from "posthog-js/dist/module.full.no-external.js";
 import { type MouseEvent, memo, useEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
+import { ProjectFolderDialog } from "@/components/ProjectFolderDialog";
 import { MENU_ITEM, MENU_SURFACE } from "@/components/ui/menu";
 import { useArchiveSession } from "@/hooks/mutations/useArchiveSession";
 import { useCreateSession } from "@/hooks/mutations/useCreateSession";
 import { useDeleteSession } from "@/hooks/mutations/useDeleteSession";
 import { useRenameSession } from "@/hooks/mutations/useRenameSession";
 import { useUnarchiveSession } from "@/hooks/mutations/useUnarchiveSession";
+import {
+  findProjectFolder,
+  useProjectFolders,
+  useSaveProjectFolders,
+} from "@/hooks/useProjectFolders";
 import { useSessionStatuses } from "@/hooks/useSessionStatuses";
 import { useSessions } from "@/hooks/useSessions";
 import { analyticsProperties, countBucket } from "@/lib/analytics";
+import { desktop } from "@/lib/desktop";
+import { notify } from "@/lib/notifications";
 import type { Session } from "@/lib/opencode/types";
+import { qk } from "@/lib/queryKeys";
 import { useActiveSession } from "@/providers/ActiveSessionProvider";
+import { useOpenCodeClient } from "@/providers/OpenCodeClientProvider";
+import type { ProjectFolder } from "@/types/desktop";
 
 interface ChatSidebarProps {
   collapsed: boolean;
@@ -41,6 +62,9 @@ function statusDot(status?: { type: string }): string {
   return status?.type === "busy" ? "bg-[var(--running)] animate-pulse" : "hidden";
 }
 
+const folderButtonClass =
+  "flex h-6 w-6 shrink-0 items-center justify-center rounded text-muted-foreground transition-colors hover:bg-accent hover:text-foreground disabled:opacity-40";
+
 const ChatSidebar = memo(function ChatSidebar({
   collapsed,
   onToggle,
@@ -55,14 +79,38 @@ const ChatSidebar = memo(function ChatSidebar({
   const deleteSession = useDeleteSession();
   const renameSession = useRenameSession();
   const unarchiveSession = useUnarchiveSession();
+  const folders = useProjectFolders();
+  const saveFolders = useSaveProjectFolders();
+  const { client } = useOpenCodeClient();
+  const queryClient = useQueryClient();
+  const moveSession = useMutation({
+    mutationFn: async ({ sessionID, directory }: { sessionID: string; directory?: string }) => {
+      if (!client) throw new Error("No client");
+      const { data } = await client.session.move({ sessionID, directory }, { throwOnError: true });
+      return data;
+    },
+    onSuccess: (session) => {
+      queryClient.setQueryData<Session[]>(qk.sessions, (current) =>
+        current?.map((item) => (item.id === session.id ? session : item)),
+      );
+    },
+    onError: () => notify.error("Couldn't move the chat."),
+  });
 
   const [editingId, setEditingId] = useState<string | null>(null);
   const [editValue, setEditValue] = useState("");
   const [snoozedExpanded, setSnoozedExpanded] = useState(false);
+  const [folderEditor, setFolderEditor] = useState<{
+    folder: ProjectFolder;
+    isNew: boolean;
+  } | null>(null);
+  const [collapsedFolders, setCollapsedFolders] = useState<ReadonlySet<string>>(new Set());
+  const [choosingFolder, setChoosingFolder] = useState(false);
   const [contextMenu, setContextMenu] = useState<{
     session: Session;
     x: number;
     y: number;
+    trigger?: HTMLElement;
   } | null>(null);
   const [deleteTarget, setDeleteTarget] = useState<Session | null>(null);
   const [transitioningSessionId, setTransitioningSessionId] = useState<string | null>(null);
@@ -74,19 +122,65 @@ const ChatSidebar = memo(function ChatSidebar({
     const active: Session[] = [];
     const snoozed: Session[] = [];
     for (const session of sessions) {
+      if (session.parentID) continue;
       (session.time.archived ? snoozed : active).push(session);
     }
     return { activeSessions: active, snoozedSessions: snoozed };
   }, [sessions]);
+
+  const groupedSessions = useMemo(() => {
+    const groups = new Map<string | undefined, Session[]>();
+    for (const session of activeSessions) {
+      const directory = findProjectFolder(folders, session.directory)?.directory;
+      const group = groups.get(directory);
+      if (group) group.push(session);
+      else groups.set(directory, [session]);
+    }
+    return groups;
+  }, [activeSessions, folders]);
+
+  function toggleFolder(directory: string) {
+    setCollapsedFolders((current) => {
+      const next = new Set(current);
+      if (next.has(directory)) next.delete(directory);
+      else next.add(directory);
+      return next;
+    });
+  }
 
   function handleSelect(id: string) {
     onSessionSelect();
     selectSession(id);
   }
 
-  function handleCreate() {
+  function handleCreate(directory?: string | null) {
     onSessionSelect();
-    createSession.mutate();
+    if (directory) {
+      setCollapsedFolders((current) => {
+        const next = new Set(current);
+        next.delete(directory);
+        return next;
+      });
+    }
+    createSession.mutate(directory);
+  }
+
+  async function chooseFolder() {
+    setChoosingFolder(true);
+    try {
+      const directory = await desktop.chooseProjectFolder();
+      if (!directory) return;
+      const existing = findProjectFolder(folders, directory);
+      const name = (directory.split(/[\\/]/).filter(Boolean).pop() ?? directory).slice(0, 128);
+      setFolderEditor({
+        folder: existing ?? { directory, name, studio: null },
+        isNew: !existing,
+      });
+    } catch {
+      notify.error("Couldn't open the project folder picker.");
+    } finally {
+      setChoosingFolder(false);
+    }
   }
 
   useEffect(() => {
@@ -99,11 +193,19 @@ const ChatSidebar = memo(function ChatSidebar({
   useEffect(() => {
     if (!contextMenu) return;
     const close = () => setContextMenu(null);
+    const closeWithEscape = (event: KeyboardEvent) => {
+      if (event.key !== "Escape") return;
+      close();
+      contextMenu.trigger?.focus();
+    };
     window.addEventListener("pointerdown", close);
     window.addEventListener("blur", close);
+    window.addEventListener("keydown", closeWithEscape);
+    document.querySelector<HTMLElement>("#chat-actions button:not(:disabled)")?.focus();
     return () => {
       window.removeEventListener("pointerdown", close);
       window.removeEventListener("blur", close);
+      window.removeEventListener("keydown", closeWithEscape);
     };
   }, [contextMenu]);
 
@@ -166,10 +268,14 @@ const ChatSidebar = memo(function ChatSidebar({
 
   function openContextMenu(event: MouseEvent, session: Session) {
     event.preventDefault();
+    const trigger =
+      event.currentTarget instanceof HTMLButtonElement ? event.currentTarget : undefined;
+    const position = trigger && event.type === "click" ? trigger.getBoundingClientRect() : null;
     setContextMenu({
       session,
-      x: Math.min(event.clientX, window.innerWidth - 176),
-      y: Math.min(event.clientY, window.innerHeight - 52),
+      x: Math.max(0, Math.min(position?.right ?? event.clientX, window.innerWidth - 224)),
+      y: Math.max(0, Math.min(position?.bottom ?? event.clientY, window.innerHeight - 240)),
+      trigger,
     });
   }
 
@@ -210,12 +316,148 @@ const ChatSidebar = memo(function ChatSidebar({
     setDeleteTarget(null);
   }
 
+  function renderChat(session: Session, index: number) {
+    const isActive = session.id === activeSessionId;
+    const isEditing = session.id === editingId;
+    const status = sessionStatuses[session.id];
+
+    return (
+      <div
+        key={session.id}
+        className={
+          transitioningSessionId === session.id ? "animate-slide-out-left" : "animate-slide-in-left"
+        }
+        style={{ animationDelay: `${index * 30}ms` }}
+      >
+        <div
+          onContextMenu={(event) => openContextMenu(event, session)}
+          className={`group relative mx-1 rounded-md transition-colors duration-150 ${
+            isActive
+              ? "bg-accent text-foreground"
+              : "text-muted-foreground hover:bg-accent/50 hover:text-foreground"
+          }`}
+        >
+          {isEditing ? (
+            <div className="flex items-start gap-2 px-2 py-1.5">
+              <div
+                className={`mt-[7px] h-1.5 w-1.5 shrink-0 rounded-full transition-colors duration-300 ${statusDot(status)}`}
+              />
+              <div className="min-w-0 flex-1">
+                <input
+                  ref={editRef}
+                  value={editValue}
+                  onChange={(e) => setEditValue(e.target.value)}
+                  onBlur={commitRename}
+                  onKeyDown={(e) => {
+                    if (e.key === "Enter") commitRename();
+                    if (e.key === "Escape") setEditingId(null);
+                  }}
+                  className="w-full rounded bg-transparent px-1 text-sm outline-none ring-1 ring-ring"
+                />
+                <div className="mt-0.5 text-xs text-muted-foreground">
+                  {formatTime(session.time.updated)}
+                </div>
+              </div>
+            </div>
+          ) : (
+            <button
+              type="button"
+              aria-current={isActive ? "page" : undefined}
+              className="flex w-full items-start gap-2 rounded-md px-2 py-1.5 text-left"
+              onClick={() => handleSelect(session.id)}
+            >
+              <div
+                className={`mt-[7px] h-1.5 w-1.5 shrink-0 rounded-full transition-colors duration-300 ${statusDot(status)}`}
+              />
+              <div className="min-w-0 flex-1">
+                <div
+                  className="truncate text-sm leading-snug group-focus-within:pr-20 group-hover:pr-20"
+                  title={session.title || undefined}
+                >
+                  {session.title || "Untitled"}
+                </div>
+                <div className="mt-0.5 text-xs text-muted-foreground">
+                  {formatTime(session.time.updated)}
+                </div>
+              </div>
+            </button>
+          )}
+
+          {!isEditing && (
+            <div
+              className={`absolute inset-y-0 right-0 flex items-center gap-0.5 rounded-r-md pl-4 pr-1.5 opacity-0 transition-opacity duration-150 group-focus-within:opacity-100 group-hover:opacity-100 ${
+                isActive
+                  ? "bg-gradient-to-l from-accent from-60% to-transparent"
+                  : "bg-gradient-to-l from-card from-60% to-transparent group-hover:from-accent/50"
+              }`}
+            >
+              <button
+                type="button"
+                onClick={(e) => {
+                  e.stopPropagation();
+                  startRename(session);
+                }}
+                className="flex h-5 w-5 items-center justify-center rounded text-muted-foreground transition-colors hover:text-foreground"
+                title="Rename"
+              >
+                <svg
+                  width="10"
+                  height="10"
+                  viewBox="0 0 24 24"
+                  fill="none"
+                  stroke="currentColor"
+                  strokeWidth="2"
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                >
+                  <path d="M17 3a2.828 2.828 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5L17 3z" />
+                </svg>
+              </button>
+              <button
+                type="button"
+                onClick={(e) => {
+                  e.stopPropagation();
+                  handleSnooze(session.id);
+                }}
+                disabled={status !== undefined && status.type !== "idle"}
+                className="flex h-5 w-5 items-center justify-center rounded text-muted-foreground transition-colors hover:text-foreground disabled:cursor-not-allowed disabled:opacity-35"
+                title={status && status.type !== "idle" ? "Wait for session to finish" : "Snooze"}
+              >
+                <svg
+                  width="10"
+                  height="10"
+                  viewBox="0 0 24 24"
+                  fill="none"
+                  stroke="currentColor"
+                  strokeWidth="2"
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                >
+                  <path d="M3 7h18" />
+                  <path d="M5 7l1 13h12l1-13" />
+                  <path d="M9 11h6" />
+                  <path d="M8 4h8l1 3H7l1-3z" />
+                </svg>
+              </button>
+
+              <button
+                type="button"
+                title="Chat actions"
+                aria-haspopup="menu"
+                onClick={(event) => openContextMenu(event, session)}
+                className="flex h-5 w-5 items-center justify-center rounded text-muted-foreground transition-colors hover:text-foreground"
+              >
+                <Ellipsis size={13} aria-hidden="true" />
+              </button>
+            </div>
+          )}
+        </div>
+      </div>
+    );
+  }
+
   return (
-    <div
-      className={`flex shrink-0 flex-col bg-sidebar transition-[width] duration-200 ease-out ${
-        collapsed ? "w-10" : "w-56"
-      }`}
-    >
+    <div id="chat-sidebar" className="flex w-full min-w-0 shrink-0 flex-col bg-sidebar">
       {collapsed ? (
         <div className="flex flex-1 flex-col items-center justify-between py-2">
           <div className="flex flex-col items-center">
@@ -238,7 +480,8 @@ const ChatSidebar = memo(function ChatSidebar({
               </svg>
             </button>
             <button
-              onClick={handleCreate}
+              onClick={() => handleCreate()}
+              disabled={createSession.isPending}
               className="mt-2 flex h-7 w-7 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-accent hover:text-foreground"
               title="New chat"
             >
@@ -283,7 +526,8 @@ const ChatSidebar = memo(function ChatSidebar({
             <span className="text-sm font-medium text-muted-foreground">Chats</span>
             <div className="flex items-center gap-0.5">
               <button
-                onClick={handleCreate}
+                onClick={() => handleCreate(null)}
+                disabled={createSession.isPending}
                 className="flex h-6 w-6 items-center justify-center rounded text-muted-foreground transition-colors hover:bg-accent hover:text-foreground"
                 title="New chat"
               >
@@ -300,6 +544,15 @@ const ChatSidebar = memo(function ChatSidebar({
                   <line x1="12" y1="5" x2="12" y2="19" />
                   <line x1="5" y1="12" x2="19" y2="12" />
                 </svg>
+              </button>
+              <button
+                type="button"
+                onClick={chooseFolder}
+                disabled={choosingFolder}
+                className={folderButtonClass}
+                title="Add project folder"
+              >
+                <FolderPlus size={15} aria-hidden="true" />
               </button>
               <button
                 onClick={onToggle}
@@ -323,148 +576,65 @@ const ChatSidebar = memo(function ChatSidebar({
           </div>
 
           <div className="flex-1 overflow-y-auto overflow-x-hidden py-1">
-            {activeSessions.length === 0 && snoozedSessions.length === 0 && (
-              <div className="animate-fade-in px-3 py-6 text-center text-xs text-muted-foreground">
-                No sessions yet.
-                <br />
-                Start a new one to begin.
-              </div>
-            )}
-            {activeSessions.map((session, index) => {
-              const isActive = session.id === activeSessionId;
-              const isEditing = session.id === editingId;
-              const status = sessionStatuses[session.id];
-
-              return (
-                <div
-                  key={session.id}
-                  className={
-                    transitioningSessionId === session.id
-                      ? "animate-slide-out-left"
-                      : "animate-slide-in-left"
-                  }
-                  style={{ animationDelay: `${index * 30}ms` }}
-                >
-                  <div
-                    onContextMenu={(event) => openContextMenu(event, session)}
-                    className={`group relative mx-1 rounded-md transition-colors duration-150 ${
-                      isActive
-                        ? "bg-accent text-foreground"
-                        : "text-muted-foreground hover:bg-accent/50 hover:text-foreground"
-                    }`}
-                  >
-                    {isEditing ? (
-                      <div className="flex items-start gap-2 px-2 py-1.5">
-                        <div
-                          className={`mt-[7px] h-1.5 w-1.5 shrink-0 rounded-full transition-colors duration-300 ${statusDot(status)}`}
-                        />
-                        <div className="min-w-0 flex-1">
-                          <input
-                            ref={editRef}
-                            value={editValue}
-                            onChange={(e) => setEditValue(e.target.value)}
-                            onBlur={commitRename}
-                            onKeyDown={(e) => {
-                              if (e.key === "Enter") commitRename();
-                              if (e.key === "Escape") setEditingId(null);
-                            }}
-                            className="w-full rounded bg-transparent px-1 text-sm outline-none ring-1 ring-ring"
-                          />
-                          <div className="mt-0.5 text-xs text-muted-foreground">
-                            {formatTime(session.time.updated)}
-                          </div>
-                        </div>
-                      </div>
-                    ) : (
-                      <button
-                        type="button"
-                        aria-current={isActive ? "page" : undefined}
-                        className="flex w-full items-start gap-2 rounded-md px-2 py-1.5 text-left"
-                        onClick={() => handleSelect(session.id)}
-                      >
-                        <div
-                          className={`mt-[7px] h-1.5 w-1.5 shrink-0 rounded-full transition-colors duration-300 ${statusDot(status)}`}
-                        />
-                        <div className="min-w-0 flex-1">
-                          <div
-                            className="truncate text-sm leading-snug group-focus-within:pr-14 group-hover:pr-14"
-                            title={session.title || undefined}
-                          >
-                            {session.title || "Untitled"}
-                          </div>
-                          <div className="mt-0.5 text-xs text-muted-foreground">
-                            {formatTime(session.time.updated)}
-                          </div>
-                        </div>
-                      </button>
-                    )}
-
-                    {!isEditing && (
-                      <div
-                        className={`absolute inset-y-0 right-0 flex items-center gap-0.5 rounded-r-md pl-4 pr-1.5 opacity-0 transition-opacity duration-150 group-focus-within:opacity-100 group-hover:opacity-100 ${
-                          isActive
-                            ? "bg-gradient-to-l from-accent from-60% to-transparent"
-                            : "bg-gradient-to-l from-card from-60% to-transparent group-hover:from-accent/50"
-                        }`}
-                      >
-                        <button
-                          type="button"
-                          onClick={(e) => {
-                            e.stopPropagation();
-                            startRename(session);
-                          }}
-                          className="flex h-5 w-5 items-center justify-center rounded text-muted-foreground transition-colors hover:text-foreground"
-                          title="Rename"
-                        >
-                          <svg
-                            width="10"
-                            height="10"
-                            viewBox="0 0 24 24"
-                            fill="none"
-                            stroke="currentColor"
-                            strokeWidth="2"
-                            strokeLinecap="round"
-                            strokeLinejoin="round"
-                          >
-                            <path d="M17 3a2.828 2.828 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5L17 3z" />
-                          </svg>
-                        </button>
-                        <button
-                          type="button"
-                          onClick={(e) => {
-                            e.stopPropagation();
-                            handleSnooze(session.id);
-                          }}
-                          disabled={status !== undefined && status.type !== "idle"}
-                          className="flex h-5 w-5 items-center justify-center rounded text-muted-foreground transition-colors hover:text-foreground disabled:cursor-not-allowed disabled:opacity-35"
-                          title={
-                            status && status.type !== "idle"
-                              ? "Wait for session to finish"
-                              : "Snooze"
-                          }
-                        >
-                          <svg
-                            width="10"
-                            height="10"
-                            viewBox="0 0 24 24"
-                            fill="none"
-                            stroke="currentColor"
-                            strokeWidth="2"
-                            strokeLinecap="round"
-                            strokeLinejoin="round"
-                          >
-                            <path d="M3 7h18" />
-                            <path d="M5 7l1 13h12l1-13" />
-                            <path d="M9 11h6" />
-                            <path d="M8 4h8l1 3H7l1-3z" />
-                          </svg>
-                        </button>
-                      </div>
-                    )}
-                  </div>
+            {folders.length === 0 &&
+              activeSessions.length === 0 &&
+              snoozedSessions.length === 0 && (
+                <div className="animate-fade-in px-3 py-6 text-center text-xs text-muted-foreground">
+                  No sessions yet.
+                  <br />
+                  Start a new one to begin.
                 </div>
+              )}
+            {folders.map((folder) => {
+              const expanded = !collapsedFolders.has(folder.directory);
+              const matches = groupedSessions.get(folder.directory) ?? [];
+              const FolderIcon = expanded ? FolderOpen : Folder;
+              return (
+                <section key={folder.directory} aria-label={folder.name} className="mb-2">
+                  <div className="flex items-center gap-0.5 px-1">
+                    <button
+                      type="button"
+                      aria-expanded={expanded}
+                      title={folder.directory}
+                      onClick={() => toggleFolder(folder.directory)}
+                      className="flex min-w-0 flex-1 items-center gap-1.5 rounded-md px-1 py-1.5 text-left text-xs font-medium text-muted-foreground hover:bg-accent hover:text-foreground"
+                    >
+                      <ChevronRight
+                        size={12}
+                        aria-hidden="true"
+                        className={expanded ? "shrink-0 rotate-90" : "shrink-0"}
+                      />
+                      <FolderIcon size={14} aria-hidden="true" className="shrink-0" />
+                      <span className="truncate">{folder.name}</span>
+                    </button>
+                    <button
+                      type="button"
+                      title={`New chat in ${folder.name}`}
+                      disabled={createSession.isPending}
+                      onClick={() => handleCreate(folder.directory)}
+                      className={folderButtonClass}
+                    >
+                      <Plus size={14} aria-hidden="true" />
+                    </button>
+                    <button
+                      type="button"
+                      title={`Edit ${folder.name}`}
+                      onClick={() => setFolderEditor({ folder, isNew: false })}
+                      className={folderButtonClass}
+                    >
+                      <Settings2 size={13} aria-hidden="true" />
+                    </button>
+                  </div>
+                  {expanded && matches.length > 0 && (
+                    <div className="ml-4">{matches.map(renderChat)}</div>
+                  )}
+                </section>
               );
             })}
+            {folders.length > 0 && (groupedSessions.get(undefined)?.length ?? 0) > 0 && (
+              <h2 className="px-3 py-1.5 text-xs font-medium text-muted-foreground">Other chats</h2>
+            )}
+            {groupedSessions.get(undefined)?.map(renderChat)}
           </div>
 
           {snoozedSessions.length > 0 && (
@@ -511,6 +681,11 @@ const ChatSidebar = memo(function ChatSidebar({
                         <div className="truncate text-sm leading-snug opacity-80">
                           {session.title || "Untitled"}
                         </div>
+                        {findProjectFolder(folders, session.directory) && (
+                          <div className="truncate text-xs">
+                            {findProjectFolder(folders, session.directory)?.name}
+                          </div>
+                        )}
                       </button>
                       <button
                         type="button"
@@ -562,26 +737,95 @@ const ChatSidebar = memo(function ChatSidebar({
             </button>
           </div>
 
-          {contextMenu && (
-            <div
-              className={`fixed z-[200] w-44 ${MENU_SURFACE}`}
-              style={{ left: contextMenu.x, top: contextMenu.y }}
-              onPointerDown={(event) => event.stopPropagation()}
-              role="menu"
-            >
-              <button
-                type="button"
-                role="menuitem"
-                className={`${MENU_ITEM} text-destructive`}
-                onClick={() => {
-                  const session = contextMenu.session;
-                  setContextMenu(null);
-                  requestDelete(session);
-                }}
+          {contextMenu &&
+            createPortal(
+              <div
+                id="chat-actions"
+                className={`fixed z-[200] max-h-60 w-56 overflow-y-auto ${MENU_SURFACE}`}
+                style={{ left: contextMenu.x, top: contextMenu.y }}
+                onPointerDown={(event) => event.stopPropagation()}
+                role="menu"
               >
-                Delete
-              </button>
-            </div>
+                {folders.length > 0 && (
+                  <>
+                    <div className="px-2 py-1 text-xs text-muted-foreground">Move chat to</div>
+                    {folders.map((folder) => (
+                      <button
+                        key={folder.directory}
+                        type="button"
+                        role="menuitem"
+                        className={MENU_ITEM}
+                        title={folder.directory}
+                        disabled={
+                          moveSession.isPending ||
+                          findProjectFolder(folders, contextMenu.session.directory) === folder ||
+                          sessionStatuses[contextMenu.session.id]?.type === "busy"
+                        }
+                        onClick={() => {
+                          moveSession.mutate({
+                            sessionID: contextMenu.session.id,
+                            directory: folder.directory,
+                          });
+                          setContextMenu(null);
+                        }}
+                      >
+                        <Folder size={14} aria-hidden="true" className="shrink-0" />
+                        <span className="truncate">{folder.name}</span>
+                      </button>
+                    ))}
+                    {findProjectFolder(folders, contextMenu.session.directory) && (
+                      <button
+                        type="button"
+                        role="menuitem"
+                        className={MENU_ITEM}
+                        disabled={
+                          moveSession.isPending ||
+                          sessionStatuses[contextMenu.session.id]?.type === "busy"
+                        }
+                        onClick={() => {
+                          moveSession.mutate({ sessionID: contextMenu.session.id });
+                          setContextMenu(null);
+                        }}
+                      >
+                        Default workspace
+                      </button>
+                    )}
+                  </>
+                )}
+                <button
+                  type="button"
+                  role="menuitem"
+                  className={`${MENU_ITEM} text-destructive`}
+                  onClick={() => {
+                    const session = contextMenu.session;
+                    setContextMenu(null);
+                    requestDelete(session);
+                  }}
+                >
+                  Delete
+                </button>
+              </div>,
+              document.body,
+            )}
+
+          {folderEditor && (
+            <ProjectFolderDialog
+              folder={folderEditor.folder}
+              isNew={folderEditor.isNew}
+              onClose={() => setFolderEditor(null)}
+              onSave={(folder) =>
+                saveFolders.mutateAsync((current) =>
+                  findProjectFolder(current, folder.directory)
+                    ? current.map((item) => (item.directory === folder.directory ? folder : item))
+                    : [...current, folder],
+                )
+              }
+              onRemove={() =>
+                saveFolders.mutateAsync((current) =>
+                  current.filter((item) => item.directory !== folderEditor.folder.directory),
+                )
+              }
+            />
           )}
 
           {deleteTarget &&

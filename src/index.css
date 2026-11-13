@@ -37,6 +37,13 @@
   background-clip: padding-box;
 }
 
+[data-composer-prediction]::after {
+  content: attr(data-composer-prediction) / "";
+  color: var(--muted-foreground);
+  pointer-events: none;
+  user-select: none;
+}
+
 .syntax-token {
   color: var(--syntax-light);
   font: inherit;
@@ -102,6 +109,11 @@
   --color-sidebar-border: var(--sidebar-border);
   --color-sidebar-ring: var(--sidebar-ring);
 
+  /* The user's accent colour. `accent` is already shadcn's hover surface, hence `brand`. */
+  --color-brand: var(--brand);
+  --color-brand-foreground: var(--brand-foreground);
+  --color-brand-text: var(--brand-text);
+
   /* Custom semantic colors */
   --color-success: oklch(0.556 0.16 142);
 }
@@ -109,7 +121,11 @@
 /* ── Stone palette (light only) ──────────────────────────────────── */
 
 :root {
-  --running: #3b6fe8;
+  /* --brand fills, --brand-foreground sits on it, --brand-text is the accent as readable text. */
+  --brand: #3b6fe8;
+  --brand-foreground: #ffffff;
+  --brand-text: #2f5fd3;
+  --running: var(--brand);
   --radius: 0.5rem;
   --background: #ffffff;
   --foreground: #18181b;
@@ -128,26 +144,28 @@
   --destructive: oklch(0.577 0.245 27.325);
   --border: rgb(0 0 0 / 9%);
   --input: rgb(0 0 0 / 14%);
-  --ring: #3b6fe8;
+  --ring: var(--brand);
   --chart-1: oklch(0.646 0.222 41.116);
   --chart-2: oklch(0.6 0.118 184.704);
   --chart-3: oklch(0.398 0.07 227.392);
   --chart-4: oklch(0.828 0.189 84.429);
   --chart-5: oklch(0.769 0.188 70.08);
-  --sidebar: #f6f6f7;
+  --sidebar: color-mix(in oklab, #f6f6f7 97%, var(--brand));
   --sidebar-foreground: #18181b;
   --sidebar-primary: oklch(0.147 0.004 49.25);
   --sidebar-primary-foreground: oklch(0.985 0.001 106.424);
-  --sidebar-accent: #e9e9ec;
+  --sidebar-accent: color-mix(in oklab, #e9e9ec 94%, var(--brand));
   --sidebar-accent-foreground: #18181b;
   --sidebar-border: rgb(0 0 0 / 9%);
-  --sidebar-ring: #3b6fe8;
+  --sidebar-ring: var(--brand);
 }
 
 /* ── Stone palette (dark) ────────────────────────────────────────── */
 
 .dark {
-  --running: #5b8cff;
+  --brand: #5b8cff;
+  --brand-foreground: #0e0e10;
+  --brand-text: #8fb0ff;
   --background: #0e0e10;
   --foreground: #ededef;
   --card: #1a1a1d;
@@ -165,21 +183,43 @@
   --destructive: oklch(0.704 0.191 22.216);
   --border: rgb(255 255 255 / 9%);
   --input: rgb(255 255 255 / 12%);
-  --ring: #5b8cff;
   --chart-1: oklch(0.488 0.243 264.376);
   --chart-2: oklch(0.696 0.17 162.48);
   --chart-3: oklch(0.769 0.188 70.08);
   --chart-4: oklch(0.627 0.265 303.9);
   --chart-5: oklch(0.645 0.246 16.439);
-  --sidebar: #161618;
+  --sidebar: color-mix(in oklab, #161618 97%, var(--brand));
   --sidebar-foreground: #ededef;
   --sidebar-primary: oklch(0.488 0.243 264.376);
   --sidebar-primary-foreground: oklch(0.985 0.001 106.424);
-  --sidebar-accent: #26262a;
+  --sidebar-accent: color-mix(in oklab, #26262a 94%, var(--brand));
   --sidebar-accent-foreground: #ededef;
   --sidebar-border: rgb(255 255 255 / 9%);
-  --sidebar-ring: #5b8cff;
 }
+
+/* ── Accent presets ──────────────────────────────────────────────────
+   Chosen in Settings → Personalisation and set on <html> by ThemeProvider. The
+   picker's swatches carry the same attribute to show a colour that isn't in use.
+   Each light fill keeps 3:1 against white for focus rings and 4.5:1 under its
+   foreground; each text shade keeps 4.5:1 on the page and the sidebar. */
+
+[data-accent="blue"] { --brand: #3b6fe8; --brand-foreground: #ffffff; --brand-text: #2f5fd3; }
+[data-accent="violet"] { --brand: #7c4ee4; --brand-foreground: #ffffff; --brand-text: #6d3fd4; }
+[data-accent="pink"] { --brand: #d6337f; --brand-foreground: #ffffff; --brand-text: #be1f6b; }
+[data-accent="red"] { --brand: #dc3232; --brand-foreground: #ffffff; --brand-text: #c42222; }
+[data-accent="orange"] { --brand: #c94d09; --brand-foreground: #ffffff; --brand-text: #b84a08; }
+[data-accent="amber"] { --brand: #c77f00; --brand-foreground: #1c1917; --brand-text: #9a6500; }
+[data-accent="green"] { --brand: #16823f; --brand-foreground: #ffffff; --brand-text: #15803d; }
+[data-accent="teal"] { --brand: #0b8177; --brand-foreground: #ffffff; --brand-text: #0c7a70; }
+
+.dark[data-accent="blue"], .dark [data-accent="blue"] { --brand: #5b8cff; --brand-foreground: #0e0e10; --brand-text: #8fb0ff; }
+.dark[data-accent="violet"], .dark [data-accent="violet"] { --brand: #9d7cf5; --brand-foreground: #0e0e10; --brand-text: #b9a3fa; }
+.dark[data-accent="pink"], .dark [data-accent="pink"] { --brand: #f066b0; --brand-foreground: #0e0e10; --brand-text: #f58fc6; }
+.dark[data-accent="red"], .dark [data-accent="red"] { --brand: #f26565; --brand-foreground: #0e0e10; --brand-text: #f78c8c; }
+.dark[data-accent="orange"], .dark [data-accent="orange"] { --brand: #fb8b3c; --brand-foreground: #0e0e10; --brand-text: #fca968; }
+.dark[data-accent="amber"], .dark [data-accent="amber"] { --brand: #f5b83a; --brand-foreground: #0e0e10; --brand-text: #f8ca63; }
+.dark[data-accent="green"], .dark [data-accent="green"] { --brand: #45cf82; --brand-foreground: #0e0e10; --brand-text: #74dca1; }
+.dark[data-accent="teal"], .dark [data-accent="teal"] { --brand: #2fd0bd; --brand-foreground: #0e0e10; --brand-text: #63e2d2; }
 
 @layer base {
   * {
@@ -196,11 +236,40 @@
     font-feature-settings: "cv11", "ss03";
     -webkit-font-smoothing: antialiased;
     -moz-osx-font-smoothing: grayscale;
+    caret-color: var(--brand);
+  }
+  ::selection {
+    background: color-mix(in oklab, var(--brand) 30%, transparent);
   }
   /* Full-height app shell */
   html, body, #root {
     height: 100%;
     overflow: hidden;
+  }
+}
+
+/* ── Skeleton placeholders ───────────────────────────────────────── */
+
+.skeleton {
+  --skeleton-base: color-mix(in oklch, var(--foreground) 8%, transparent);
+  --skeleton-shine: color-mix(in oklch, var(--foreground) 15%, transparent);
+  background: var(--skeleton-base);
+}
+
+@keyframes skeleton-sweep {
+  from { background-position: 100% 0; }
+  to   { background-position: -100% 0; }
+}
+
+@media (prefers-reduced-motion: no-preference) {
+  .skeleton {
+    background: linear-gradient(
+      100deg,
+      var(--skeleton-base) 35%,
+      var(--skeleton-shine) 50%,
+      var(--skeleton-base) 65%
+    ) 0 0 / 200% 100%;
+    animation: skeleton-sweep 1.5s linear infinite;
   }
 }
 
@@ -248,12 +317,25 @@
 
 @keyframes side-panel-in {
   from { width: 0; opacity: 0; transform: translateX(18px); }
-  to { width: 18rem; opacity: 1; transform: translateX(0); }
+  to { width: var(--side-panel-width, 18rem); opacity: 1; transform: translateX(0); }
 }
 
 @keyframes side-panel-out {
-  from { width: 18rem; opacity: 1; transform: translateX(0); }
+  from { width: var(--side-panel-width, 18rem); opacity: 1; transform: translateX(0); }
   to { width: 0; opacity: 0; transform: translateX(18px); }
+}
+
+/* Explorer and Context open by growing from the window edge. Their content keeps its full
+   width and is uncovered, so nothing inside reflows on the way. No transform: these panels
+   stay mounted for a long time and a leftover one would re-anchor anything fixed inside. */
+@keyframes panel-grow-in {
+  from { width: 0; opacity: 0; }
+  to { width: var(--side-panel-width, 18rem); opacity: 1; }
+}
+
+@keyframes panel-grow-out {
+  from { width: var(--side-panel-width, 18rem); opacity: 1; }
+  to { width: 0; opacity: 0; }
 }
 
 .animate-fade-in {
@@ -321,6 +403,16 @@
   animation: side-panel-out 180ms ease-in both;
 }
 
+.animate-panel-grow-in {
+  animation: panel-grow-in 220ms cubic-bezier(0.16, 1, 0.3, 1) both;
+}
+
+/* Chat.tsx removes the panel after 180ms, so this must not run longer. */
+.animate-panel-grow-out {
+  pointer-events: none;
+  animation: panel-grow-out 180ms ease-in both;
+}
+
 @media (prefers-reduced-motion: reduce) {
   .animate-picker-in,
   .animate-suggestions-in,
@@ -332,9 +424,8 @@
   .animate-disclosure-collapse,
   .animate-side-panel-in,
   .animate-side-panel-out,
-  .bloxbot-face,
-  .bloxbot-face-think,
-  .bloxbot-eye {
+  .animate-panel-grow-in,
+  .animate-panel-grow-out {
     animation: none;
   }
 }
@@ -393,41 +484,11 @@
   animation: lightbox-slide-right 250ms cubic-bezier(0.16, 1, 0.3, 1) both;
 }
 
-/* ── BloxBot loading face ────────────────────────────────────────── */
-
-@keyframes bloxbot-float {
-  0%, 100% { transform: translateY(0); }
-  50%      { transform: translateY(-4px); }
-}
-
-@keyframes bloxbot-blink {
-  0%, 92%, 100% { transform: scaleY(1); }
-  95%           { transform: scaleY(0.08); }
-}
+/* ── BloxBot loading dots ────────────────────────────────────────── */
 
 @keyframes bloxbot-dot-pulse {
   0%, 100% { opacity: 0.25; }
   50%      { opacity: 0.8; }
-}
-
-/* Gentle side-to-side sway for inline thinking indicator */
-@keyframes bloxbot-think {
-  0%, 100% { transform: translateY(0) rotate(0deg); }
-  25%      { transform: translateY(-1px) rotate(-3deg); }
-  75%      { transform: translateY(-1px) rotate(3deg); }
-}
-
-.bloxbot-face {
-  animation: bloxbot-float 2.5s ease-in-out infinite;
-}
-
-.bloxbot-face-think {
-  animation: bloxbot-think 1.8s ease-in-out infinite;
-}
-
-.bloxbot-eye {
-  transform-origin: center;
-  animation: bloxbot-blink 4s ease-in-out infinite;
 }
 
 .bloxbot-dot {
@@ -918,6 +979,7 @@
   grid-auto-rows: 3px;
   gap: 1.5px;
   flex-shrink: 0;
+  animation: stud-spin 2s cubic-bezier(0.45, 0, 0.25, 1) infinite;
 }
 
 .stud-loader span {
@@ -937,9 +999,22 @@
 .stud-loader span:nth-child(4) { animation-delay: 700ms; }
 .stud-loader span:nth-child(5) { animation: none; opacity: 0.5; }
 
+@keyframes stud-spin {
+  0%, 10% { transform: rotate(0deg); }
+  25%, 35% { transform: rotate(90deg); }
+  50%, 60% { transform: rotate(180deg); }
+  75%, 85% { transform: rotate(270deg); }
+  100% { transform: rotate(360deg); }
+}
+
 @keyframes stud-pulse {
   0%, 24% { opacity: 1; }
   25%, 100% { opacity: 0.16; }
+}
+
+[data-away-from-latest] .stud-loader,
+[data-away-from-latest] .stud-loader span {
+  animation-play-state: paused;
 }
 
 .text-shimmer {
@@ -961,6 +1036,7 @@
 }
 
 @media (prefers-reduced-motion: reduce) {
+  .stud-loader,
   .stud-loader span,
   .text-shimmer {
     animation: none;

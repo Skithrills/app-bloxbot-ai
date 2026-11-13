@@ -7,20 +7,30 @@ import { OnChangePlugin } from "@lexical/react/LexicalOnChangePlugin";
 import { RichTextPlugin } from "@lexical/react/LexicalRichTextPlugin";
 import { LexicalTypeaheadMenuPlugin, MenuOption } from "@lexical/react/LexicalTypeaheadMenuPlugin";
 import {
+  $addUpdateTag,
   $createParagraphNode,
   $createTextNode,
   $getRoot,
   $getSelection,
   $isElementNode,
+  $isLineBreakNode,
+  $isParagraphNode,
   $isRangeSelection,
+  $isTextNode,
+  COMMAND_PRIORITY_BEFORE_EDITOR,
+  COMMAND_PRIORITY_EDITOR,
   DecoratorNode,
   type EditorConfig,
+  HISTORY_PUSH_TAG,
+  KEY_ENTER_COMMAND,
+  KEY_ESCAPE_COMMAND,
+  KEY_TAB_COMMAND,
   type LexicalEditor,
   type NodeKey,
   type SerializedEditorState,
   type SerializedLexicalNode,
 } from "lexical";
-import { type LucideIcon, SquareSlash } from "lucide-react";
+import { SquareSlash } from "lucide-react";
 import posthog from "posthog-js/dist/module.full.no-external.js";
 import {
   type ClipboardEventHandler,
@@ -34,11 +44,14 @@ import {
   useState,
 } from "react";
 import { createPortal } from "react-dom";
-import { iconForClass } from "@/components/Explorer";
 import { ReferenceChip } from "@/components/ReferenceChip";
+import { StudioClassIcon } from "@/components/StudioClassIcon";
 import { MENU_LABEL, MENU_SURFACE } from "@/components/ui/menu";
+import { useComposerPrediction } from "@/hooks/useComposerPrediction";
 import { analyticsProperties } from "@/lib/analytics";
+import { canPredictDraft } from "@/lib/composerPredictions";
 import type { ExplorerNode, ExplorerReference } from "@/lib/explorer";
+import { serializeInstanceReference } from "@/lib/instanceReferences";
 import type { Command } from "@/lib/opencode/types";
 import {
   buildObjectSearchIndex,
@@ -51,19 +64,12 @@ import {
 
 type TokenKind = "object" | "command";
 
-function escapeTagBody(value: string) {
-  return value.replace(/&/g, "&amp;").replace(/</g, "&lt;");
-}
-
-function escapeTagValue(value: string) {
-  return value.replace(/&/g, "&amp;").replace(/"/g, "&quot;");
-}
-
 interface SerializedPromptTokenNode extends SerializedLexicalNode {
   kind: TokenKind;
   label: string;
   value: string;
   field?: ExplorerReference["field"];
+  className?: string;
   type: "prompt-token";
   version: 1;
 }
@@ -72,6 +78,7 @@ class PromptTokenNode extends DecoratorNode<ReactNode> {
   __kind: TokenKind;
   __label: string;
   __value: string;
+  __className: string | undefined;
   /** A property or attribute of the object, when the reference is to one of those. */
   __field: ExplorerReference["field"];
 
@@ -80,7 +87,14 @@ class PromptTokenNode extends DecoratorNode<ReactNode> {
   }
 
   static clone(node: PromptTokenNode) {
-    return new PromptTokenNode(node.__kind, node.__label, node.__value, node.__field, node.__key);
+    return new PromptTokenNode(
+      node.__kind,
+      node.__label,
+      node.__value,
+      node.__field,
+      node.__className,
+      node.__key,
+    );
   }
 
   static importJSON(serializedNode: SerializedLexicalNode & Record<string, unknown>) {
@@ -90,6 +104,7 @@ class PromptTokenNode extends DecoratorNode<ReactNode> {
       serialized.label,
       serialized.value,
       serialized.field,
+      serialized.className,
     );
   }
 
@@ -98,6 +113,7 @@ class PromptTokenNode extends DecoratorNode<ReactNode> {
     label: string,
     value: string,
     field?: ExplorerReference["field"],
+    className?: string,
     key?: NodeKey,
   ) {
     super(key);
@@ -105,6 +121,7 @@ class PromptTokenNode extends DecoratorNode<ReactNode> {
     this.__label = label;
     this.__value = value;
     this.__field = field;
+    this.__className = className;
   }
 
   createDOM(_config: EditorConfig) {
@@ -124,6 +141,7 @@ class PromptTokenNode extends DecoratorNode<ReactNode> {
       label: this.__label,
       value: this.__value,
       field: this.__field,
+      className: this.__className,
       type: "prompt-token",
       version: 1,
     };
@@ -131,10 +149,12 @@ class PromptTokenNode extends DecoratorNode<ReactNode> {
 
   getTextContent() {
     if (this.__kind === "object") {
-      const field = this.__field
-        ? ` ${this.__field.kind}="${escapeTagValue(this.__field.name)}"`
-        : "";
-      return `<Instance reference="${escapeTagValue(this.__value)}"${field}>${escapeTagBody(this.__label)}</Instance>`;
+      return serializeInstanceReference({
+        path: this.__value,
+        label: this.__label,
+        className: this.__className,
+        field: this.__field,
+      });
     }
     return this.__value;
   }
@@ -150,6 +170,7 @@ class PromptTokenNode extends DecoratorNode<ReactNode> {
           label={this.__label}
           path={this.__value}
           fieldKind={this.__field?.kind}
+          studioClassName={this.__className}
           className="select-all"
         />
       );
@@ -170,8 +191,9 @@ function $createPromptTokenNode(
   label: string,
   value: string,
   field?: ExplorerReference["field"],
+  className?: string,
 ) {
-  return new PromptTokenNode(kind, label, value, field);
+  return new PromptTokenNode(kind, label, value, field, className);
 }
 
 class PromptOption extends MenuOption {
@@ -179,7 +201,7 @@ class PromptOption extends MenuOption {
   label: string;
   detail: string;
   value: string;
-  glyph: LucideIcon;
+  className?: string;
 
   constructor(
     key: string,
@@ -187,14 +209,14 @@ class PromptOption extends MenuOption {
     label: string,
     detail: string,
     value: string,
-    glyph: LucideIcon,
+    className?: string,
   ) {
     super(key);
     this.kind = kind;
     this.label = label;
     this.detail = detail;
     this.value = value;
-    this.glyph = glyph;
+    this.className = className;
   }
 }
 
@@ -318,7 +340,7 @@ function TypeaheadPlugin({
             `@${node.name}`,
             node.path,
             node.path,
-            iconForClass(node.className),
+            node.className,
           ),
       );
     }
@@ -330,7 +352,6 @@ function TypeaheadPlugin({
           `/${command.name}`,
           command.description ?? "",
           `/${command.name}`,
-          SquareSlash,
         ),
     );
   }, [commands, kind, objectIndex, query]);
@@ -382,7 +403,13 @@ function TypeaheadPlugin({
           return;
         }
 
-        const token = $createPromptTokenNode(option.kind, option.label, option.value);
+        const token = $createPromptTokenNode(
+          option.kind,
+          option.label,
+          option.value,
+          undefined,
+          option.className,
+        );
         if (nodeToReplace) {
           nodeToReplace.replace(token);
           token.insertAfter(trailingSpace);
@@ -425,11 +452,15 @@ function TypeaheadPlugin({
                     onMouseMove={() => setHighlightedIndex(index)}
                     onClick={() => selectOptionAndCleanUp(option)}
                   >
-                    <option.glyph
-                      aria-hidden="true"
-                      size={14}
-                      className="shrink-0 text-muted-foreground"
-                    />
+                    {option.kind === "object" ? (
+                      <StudioClassIcon className={option.className} size={14} />
+                    ) : (
+                      <SquareSlash
+                        aria-hidden="true"
+                        size={14}
+                        className="shrink-0 text-muted-foreground"
+                      />
+                    )}
                     <span className="shrink-0">{option.label}</span>
                     {option.detail ? (
                       <span className="min-w-0 truncate text-xs text-muted-foreground">
@@ -458,6 +489,176 @@ export interface PromptEditorHandle {
   insertObject(reference: ExplorerReference): void;
 }
 
+function SubmitPlugin({ onEnter }: { onEnter: (event: KeyboardEvent) => boolean }) {
+  const [editor] = useLexicalComposerContext();
+  useEffect(
+    () =>
+      editor.registerCommand(
+        KEY_ENTER_COMMAND,
+        (event) => {
+          if (!event) return false;
+          if (event.isComposing || event.keyCode === 229) return true;
+          if (!onEnter(event)) return false;
+          event.preventDefault();
+          return true;
+        },
+        COMMAND_PRIORITY_BEFORE_EDITOR,
+      ),
+    [editor, onEnter],
+  );
+  return null;
+}
+
+function $predictionTarget() {
+  const root = $getRoot();
+  const paragraph = root.getLastChild();
+  const selection = $getSelection();
+  if (!$isParagraphNode(paragraph) || !$isRangeSelection(selection) || !selection.isCollapsed()) {
+    return null;
+  }
+  const tail = paragraph.getLastChild();
+  if (!$isTextNode(tail)) return null;
+  const { anchor } = selection;
+  const atEnd =
+    (anchor.key === tail.getKey() && anchor.offset === tail.getTextContentSize()) ||
+    (anchor.key === paragraph.getKey() && anchor.offset === paragraph.getChildrenSize());
+  if (
+    !atEnd ||
+    !root
+      .getChildren()
+      .every(
+        (child) =>
+          $isParagraphNode(child) &&
+          child.getChildren().every((node) => $isTextNode(node) || $isLineBreakNode(node)),
+      )
+  ) {
+    return null;
+  }
+  const draft = root.getTextContent();
+  return canPredictDraft(draft) ? { draft, key: tail.getKey() } : null;
+}
+
+function ComposerPredictionPlugin() {
+  const [editor] = useLexicalComposerContext();
+  const [candidate, setCandidate] = useState<ReturnType<typeof $predictionTarget>>(null);
+  const composing = useRef(false);
+  const dismissed = useRef<{ draft: string; accepted?: string }>();
+  const suffix = useComposerPrediction(candidate);
+
+  useEffect(() => {
+    function sync() {
+      const target =
+        editor.getRootElement() === document.activeElement &&
+        !composing.current &&
+        !editor.isComposing()
+          ? editor.getEditorState().read($predictionTarget)
+          : null;
+      const next =
+        target?.draft === dismissed.current?.draft || target?.draft === dismissed.current?.accepted
+          ? null
+          : target;
+      setCandidate((current) =>
+        current?.draft === next?.draft && current?.key === next?.key ? current : next,
+      );
+    }
+    const stopUpdates = editor.registerUpdateListener(sync);
+    const stopRoot = editor.registerRootListener((root) => {
+      if (!root) return;
+      function blur() {
+        composing.current = false;
+        setCandidate(null);
+      }
+      function compositionStart() {
+        composing.current = true;
+        setCandidate(null);
+      }
+      function compositionEnd() {
+        composing.current = false;
+        queueMicrotask(sync);
+      }
+      root.addEventListener("focus", sync);
+      root.addEventListener("blur", blur);
+      root.addEventListener("compositionstart", compositionStart);
+      root.addEventListener("compositionend", compositionEnd);
+      sync();
+      return () => {
+        root.removeEventListener("focus", sync);
+        root.removeEventListener("blur", blur);
+        root.removeEventListener("compositionstart", compositionStart);
+        root.removeEventListener("compositionend", compositionEnd);
+      };
+    });
+    return () => {
+      stopUpdates();
+      stopRoot();
+    };
+  }, [editor]);
+
+  useLayoutEffect(() => {
+    if (!candidate || !suffix) return;
+    const element = editor.getElementByKey(candidate.key);
+    if (!element) return;
+    element.setAttribute("data-composer-prediction", suffix);
+    const handle = (event: KeyboardEvent, accept: boolean) => {
+      if (
+        event.defaultPrevented ||
+        event.shiftKey ||
+        event.ctrlKey ||
+        event.metaKey ||
+        event.altKey ||
+        event.isComposing ||
+        event.keyCode === 229 ||
+        composing.current ||
+        editor.isComposing() ||
+        editor.getRootElement() !== document.activeElement
+      ) {
+        return false;
+      }
+      const target = $predictionTarget();
+      const selection = $getSelection();
+      if (
+        !$isRangeSelection(selection) ||
+        target?.draft !== candidate.draft ||
+        target.key !== candidate.key
+      ) {
+        return false;
+      }
+      dismissed.current = {
+        draft: candidate.draft,
+        accepted: accept ? candidate.draft + suffix : undefined,
+      };
+      setCandidate(null);
+      event.preventDefault();
+      if (accept) {
+        $addUpdateTag(HISTORY_PUSH_TAG);
+        selection.insertText(suffix);
+      }
+      return true;
+    };
+    const stopTab = editor.registerCommand(
+      KEY_TAB_COMMAND,
+      (event) => handle(event, true),
+      COMMAND_PRIORITY_EDITOR,
+    );
+    const stopEscape = editor.registerCommand(
+      KEY_ESCAPE_COMMAND,
+      (event) => handle(event, false),
+      COMMAND_PRIORITY_EDITOR,
+    );
+    return () => {
+      stopTab();
+      stopEscape();
+      element.removeAttribute("data-composer-prediction");
+    };
+  }, [candidate, editor, suffix]);
+
+  return (
+    <output className="sr-only">
+      {suffix && `Press Tab to accept the suggestion or Escape to dismiss it. ${suffix.trim()}`}
+    </output>
+  );
+}
+
 interface PromptEditorProps {
   commands: readonly Command[];
   objects: readonly ExplorerNode[];
@@ -465,10 +666,12 @@ interface PromptEditorProps {
   objectsLoading?: boolean;
   objectsUnavailable?: string | null;
   noStudio?: boolean;
+  predictionScope?: string | null;
   /** Typing "@" asks for a fresh copy of the place's objects. */
   onObjectsWanted?: () => void;
   onChange(text: string, state: SerializedEditorState): void;
   onSubmit(): void;
+  onEnter(event: KeyboardEvent): boolean;
   onPaste?: ClipboardEventHandler<HTMLDivElement>;
 }
 
@@ -480,9 +683,11 @@ export default forwardRef<PromptEditorHandle, PromptEditorProps>(function Prompt
     objectsLoading,
     objectsUnavailable,
     noStudio,
+    predictionScope,
     onObjectsWanted,
     onChange,
     onSubmit,
+    onEnter,
     onPaste,
   },
   ref,
@@ -520,7 +725,7 @@ export default forwardRef<PromptEditorHandle, PromptEditorProps>(function Prompt
         paragraph.selectEnd();
       });
     },
-    insertObject({ name, path, field }) {
+    insertObject({ name, path, field, className }) {
       editorRef.current?.update(() => {
         const root = $getRoot();
         const last = root.getLastChild();
@@ -534,6 +739,7 @@ export default forwardRef<PromptEditorHandle, PromptEditorProps>(function Prompt
             field ? `@${name}.${field.name}` : `@${name}`,
             path,
             field,
+            className,
           ),
           trailingSpace,
         );
@@ -557,14 +763,8 @@ export default forwardRef<PromptEditorHandle, PromptEditorProps>(function Prompt
         <RichTextPlugin
           contentEditable={
             <ContentEditable
-              className="app-scrollbar max-h-48 min-h-10 overflow-y-auto whitespace-pre-wrap pb-2 pt-1 text-sm leading-relaxed outline-none"
+              className="app-scrollbar max-h-48 min-h-10 overflow-y-auto whitespace-pre-wrap pb-2 pt-1 text-sm leading-relaxed outline-none wrap-anywhere"
               aria-label="Message"
-              onKeyDown={(event) => {
-                if (event.key !== "Enter" || event.shiftKey) return;
-                if (document.querySelector("[data-prompt-menu] [role=option]")) return;
-                event.preventDefault();
-                onSubmit();
-              }}
               onPaste={onPaste}
             />
           }
@@ -576,6 +776,7 @@ export default forwardRef<PromptEditorHandle, PromptEditorProps>(function Prompt
           ErrorBoundary={LexicalErrorBoundary}
         />
         <HistoryPlugin />
+        <SubmitPlugin onEnter={onEnter} />
         <OnChangePlugin
           onChange={(state, editor) =>
             state.read(() => {
@@ -601,6 +802,7 @@ export default forwardRef<PromptEditorHandle, PromptEditorProps>(function Prompt
           commands={commands}
           onSubmit={onSubmit}
         />
+        {predictionScope && <ComposerPredictionPlugin key={predictionScope} />}
         <SetEditorRef editorRef={editorRef} />
       </div>
     </LexicalComposer>

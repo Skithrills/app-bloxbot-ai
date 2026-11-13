@@ -6,8 +6,9 @@ import { useActiveSession } from "@/providers/ActiveSessionProvider";
 
 const NOOP_KEY = ["__noop-session-error__"] as const;
 
-export function useSessionError(): ModelError | null {
-  const { activeSessionId } = useActiveSession();
+export function useSessionError(targetSessionId?: string): ModelError | null {
+  const { activeSessionId: rootSessionId } = useActiveSession();
+  const activeSessionId = targetSessionId ?? rootSessionId;
   const { data } = useQuery<ModelError | null>({
     queryKey: activeSessionId ? qk.sessionError(activeSessionId) : NOOP_KEY,
     queryFn: async () => null,

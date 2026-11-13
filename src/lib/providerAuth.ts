@@ -1,3 +1,8 @@
+import {
+  OPENAI_API_PROVIDER,
+  OPENAI_OAUTH_PROVIDER,
+  toEngineProviderID,
+} from "@/lib/openAiProfiles";
 import type { ProviderAuthMethod } from "@/lib/opencode/types";
 
 export type AuthPrompt = NonNullable<ProviderAuthMethod["prompts"]>[number];
@@ -18,6 +23,18 @@ export interface AuthMethodOption {
 // OpenCode labels are written for its terminal UI; these read better as buttons.
 const METHOD_COPY: Record<string, Record<string, { title: string; description: string }>> = {
   openai: {
+    "Sign in with ChatGPT": {
+      title: "Sign in with ChatGPT",
+      description: "Use your ChatGPT subscription. Opens your browser.",
+    },
+    "Codex browser (legacy)": {
+      title: "Sign in with Codex",
+      description: "Use the legacy browser sign-in.",
+    },
+    "Codex device code (legacy)": {
+      title: "Sign in with a device code",
+      description: "Use your ChatGPT plan by entering a code on openai.com.",
+    },
     "ChatGPT Pro/Plus (browser)": {
       title: "Sign in with ChatGPT",
       description: "Use your ChatGPT Plus or Pro plan. Opens your browser.",
@@ -42,10 +59,14 @@ export function authMethodOptions(
   methods: ProviderAuthMethod[] | undefined,
 ): AuthMethodOption[] {
   if (!methods || methods.length === 0) {
+    if (providerId === OPENAI_OAUTH_PROVIDER) return [];
     return [{ index: -1, type: "api", label: "API key", title: "Use an API key", prompts: [] }];
   }
   return methods.map((method, index) => {
-    const copy = METHOD_COPY[providerId]?.[method.label];
+    const copy =
+      METHOD_COPY[providerId === OPENAI_API_PROVIDER ? "openai" : toEngineProviderID(providerId)]?.[
+        method.label
+      ];
     return {
       index,
       type: method.type,
@@ -126,8 +147,13 @@ export function oauthRecovery(
   method: AuthMethodOption | undefined,
   options: AuthMethodOption[],
 ): OAuthRecovery {
-  if (providerId === "openai" && method?.label === "ChatGPT Pro/Plus (browser)") {
-    const deviceCodeOption = options.find((o) => o.label === "ChatGPT Pro/Plus (headless)");
+  if (
+    toEngineProviderID(providerId) === "openai" &&
+    (method?.label === "ChatGPT Pro/Plus (browser)" || method?.label === "Codex browser (legacy)")
+  ) {
+    const deviceCodeOption = options.find(
+      (o) => o.label === "ChatGPT Pro/Plus (headless)" || o.label === "Codex device code (legacy)",
+    );
     if (deviceCodeOption) {
       return {
         hint: "This usually means the Codex app or Codex CLI is open. Sign in with a device code instead, or quit Codex and restart BloxBot.",
@@ -142,6 +168,8 @@ const CONNECT_HINTS: Record<string, string> = {
   opencode: "More models, pay as you go with a Zen key",
   "opencode-go": "Subscription for open coding models, from $10/month",
   openai: "ChatGPT Plus or Pro plan, or an API key",
+  [OPENAI_OAUTH_PROVIDER]: "Use your ChatGPT subscription",
+  [OPENAI_API_PROVIDER]: "Use your OpenAI Platform API credits",
   "github-copilot": "GitHub Copilot subscription",
   [CLAUDE_AGENT_PROVIDER]: "Use your Claude plan or another Claude Code login",
 };

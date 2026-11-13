@@ -1,13 +1,15 @@
-import type { OpenCodeEvent } from "@opencode/client";
+import type { OpenCodeEvent, SessionMessageAssistantTool } from "@opencode/client";
 import { describe, expect, it } from "vitest";
 
 import { EventTranslator } from "@/lib/opencode/events";
 import {
   historyToMessages,
+  INBOX_DELIVERY_KEY,
   todosFromHistory,
   toFormAnswer,
   toModelError,
   toQuestionRequest,
+  toToolPart,
 } from "@/lib/opencode/messages";
 
 const sessionID = "ses_1";
@@ -27,8 +29,9 @@ const turnStart = [
   event("session.inbox.enqueued", {
     inboxID: "msg_1",
     sessionID,
-    item: { type: "user", payload: { text: "Hello" } },
+    item: { type: "user", payload: { text: "Hello" }, delivery: "steer" },
   }),
+  event("session.inbox.delivered", { sessionID, inboxID: "msg_1" }),
   event("session.step.started", {
     sessionID,
     assistantMessageID,
@@ -39,8 +42,8 @@ const turnStart = [
 ];
 
 describe("EventTranslator", () => {
-  it("turns a prompt into a user message with its text", () => {
-    const [message, part] = translate(turnStart[0] as OpenCodeEvent);
+  it("turns a delivered prompt into a user message with its text", () => {
+    const [message, part] = translate(...turnStart.slice(0, 2));
     expect(message).toMatchObject({
       type: "message.updated",
       properties: { info: { id: "msg_1", role: "user" } },
@@ -63,6 +66,84 @@ describe("EventTranslator", () => {
           modelID: "beam-free",
         },
       },
+    });
+  });
+
+  it("waits for provider output before acknowledging a delivered steer", () => {
+    const translator = new EventTranslator();
+    const inboxID = "msg_steer";
+    const steerResponse = "msg_steer_response";
+    for (const item of turnStart) translator.translate(item);
+    expect(
+      translator.translate(
+        event(
+          "session.inbox.enqueued",
+          {
+            sessionID,
+            inboxID,
+            item: {
+              type: "user",
+              delivery: "steer",
+              payload: { text: "Adjust the plan", metadata: { [INBOX_DELIVERY_KEY]: "steer" } },
+            },
+          },
+          100,
+        ),
+      ),
+    ).toMatchObject([
+      {
+        type: "message.inbox.pending",
+        properties: { info: { inbox: { delivery: "steer", state: "pending" } } },
+      },
+    ]);
+    const delivered = translator.translate(
+      event("session.inbox.delivered", { sessionID, inboxID }, 100),
+    );
+    expect(delivered[0]).toMatchObject({
+      type: "message.updated",
+      properties: {
+        inboxDelivered: true,
+        info: { inbox: { delivery: "steer", state: "delivered" } },
+      },
+    });
+    const oldOutput = translator.translate(
+      event(
+        "session.text.delta",
+        { sessionID, assistantMessageID, ordinal: 0, delta: "previous step" },
+        103,
+      ),
+    );
+    expect(oldOutput.map(({ type }) => type)).toEqual(["message.part.delta"]);
+    const nextStep = translator.translate(
+      event(
+        "session.step.started",
+        {
+          sessionID,
+          assistantMessageID: steerResponse,
+          agent: "studio",
+          model,
+          started: 100,
+        },
+        100,
+      ),
+    );
+    expect(nextStep[0]).toMatchObject({ properties: { info: { parentID: inboxID } } });
+    expect(nextStep.map(({ type }) => type)).toEqual(["message.updated", "message.part.updated"]);
+    expect(
+      translator.translate(
+        event("session.step.streamed", { sessionID, assistantMessageID: steerResponse }, 105),
+      ),
+    ).toEqual([]);
+    const output = translator.translate(
+      event(
+        "session.text.delta",
+        { sessionID, assistantMessageID: steerResponse, ordinal: 0, delta: "changed" },
+        106,
+      ),
+    );
+    expect(output[0]).toEqual({
+      type: "message.inbox.read",
+      properties: { sessionID, messageID: inboxID },
     });
   });
 
@@ -154,6 +235,121 @@ describe("EventTranslator", () => {
         todos: [{ content: "Check", status: "pending", priority: "medium" }],
       },
     });
+  });
+
+  it("exposes a native background task's child link and independent session outcome", () => {
+    const childID = "ses_child";
+    const ids = { sessionID, assistantMessageID, id: "call_delegate" };
+    const events = translate(
+      ...turnStart,
+      event("session.tool.input.started", { ...ids, name: "subagent" }),
+      event("session.tool.called", { ...ids, input: { agent: "planner" } }),
+      event("session.created", {
+        sessionID: childID,
+        parentID: sessionID,
+        location: { directory: "/workspace" },
+        agent: "planner",
+        model,
+      }),
+      event("session.tool.progress", {
+        ...ids,
+        metadata: { sessionID: childID, status: "running" },
+      }),
+      event("session.execution.started", { sessionID: childID }, 110),
+      event("session.tool.success", {
+        ...ids,
+        content: [{ type: "text", text: "Child launched" }],
+        metadata: { sessionID: childID, status: "running" },
+      }),
+      event("session.usage.updated", { sessionID: childID, cost: 0, tokens }),
+      event("session.execution.succeeded", { sessionID: childID }, 130),
+    );
+    expect(events).toContainEqual(
+      expect.objectContaining({
+        type: "session.created",
+        properties: expect.objectContaining({
+          info: expect.objectContaining({
+            id: childID,
+            parentID: sessionID,
+            agent: "planner",
+            model,
+          }),
+        }),
+      }),
+    );
+    expect(events).toContainEqual(
+      expect.objectContaining({
+        type: "message.part.updated",
+        properties: expect.objectContaining({
+          part: expect.objectContaining({
+            tool: "task",
+            state: expect.objectContaining({
+              status: "running",
+              metadata: { sessionID: childID, status: "running" },
+            }),
+          }),
+        }),
+      }),
+    );
+    expect(events.at(-3)).toMatchObject({
+      type: "session.updated",
+      properties: {
+        info: { id: childID, outcome: "succeeded", tokens, time: { busy: 110, idle: 130 } },
+      },
+    });
+  });
+
+  it.each([
+    "completed",
+    "error",
+  ] as const)("keeps image bytes in live and saved %s tool parts", (status) => {
+    const id = "capture_call";
+    const ids = { sessionID, assistantMessageID, id };
+    const name = "roblox-studio_screen_capture";
+    const input = { capture_id: "ScreenCapture_1" };
+    const error = { type: "studio.error", message: "Capture failed" };
+    const content = [
+      {
+        type: "file",
+        name: "viewport.webp",
+        mime: "image/webp",
+        uri: "data:image/webp;base64,UklGRg==",
+      },
+    ] satisfies Extract<SessionMessageAssistantTool["state"], { status: "completed" }>["content"];
+    const live = translate(
+      ...turnStart,
+      event("session.tool.input.started", { ...ids, name }, 110),
+      event("session.tool.called", { ...ids, input, executed: false }, 120),
+      event(
+        status === "completed" ? "session.tool.success" : "session.tool.failed",
+        {
+          ...ids,
+          content,
+          executed: false,
+          ...(status === "error" ? { error } : {}),
+        },
+        130,
+      ),
+    ).at(-1);
+    const saved = toToolPart(sessionID, assistantMessageID, {
+      type: "tool",
+      id,
+      name,
+      time: { created: 110, ran: 120, completed: 130 },
+      state:
+        status === "completed" ? { status, input, content } : { status, input, content, error },
+    });
+    const expectedState = {
+      status,
+      time: { start: 120, end: 130 },
+      input,
+      attachments: [{ id: `${id}:file:0`, mime: "image/webp", url: content[0].uri }],
+    };
+    expect(live).toMatchObject({
+      type: "message.part.updated",
+      properties: { part: { id: saved.id, state: expectedState } },
+    });
+    expect(saved.state).toMatchObject(expectedState);
   });
 
   it("marks a chat busy, then idle, around a turn", () => {

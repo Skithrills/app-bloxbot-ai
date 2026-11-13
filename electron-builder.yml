@@ -7,6 +7,8 @@ files:
   - dist-electron/**
   - package.json
   - "!node_modules/**"
+extraFiles:
+  - LICENSE
 npmRebuild: false
 asar: true
 mac:
@@ -32,5 +34,5 @@ linux:
     - deb
 publish:
   provider: github
-  owner: paralov
+  owner: Skithrills
   repo: app-bloxbot-ai

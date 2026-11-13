@@ -1,6 +1,57 @@
-<svg width="512" height="512" viewBox="0 0 512 512" fill="none" xmlns="http://www.w3.org/2000/svg">
-  <rect x="32" y="32" width="448" height="448" rx="112" fill="#1c1917"/>
-  <rect x="144" y="176" width="72" height="72" rx="24" fill="#fafaf9"/>
-  <rect x="296" y="176" width="72" height="72" rx="24" fill="#fafaf9"/>
-  <path d="M168 328C168 328 204.8 376 256 376C307.2 376 344 328 344 328" stroke="#fafaf9" stroke-width="32" stroke-linecap="round"/>
+<svg xmlns="http://www.w3.org/2000/svg" width="512" height="512" viewBox="0 0 256 256" role="img" aria-labelledby="cat-title cat-description">
+<title id="cat-title">Flat-color friendly cat with blinks and ear twitches</title>
+<desc id="cat-description">A round, soft cat with short ears, small eyes, a gray fur patch, a pale muzzle and a tiny smile. Four solid colors and a transparent background. Gentle six-second animation respects reduced-motion preferences.</desc>
+<!-- Palette properties: cat-fur, cat-patch, cat-muzzle, cat-ink (each with two leading hyphens).
+     Set them on the inline SVG or its parent; for an SVG loaded through an img tag,
+     edit the four fallback colors in the style block below. No gradients or shadows. -->
+<style>
+  .fur { fill: var(--cat-fur, #c6c6c6); }
+  .patch { fill: var(--cat-patch, #a5a5a5); }
+  .muzzle { fill: var(--cat-muzzle, #ededed); }
+  .ink { fill: var(--cat-ink, #454545); }
+  .detail { fill: none; stroke: var(--cat-ink, #454545); stroke-width: 2.6; stroke-linecap: round; }
+
+  .ear-left { transform-box: view-box; transform-origin: 78px 110px; animation: left-twitch 6s ease-in-out infinite; }
+  .ear-right { transform-box: view-box; transform-origin: 178px 110px; animation: right-twitch 6s ease-in-out infinite; }
+  .eye { transform-box: fill-box; transform-origin: center; animation: blink 6s ease-in-out infinite; }
+  @keyframes left-twitch {
+    0%, 10%, 29%, 100% { transform: rotate(0deg); }
+    16% { transform: rotate(-7deg); }
+    22% { transform: rotate(3deg); }
+  }
+  @keyframes right-twitch {
+    0%, 55%, 75%, 100% { transform: rotate(0deg); }
+    62% { transform: rotate(6deg); }
+    68% { transform: rotate(-2deg); }
+  }
+  @keyframes blink {
+    0%, 30%, 36.5%, 68%, 74.5%, 100% { transform: scaleY(1); }
+    32.5%, 33.5%, 70.5%, 71.5% { transform: scaleY(.12); }
+  }
+  @media (prefers-reduced-motion: reduce) {
+    .ear-left, .ear-right, .eye { animation: none; }
+  }
+</style>
+<defs><clipPath id="flat-cat-face"><path d="M128 88 C173 84 204 109 214 145 C225 170 213 192 192 207 C175 219 151 225 128 225 C105 225 81 219 64 207 C43 192 31 170 42 145 C52 109 83 84 128 88Z"/></clipPath></defs>
+
+<g class="ear-left">
+    <path class="fur" d="M52 132 Q47 99 55 66 Q57 57 65 62 Q90 75 110 105Z"/>
+    <path class="patch" d="M64 80 Q65 76 69 79 Q84 88 94 101 Q77 104 64 117 Q61 96 64 80Z"/>
+  </g>
+<g class="ear-right">
+    <path class="fur" d="M204 132 Q209 99 201 66 Q199 57 191 62 Q166 75 146 105Z"/>
+    <path class="patch" d="M192 80 Q191 76 187 79 Q172 88 162 101 Q179 104 192 117 Q195 96 192 80Z"/>
+  </g>
+<path class="fur" d="M128 88 C173 84 204 109 214 145 C225 170 213 192 192 207 C175 219 151 225 128 225 C105 225 81 219 64 207 C43 192 31 170 42 145 C52 109 83 84 128 88Z"/>
+<g clip-path="url(#flat-cat-face)">
+  <path class="patch" d="M44 119 C60 91 88 80 113 88 C120 104 113 117 111 132 C109 149 97 162 80 164 C63 165 51 154 44 143Z"/>
+</g>
+<path class="muzzle" d="M128 167 C116 156 99 158 94 170 C88 184 104 197 128 197 C152 197 168 184 162 170 C157 158 140 156 128 167Z"/>
+<g transform="translate(92 150)"><g class="eye"><ellipse class="ink" rx="5.8" ry="7.2"/></g></g>
+<g transform="translate(164 150)"><g class="eye"><ellipse class="ink" rx="5.8" ry="7.2"/></g></g>
+<path class="ink" d="M123 168 Q128 166 133 168 Q135 169 133 171 L130 174 Q128 176 126 174 L123 171 Q121 169 123 168Z"/>
+<g class="detail">
+  <path d="M128 175 V180 M128 180 Q123 187 118 182 M128 180 Q133 187 138 182"/>
+  <path d="M73 168 L59 165 M73 177 L58 179 M183 168 L197 165 M183 177 L198 179"/>
+</g>
 </svg>

@@ -1,6 +1,7 @@
 import { QueryClient } from "@tanstack/react-query";
 import { describe, expect, it, vi } from "vitest";
 import type { OpencodeClient } from "@/lib/opencode/client";
+import type { Session } from "@/lib/opencode/types";
 import { qk } from "@/lib/queryKeys";
 import { prefetchServerState, reconcileServerState } from "@/providers/OpenCodeClientProvider";
 
@@ -52,18 +53,34 @@ describe("OpenCode query lifecycle", () => {
     );
   });
 
-  it("invalidates every active-session snapshot after SSE connects", async () => {
+  it("invalidates the active root and descendant snapshots after SSE connects", async () => {
     const queryClient = makeQueryClient();
     const activeKeys = [
       qk.sessions,
       qk.statuses,
       qk.providers,
       qk.messages("s1"),
+      qk.sessionContext("s1"),
+      [...qk.sessionContext("s1"), "staged-undo"],
       qk.todos("s1"),
       qk.questions("s1"),
       qk.permissions("s1"),
+      qk.messages("child"),
+      qk.permissions("child"),
     ];
     for (const queryKey of activeKeys) queryClient.setQueryData(queryKey, {});
+    queryClient.setQueryData<Session[]>(qk.sessions, [
+      {
+        id: "child",
+        parentID: "s1",
+        title: "Subagent",
+        slug: "",
+        projectID: "workspace",
+        directory: "/workspace",
+        time: { created: 1, updated: 1 },
+        version: "",
+      },
+    ]);
     queryClient.setQueryData(qk.messages("s2"), {});
 
     await reconcileServerState(queryClient, "s1");

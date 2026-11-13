@@ -80,6 +80,7 @@ export function useCompleteOAuth() {
       } catch {
         await queryClient.invalidateQueries({ queryKey: qk.providers });
       }
+      void queryClient.resetQueries({ queryKey: qk.subscriptionUsage(providerID), exact: true });
 
       posthog.capture(
         "provider_connected",

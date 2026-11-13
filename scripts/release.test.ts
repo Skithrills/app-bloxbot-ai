@@ -8,9 +8,13 @@ test("accepts stable versions and rejects prereleases", () => {
   assert.throws(() => assertStableVersion("1.2.3-beta.1"), /intentionally rejects prereleases/);
 });
 
-test("requires exactly the seven end-user and updater assets", () => {
+test("requires the Windows blockmap alongside the installers and updater manifests", () => {
   const expected = releaseAssetNames("1.2.3");
   assert.doesNotThrow(() => assertExactAssetNames(expected, "1.2.3", "test assets"));
+  assert.throws(
+    () => assertExactAssetNames(expected.filter((name) => !name.endsWith(".blockmap")), "1.2.3", "test assets"),
+    /must contain exactly/,
+  );
   assert.throws(
     () => assertExactAssetNames([...expected, "irrelevant.blockmap"], "1.2.3", "test assets"),
     /must contain exactly/,

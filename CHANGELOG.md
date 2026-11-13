@@ -7,6 +7,89 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+## [0.15.5] - 2026-11-13
+
+First shared release of the Skithrills fork. Includes the animated cat mascot, image galleries and attachments, configurable effort/fast controls, message queueing and steering, interactive subagents, project folders, resizable panels, context and subscription usage views, message rail, persistent instance chips, and fork-based updates from versions 0.15.2–0.15.4.
+
+### Fixed
+
+- Explorer preserves failed-visit records across skipped reads, retries expired backoff promptly, and reports the latest real error when no visits succeed.
+- Explorer no longer stalls on places where two objects share a name beside a very large folder, such as animation saves. Deep reads are capped below the size Studio fails to send, one part that can't be read no longer restarts the whole tree, and objects that can't be listed show a count instead of an arrow.
+- Composer predictions work when free models are hidden from the model pickers.
+- Jumping to the latest message no longer stops short while replies are still being measured.
+
+### Added
+
+- Studio connection activity is written to `logs/studio-mcp.log` in BloxBot's data folder, with the path, depth and limit of slow or failed Explorer reads.
+- Show Context usage as a pie chart or a meter bar, with wider gaps between colors, a percentage for each kind of token, and free space.
+- Context closes when the window is resized too narrow to fit it beside the chat, and returns when there is room.
+- Import skills from Codex and Claude Code in Settings → Instructions. Importing again updates changed skills and removes ones deleted at the source.
+- Composer predictions are cached, so a suggestion you type along with stays without another request.
+- New chats that nothing was typed or sent in are removed the next time BloxBot starts.
+- Lines on the chat rail rise further alongside the one under the pointer.
+
+### Changed
+
+- The default chat sidebar width is 285px.
+- The built-in instructions and subagent instructions are reworded for smaller models: one topic per paragraph, the reason beside each non-obvious rule, and a worked example for screenshots.
+
+## [0.15.4] - 2026-11-13
+
+### Fixed
+
+- Update checks distinguish no published releases, an up-to-date installation, and an available update without treating ordinary empty states as errors.
+- Available updates appear as a download action in the main titlebar. Clicking downloads and installs the update before restarting; updates never restart the app without an install action.
+
+## [0.15.3] - 2026-11-13
+
+### Fixed
+
+- Newly sent Studio references retain their class for icons when chats reopen without Studio. Previously resolved legacy references retain their known classes per chat.
+- Click a sent instance chip to reveal its original reference markup, and switch back to the compact chip without changing the message. Model instructions request clickable instance references in replies, with Explorer navigation and a separate raw-reference action.
+
+## [0.15.2] - 2026-11-13
+
+### Fixed
+
+- Updates ask before installing and restarting, including patch releases.
+- Updates use this fork's GitHub releases, with packaged updater configuration and a release workflow that does not require the upstream signing credentials.
+- User messages render Studio instance references as compact name-and-icon chips while preserving the full model-facing reference. Long text and reference names stay inside message bubbles.
+
+### Added
+
+- The cat mascot blinks and twitches its ears on startup and Studio setup screens, with reduced-motion support and four editable palette colors. Desktop icons and the favicon use a still cat.
+- Browse tool captures from the collapsed activity row, open them in a gallery, or ask the agent to embed a specific capture in its reply.
+- Right-click chat images to copy them, save them as PNG, or attach them to the composer.
+- The reasoning effort slider snaps between supported levels as you drag, and the label slides up or down. The original dropdown is available in Settings.
+- Toggle Fast from the effort control when the provider offers both versions of a model. The lightning icon fills when Fast is on, and the pixels move at the highest effort level.
+- Steer a running chat with Enter or queue a message with Ctrl+Enter. Change both shortcuts in Settings.
+- Queued messages appear above the composer, with controls to steer or remove them. A steer shows two checkmarks when the model responds after receiving it.
+- Read receipts for messages promoted from Queue to Steer restore after restarting BloxBot.
+- Chats open at the latest message. The jump button returns to the latest reply, and rotating dots indicate when the model is working.
+- User messages show their timestamps. Hover an agent reply to see its timestamp and any reported cost and token rate.
+- Configure models and effort per subagent profile. Subagents have distinct icon colors and show reported costs when available. Open Active and Done subagents from the drawer, see their effort, and forward results to the main chat.
+- The agent has delegation guidance for GPT and Claude families and can use a connected model and effort you request for a subagent.
+- Explorer uses Studio's class icons and accepts local icon pack overrides.
+- Connect ChatGPT and an OpenAI API key separately. Select the API service tier for GPT-6.1 Sol and GPT-6 Astra.
+- See subscription percentages remaining and reset times in Providers. Usage refreshes automatically, and the ChatGPT row uses Codex CLI as a fallback when available.
+- Open Context from the composer to see measured context usage and compact supported chats. The composer meter shows the chat model's subscription quota when available.
+- Context opens beside Explorer, and clicking a chat title in the header lets you rename it.
+- Resize Explorer, Context, and the chat sidebar by dragging their edges or using the keyboard.
+- Add project folders from the sidebar, move chats between them, and set a Studio place for new chats in each folder.
+- Each chat remembers its model and effort. If a model is retired, BloxBot shows the eligible replacement from the same provider connection or asks you to choose a model.
+- Sort each provider's models by name or choose **Newest first** in the model picker or Providers settings.
+- The chat rail previews messages on hover, jumps to them on click, and highlights saved favorites.
+- Settings → Fun animates the chat rail with live Windows audio. The audio bars fade during silence and return when sound resumes.
+- Unsent drafts in the main composer are saved per chat and restored after restarting BloxBot.
+- Enable Composer predictions in Appearance to get gray continuations from free OpenCode Zen models. Press Tab to add a suggestion to your draft.
+- Hide free models from model pickers and set a paid default for chats using a free model.
+- Choose one of eight accent colors in Settings → Personalisation. The accent colors the send button, links, focus rings, switches, and the sidebar tint, and BloxBot remembers it.
+- At the highest effort level, the slider fills with pixels in your accent color. In the dropdown, Fast is a switch.
+- Chat rail previews show formatted text, including lists, code, and emphasis.
+- Settings shows a placeholder layout while it loads.
+- Explorer and Context grow open instead of appearing at once, and a line separates them when both are open.
+- Explorer keeps its objects through brief Studio disconnects and shows **Reconnecting to Studio** until Studio returns. Studio warnings appear only after repeated failures.
+
 ## [0.15.1] - 2026-11-06
 
 ### Changed
@@ -406,7 +489,11 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 - OpenCode downloads are restricted to official GitHub release assets and verified with SHA-256 digests before installation and on every cache reuse.
 - Electron runs with context isolation, renderer sandboxing, Node.js integration disabled, validated IPC payloads, and external navigation blocked.
 
-[Unreleased]: https://github.com/paralov/app-bloxbot-ai/compare/v0.15.1...HEAD
+[Unreleased]: https://github.com/Skithrills/app-bloxbot-ai/compare/v0.15.5...HEAD
+[0.15.5]: https://github.com/Skithrills/app-bloxbot-ai/releases/tag/v0.15.5
+[0.15.4]: https://github.com/Skithrills/app-bloxbot-ai/releases/tag/v0.15.4
+[0.15.3]: https://github.com/Skithrills/app-bloxbot-ai/releases/tag/v0.15.3
+[0.15.2]: https://github.com/Skithrills/app-bloxbot-ai/releases/tag/v0.15.2
 [0.15.1]: https://github.com/paralov/app-bloxbot-ai/compare/v0.15.0...v0.15.1
 [0.15.0]: https://github.com/paralov/app-bloxbot-ai/compare/v0.14.0...v0.15.0
 [0.14.0]: https://github.com/paralov/app-bloxbot-ai/compare/v0.13.7...v0.14.0

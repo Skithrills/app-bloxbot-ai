@@ -4,6 +4,7 @@ import findMcpImage from "@/assets/studio-setup/find-mcp.jpg";
 import flipSwitchImage from "@/assets/studio-setup/flip-switch.jpg";
 import openAssistantImage from "@/assets/studio-setup/open-assistant.jpg";
 import openPlaceImage from "@/assets/studio-setup/open-place.jpg";
+import { BloxBotMascot } from "@/components/BloxBotMascot";
 import type { StudioMcpProblem } from "@/hooks/useStudioConnection";
 
 export const STUDIO_SETUP_STEPS = [
@@ -145,7 +146,7 @@ function StudioSetup({
         aria-labelledby="studio-setup-title"
       >
         <header className="flex items-center gap-4">
-          <BloxBotFace />
+          <BloxBotMascot size={52} />
           <div className="flex-1">
             <p className="text-xs font-medium text-muted-foreground">One tiny setup</p>
             <h1
@@ -334,46 +335,6 @@ function StudioScreenshot({ step, image, alt }: { step: number; image: string; a
         </svg>
       </span>
     </div>
-  );
-}
-
-function BloxBotFace() {
-  return (
-    <svg
-      width="52"
-      height="52"
-      viewBox="0 0 512 512"
-      fill="none"
-      xmlns="http://www.w3.org/2000/svg"
-      className="bloxbot-face shrink-0"
-      aria-hidden="true"
-    >
-      <rect x="32" y="32" width="448" height="448" rx="112" fill="currentColor" />
-      <rect
-        className="bloxbot-eye"
-        x="144"
-        y="176"
-        width="72"
-        height="72"
-        rx="24"
-        fill="var(--background)"
-      />
-      <rect
-        className="bloxbot-eye"
-        x="296"
-        y="176"
-        width="72"
-        height="72"
-        rx="24"
-        fill="var(--background)"
-      />
-      <path
-        d="M168 328C168 328 204.8 376 256 376C307.2 376 344 328 344 328"
-        stroke="var(--background)"
-        strokeWidth="32"
-        strokeLinecap="round"
-      />
-    </svg>
   );
 }
 

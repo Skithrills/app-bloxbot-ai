@@ -5,9 +5,10 @@ import { qk } from "@/lib/queryKeys";
 import { useActiveSession } from "@/providers/ActiveSessionProvider";
 import { useOpenCodeClient } from "@/providers/OpenCodeClientProvider";
 
-export function useAnswerQuestion() {
+export function useAnswerQuestion(targetSessionId?: string) {
   const { client } = useOpenCodeClient();
-  const { activeSessionId } = useActiveSession();
+  const { activeSessionId: rootSessionId } = useActiveSession();
+  const activeSessionId = targetSessionId ?? rootSessionId;
   const queryClient = useQueryClient();
 
   return useMutation({
@@ -20,7 +21,7 @@ export function useAnswerQuestion() {
     }) => {
       if (!client || !activeSessionId) throw new Error("No client or session");
       const sessionID = activeSessionId;
-      await client.question.reply({ requestID, answers }, { throwOnError: true });
+      await client.question.reply({ requestID, sessionID, answers }, { throwOnError: true });
       return sessionID;
     },
     onSuccess: (sessionID) => {
@@ -29,16 +30,17 @@ export function useAnswerQuestion() {
   });
 }
 
-export function useRejectQuestion() {
+export function useRejectQuestion(targetSessionId?: string) {
   const { client } = useOpenCodeClient();
-  const { activeSessionId } = useActiveSession();
+  const { activeSessionId: rootSessionId } = useActiveSession();
+  const activeSessionId = targetSessionId ?? rootSessionId;
   const queryClient = useQueryClient();
 
   return useMutation({
     mutationFn: async (requestID: string) => {
       if (!client || !activeSessionId) throw new Error("No client or session");
       const sessionID = activeSessionId;
-      await client.question.reject({ requestID }, { throwOnError: true });
+      await client.question.reject({ requestID, sessionID }, { throwOnError: true });
       return sessionID;
     },
     onSuccess: (sessionID) => {

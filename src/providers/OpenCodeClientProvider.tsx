@@ -1,28 +1,28 @@
 import { type QueryClient, useQueryClient } from "@tanstack/react-query";
 import posthog from "posthog-js/dist/module.full.no-external.js";
-import {
-  createContext,
-  type ReactNode,
-  useContext,
-  useEffect,
-  useMemo,
-  useRef,
-  useState,
-} from "react";
+import { type ReactNode, useEffect, useMemo, useRef, useState } from "react";
 import LoadingScreen, { type StartupProgress } from "@/components/LoadingScreen";
 import { aiTracer, captureDetailedAnalytics } from "@/lib/analytics";
 import { desktop } from "@/lib/desktop";
 import { notify } from "@/lib/notifications";
 import { createOpencodeClient, type OpencodeClient } from "@/lib/opencode/client";
+import type { Session } from "@/lib/opencode/types";
 import { qk } from "@/lib/queryKeys";
 import { sessionNotifier } from "@/lib/sessionNotifications";
+import { subagentsForSession } from "@/lib/sessionVisibility";
 import { sseDispatch } from "@/lib/sseDispatch";
+import {
+  type AppStatus,
+  OpenCodeClientContext,
+  type OpenCodeClientContextValue,
+} from "@/providers/openCodeClientContext";
 import type { OpenCodeStartupProgress } from "@/types/desktop";
+
+export { OpenCodeClientContext, useOpenCodeClient } from "@/providers/openCodeClientContext";
 
 const SSE_RECONNECT_DELAY = 3000;
 const SSE_FAILURE_THRESHOLD = 3;
 
-type AppStatus = "waiting" | "ready" | "error";
 export type StartupPhase = "engine" | "connection" | "workspace";
 
 interface StartupPresentation {
@@ -324,26 +324,6 @@ export function getStartupErrorPresentation(
   };
 }
 
-interface OpenCodeClientContextValue {
-  client: OpencodeClient | null;
-  status: AppStatus;
-  port: number;
-  ready: boolean;
-  initError: string | null;
-}
-
-export const OpenCodeClientContext = createContext<OpenCodeClientContextValue>({
-  client: null,
-  status: "waiting",
-  port: 0,
-  ready: false,
-  initError: null,
-});
-
-export function useOpenCodeClient() {
-  return useContext(OpenCodeClientContext);
-}
-
 export function OpenCodeClientProvider({
   children,
   activeSessionIdRef,
@@ -508,7 +488,10 @@ export function OpenCodeClientProvider({
     async function subscribe() {
       try {
         if (!client) return;
-        const sseResult = await client.event.subscribe({}, { throwOnError: true });
+        const sseResult = await client.event.subscribe(
+          {},
+          { throwOnError: true, signal: abortController.signal },
+        );
         if (!sseResult?.stream) {
           consecutiveFailures++;
           if (consecutiveFailures >= SSE_FAILURE_THRESHOLD) showReconnectToast();
@@ -681,23 +664,36 @@ export async function reconcileServerState(
   queryClient: QueryClient,
   activeSessionId: string | null,
 ) {
+  const sessions = queryClient.getQueryData<Session[]>(qk.sessions) ?? [];
+  const threadIds = activeSessionId
+    ? [
+        activeSessionId,
+        ...subagentsForSession(sessions, activeSessionId).map((session) => session.id),
+      ]
+    : [];
   const queryKeys: readonly (readonly unknown[])[] = [
     qk.sessions,
     qk.statuses,
     qk.providers,
-    ...(activeSessionId
-      ? [
-          qk.messages(activeSessionId),
-          qk.todos(activeSessionId),
-          qk.questions(activeSessionId),
-          qk.permissions(activeSessionId),
-        ]
-      : []),
+    ...threadIds.flatMap((id) => [
+      qk.messages(id),
+      qk.todos(id),
+      qk.questions(id),
+      qk.permissions(id),
+    ]),
   ];
 
-  await Promise.all(
-    queryKeys.map((queryKey) =>
+  await Promise.all([
+    ...queryKeys.map((queryKey) =>
       queryClient.invalidateQueries({ queryKey, exact: true, refetchType: "active" }),
     ),
-  );
+    ...(activeSessionId
+      ? [
+          queryClient.invalidateQueries({
+            queryKey: qk.sessionContext(activeSessionId),
+            refetchType: "active",
+          }),
+        ]
+      : []),
+  ]);
 }

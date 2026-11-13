@@ -1,3 +1,5 @@
+import { OPENAI_API_PROVIDER, OPENAI_OAUTH_PROVIDER } from "@/lib/openAiProfiles";
+
 // OpenCode's own provider logos (MIT, see the LICENSE beside them), and its generic mark for any
 // provider without one. They're inlined because a CSS mask can't load a file:// URL.
 const LOGOS = import.meta.glob<string>("../assets/provider-icons/*.svg", {
@@ -7,8 +9,12 @@ const LOGOS = import.meta.glob<string>("../assets/provider-icons/*.svg", {
 });
 
 function logoUrl(providerId: string) {
+  const iconId =
+    providerId === OPENAI_OAUTH_PROVIDER || providerId === OPENAI_API_PROVIDER
+      ? "openai"
+      : providerId;
   return (
-    LOGOS[`../assets/provider-icons/${providerId}.svg`] ??
+    LOGOS[`../assets/provider-icons/${iconId}.svg`] ??
     LOGOS["../assets/provider-icons/synthetic.svg"]
   );
 }

@@ -6,6 +6,7 @@ import {
   detailedAnalyticsProperties,
   errorAnalyticsProperties,
 } from "@/lib/analytics";
+import type { ComposerDelivery } from "@/lib/composerDelivery";
 import { offerNotificationsOnce } from "@/lib/notificationOffer";
 import type { SessionStatus } from "@/lib/opencode/types";
 import { qk } from "@/lib/queryKeys";
@@ -19,6 +20,8 @@ interface SendMessageInput {
   text: string;
   images?: Array<{ mime: string; url: string; filename?: string }>;
   studioTargetReference?: string | null;
+  studioTargetID?: string | null;
+  delivery?: ComposerDelivery;
 }
 
 interface SendMessageContext {
@@ -26,56 +29,60 @@ interface SendMessageContext {
   previousStatus: SessionStatus | undefined;
 }
 
-export function useSendMessage(options?: { onError?: (error: Error) => void }) {
+export const sendMessageMutationKey = (sessionID: string | null) =>
+  ["sendMessage", sessionID] as const;
+
+export function useSendMessage() {
   const { client } = useOpenCodeClient();
   const { activeSessionId } = useActiveSession();
-  const { selectedModel, selectedVariant } = usePreferences();
+  const { selectedModel, selectedVariant, hideFreeModels, modelSelectionMessage } =
+    usePreferences();
   const queryClient = useQueryClient();
-
   return useMutation<void, Error, SendMessageInput, SendMessageContext | undefined>({
-    mutationFn: async ({ text, images, studioTargetReference }: SendMessageInput) => {
+    mutationKey: sendMessageMutationKey(activeSessionId),
+    mutationFn: async ({ text, images, studioTargetReference, studioTargetID, delivery }) => {
       if (!client || !activeSessionId) throw new Error("No client or session");
+      if (!delivery && modelSelectionMessage) throw new Error(modelSelectionMessage);
 
-      const parts: Array<{ type: string; [k: string]: unknown }> = [{ type: "text", text }];
-      if (images) {
-        for (const img of images) {
-          parts.push({ type: "file", mime: img.mime, url: img.url, filename: img.filename });
-        }
+      const [provider, model] = !delivery && selectedModel ? splitModelKey(selectedModel) : [];
+      if (!delivery) {
+        aiTracer.beginTurn({
+          sessionID: activeSessionId,
+          text,
+          imageCount: images?.length ?? 0,
+          provider,
+          model,
+          variant: selectedVariant ?? undefined,
+        });
       }
-      const opts: Record<string, unknown> = {
-        sessionID: activeSessionId,
-        parts,
-      };
-      if (studioTargetReference) opts.system = studioTargetReference;
-      let provider: string | undefined;
-      let model: string | undefined;
-
-      if (selectedModel) {
-        const [providerID, modelID] = splitModelKey(selectedModel);
-        if (providerID && modelID) {
-          provider = providerID;
-          model = modelID;
-          opts.model = { providerID, modelID };
-        }
-      }
-
-      if (selectedVariant) opts.variant = selectedVariant;
-
-      aiTracer.beginTurn({
-        sessionID: activeSessionId,
-        text,
-        imageCount: images?.length ?? 0,
-        provider,
-        model,
-        variant: selectedVariant ?? undefined,
-      });
       try {
-        const accepted = client.session.promptAsync(
-          opts as unknown as Parameters<typeof client.session.promptAsync>[0],
-          {
-            throwOnError: true,
-          },
-        );
+        const accepted = delivery
+          ? client.session.promptInbox(
+              {
+                sessionID: activeSessionId,
+                text,
+                delivery,
+                ...(images?.length && {
+                  files: images.map(({ url, filename }) => ({ uri: url, name: filename })),
+                }),
+                ...(studioTargetID !== undefined && { studioTargetID }),
+              },
+              { throwOnError: true },
+            )
+          : client.session.promptAsync(
+              {
+                sessionID: activeSessionId,
+                parts: [
+                  { type: "text", text },
+                  ...(images ?? []).map((image) => ({ type: "file", ...image })),
+                ],
+                ...(studioTargetReference && { system: studioTargetReference }),
+                ...(hideFreeModels && { requirePaidModel: true }),
+                ...(provider && model && { model: { providerID: provider, modelID: model } }),
+                ...(selectedVariant && { variant: selectedVariant }),
+              },
+              { throwOnError: true },
+            );
         // Waiting on a reply is when a ping starts to sound useful.
         offerNotificationsOnce().catch((error) => {
           console.warn("Failed to offer notifications:", error);
@@ -85,7 +92,7 @@ export function useSendMessage(options?: { onError?: (error: Error) => void }) {
         });
         await accepted;
       } catch (error) {
-        aiTracer.cancelTurn(activeSessionId);
+        if (!delivery) aiTracer.cancelTurn(activeSessionId);
         throw error;
       }
       posthog.capture(
@@ -102,8 +109,8 @@ export function useSendMessage(options?: { onError?: (error: Error) => void }) {
         ),
       );
     },
-    onMutate: () => {
-      if (!activeSessionId) return undefined;
+    onMutate: ({ delivery }) => {
+      if (!activeSessionId || delivery) return undefined;
       const statuses = queryClient.getQueryData<Record<string, SessionStatus>>(qk.statuses);
       const context: SendMessageContext = {
         sessionID: activeSessionId,
@@ -116,7 +123,6 @@ export function useSendMessage(options?: { onError?: (error: Error) => void }) {
       return context;
     },
     onError: (error, input, context) => {
-      options?.onError?.(error);
       posthog.capture(
         "message_send_failed",
         errorAnalyticsProperties("chat", "send_message", error, {

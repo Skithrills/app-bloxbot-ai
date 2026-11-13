@@ -4,14 +4,14 @@
  */
 
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import posthog from "posthog-js/dist/module.full.no-external.js";
 import { type ReactNode, useRef } from "react";
 import { toast } from "sonner";
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { ThemeProvider } from "@/components/theme-provider";
 import { desktop } from "@/lib/desktop";
-import type { Session } from "@/lib/opencode/types";
+import type { Session, UserMessage } from "@/lib/opencode/types";
 import { qk } from "@/lib/queryKeys";
 import { type MessagesCache, sseDispatch } from "@/lib/sseDispatch";
 import { ActiveSessionProvider } from "@/providers/ActiveSessionProvider";
@@ -22,6 +22,7 @@ import {
 import { OpenCodeClientContext } from "@/providers/OpenCodeClientProvider";
 import { PreferencesProvider } from "@/providers/PreferencesProvider";
 import { StudioTargetProvider } from "@/providers/StudioTargetProvider";
+import type { MessageWithParts } from "@/types";
 
 // Mock react-virtual so all items render in jsdom (no viewport measurement)
 vi.mock("@tanstack/react-virtual", () => ({
@@ -193,6 +194,9 @@ function createClient(overrides: Record<string, unknown> = {}) {
       abort: vi.fn().mockResolvedValue({ data: true }),
       messages: vi.fn().mockResolvedValue({ data: [] }),
       status: vi.fn().mockResolvedValue({ data: {} }),
+      context: vi.fn().mockResolvedValue({
+        data: { measurement: null, hasCompacted: false, canCompact: false },
+      }),
       todo: vi.fn().mockResolvedValue({ data: [] }),
       promptAsync: vi.fn().mockResolvedValue({}),
       ...overrides,
@@ -275,7 +279,11 @@ function seedReadyState(
         name: "Anthropic",
         env: [],
         models: {
-          "claude-3.5-sonnet": { id: "claude-3.5-sonnet", name: "Claude 3.5 Sonnet" },
+          "claude-3.5-sonnet": {
+            id: "claude-3.5-sonnet",
+            name: "Claude 3.5 Sonnet",
+            limit: { context: 100_000, output: 10_000 },
+          },
         },
       },
     ],
@@ -878,6 +886,7 @@ describe("User journeys", () => {
     expect(client.permission.reply).toHaveBeenCalledWith(
       {
         requestID: "perm_1",
+        sessionID: "s1",
         reply: "once",
       },
       { throwOnError: true },
@@ -949,6 +958,7 @@ describe("User journeys", () => {
     expect(client.question.reply).toHaveBeenCalledWith(
       {
         requestID: "q1",
+        sessionID: "s1",
         answers: [["Overwrite"]],
       },
       { throwOnError: true },
@@ -1062,6 +1072,722 @@ describe("User journeys", () => {
     await waitFor(() => {
       expect(screen.queryByText("Running")).not.toBeInTheDocument();
     });
+  });
+
+  it("shows a collapsed capture gallery across tool steps and embeds only the referenced capture", async () => {
+    const session = makeSession("captures", "Capture gallery");
+    const sessionID = session.id;
+    const created = Date.UTC(2026, 10, 12, 8, 5);
+    const url =
+      "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAIAAAABCAYAAAD0In+KAAAADklEQVR4nGP4z8DwHwQBEPgD/U6VwW8AAAAASUVORK5CYII=";
+    const assistant = (id: string, offset: number) => ({
+      id,
+      sessionID,
+      role: "assistant",
+      parentID: "user",
+      cost: 0.0003,
+      tokens: { output: 30, reasoning: 10 },
+      time: { created: created + offset, completed: created + offset + 2000 },
+    });
+    const captures = ["first", "second", "third", "fourth"].map((capture_id, index) => {
+      const id = `step-${index}`;
+      const input = { capture_id };
+      return {
+        info: assistant(id, (index + 1) * 2000),
+        parts: [
+          {
+            type: "tool",
+            id: `call-${index}`,
+            sessionID,
+            messageID: id,
+            tool: "execute",
+            state: {
+              status: "completed",
+              input: { code: 'return await tools["roblox-studio"].screen_capture({});' },
+              output: "Capture complete",
+              metadata: { toolCalls: [{ tool: "roblox-studio.screen_capture", input }] },
+              time: { end: created + (index + 2) * 2000 },
+              attachments: [{ id: `image-${index}`, type: "file", mime: "image/png", url }],
+            },
+          },
+        ],
+      };
+    });
+    const client = createClient({
+      messages: vi.fn().mockResolvedValue({
+        data: [
+          {
+            info: { id: "user", sessionID, role: "user", time: { created } },
+            parts: [{ id: "request", type: "text", text: "Capture the scene" }],
+          },
+          ...captures,
+          {
+            info: assistant("reply", 10000),
+            parts: [
+              {
+                id: "reply-text",
+                type: "text",
+                text: "![Selected view](capture:third)\n\n![Missing view](capture:missing)",
+              },
+            ],
+          },
+        ],
+      }),
+    });
+    const queryClient = createQueryClient();
+    seedReadyState(queryClient, { sessions: [session] });
+    const { container } = render(<TestApp client={client} queryClient={queryClient} />);
+    fireEvent.click(await screen.findByText("Capture gallery"));
+
+    const disclosure = await screen.findByRole("button", { name: "Used Roblox Studio 4 times" });
+    expect(disclosure).toHaveAttribute("aria-expanded", "false");
+    expect(screen.getByText("+1")).toBeVisible();
+    fireEvent.click(screen.getByRole("button", { name: /image 2 of 4/ }));
+    const dialog = within(screen.getByRole("dialog"));
+    expect(dialog.getByText("2 / 4")).toBeVisible();
+    fireEvent.click(dialog.getByRole("button", { name: "Next image" }));
+    expect(dialog.getByText("3 / 4")).toBeVisible();
+    fireEvent.keyDown(dialog.getByRole("button", { name: "Previous image" }), { key: "ArrowLeft" });
+    expect(dialog.getByText("2 / 4")).toBeVisible();
+    fireEvent.click(dialog.getByRole("button", { name: "Previous image" }));
+    expect(dialog.getByText("1 / 4")).toBeVisible();
+    fireEvent.click(dialog.getByRole("button", { name: "Close image" }));
+    expect(disclosure).toHaveAttribute("aria-expanded", "false");
+    expect(screen.getByRole("img", { name: "Selected view" })).toHaveAttribute("src", url);
+    expect(screen.queryByRole("img", { name: "Missing view" })).toBeNull();
+    expect(screen.getByText("20 tok/s")).toBeInTheDocument();
+    expect(screen.getByTitle("Reported cost in US dollars")).toBeInTheDocument();
+    expect([...container.querySelectorAll("time")].map((time) => time.dateTime)).toEqual([
+      new Date(created).toISOString(),
+      new Date(created + 12000).toISOString(),
+    ]);
+    fireEvent.contextMenu(screen.getByRole("img", { name: "Selected view" }));
+    fireEvent.click(await screen.findByRole("menuitem", { name: "Add to Chat" }));
+    expect(client.session.promptAsync).not.toHaveBeenCalled();
+    expect(await screen.findByTitle("Remove")).toBeVisible();
+    await act(async () => {
+      fireEvent.click(screen.getByTitle("Send"));
+    });
+    expect(client.session.promptAsync).toHaveBeenCalledWith(
+      expect.objectContaining({
+        sessionID,
+        parts: expect.arrayContaining([
+          expect.objectContaining({ type: "file", mime: "image/png", url }),
+        ]),
+      }),
+      { throwOnError: true },
+    );
+  });
+
+  it("keeps Explorer mounted to the right of Context and lets either panel close independently", async () => {
+    const closeStudio = openStudio();
+    const chat = makeSession("context-explorer", "Inspect a place");
+    const client = createClient({
+      get: vi.fn().mockResolvedValue({ data: chat }),
+      messages: vi.fn().mockResolvedValue({ data: [] }),
+    });
+    const queryClient = createQueryClient();
+    seedReadyState(queryClient, { sessions: [chat] });
+
+    try {
+      render(<TestApp client={client} queryClient={queryClient} withStudioTargets />);
+      fireEvent.click(await screen.findByText(chat.title));
+      const explorerToggle = await screen.findByRole("button", { name: "Explorer" });
+      fireEvent.click(explorerToggle);
+      const search = await screen.findByRole("searchbox", { name: "Search Explorer" });
+      await waitFor(() => expect(search).toHaveFocus());
+
+      const radial = screen.getByRole("button", { name: "Context and usage" });
+      fireEvent.click(radial);
+      const panel = await screen.findByRole("complementary", { name: "Context window" });
+      expect(explorerToggle).toHaveAttribute("aria-pressed", "true");
+      expect(screen.getByRole("searchbox", { name: "Search Explorer" })).toBe(search);
+      expect(radial.compareDocumentPosition(panel) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+      expect(panel.compareDocumentPosition(search) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+
+      fireEvent.click(explorerToggle);
+      expect(explorerToggle).toHaveAttribute("aria-pressed", "false");
+      expect(screen.queryByRole("searchbox", { name: "Search Explorer" })).toBeNull();
+      expect(screen.getByRole("complementary", { name: "Context window" })).toBe(panel);
+
+      fireEvent.click(explorerToggle);
+      const reopenedSearch = await screen.findByRole("searchbox", { name: "Search Explorer" });
+      expect(screen.getByRole("complementary", { name: "Context window" })).toBe(panel);
+      fireEvent.click(within(panel).getByRole("button", { name: "Close Context" }));
+      expect(radial).toHaveFocus();
+      expect(screen.queryByRole("complementary", { name: "Context window" })).toBeNull();
+      expect(screen.getByRole("searchbox", { name: "Search Explorer" })).toBe(reopenedSearch);
+    } finally {
+      closeStudio();
+    }
+  });
+
+  it("shows measured Context, waits for an idle chat, and refreshes after compacting", async () => {
+    const chat = makeSession("context-chat", "Inspect context");
+    const context = vi.fn().mockResolvedValue({
+      data: {
+        measurement: {
+          modelKey: "anthropic/claude-3.5-sonnet",
+          tokens: { input: 18_000, cache: { read: 1_000, write: 0 }, output: 900, reasoning: 100 },
+        },
+        hasCompacted: false,
+        canCompact: true,
+      },
+    });
+    const compact = vi.fn(async () => {
+      context.mockResolvedValue({
+        data: { measurement: null, hasCompacted: true, canCompact: false },
+      });
+    });
+    const client = createClient({ context, compact });
+    const queryClient = createQueryClient();
+    seedReadyState(queryClient, { sessions: [chat] });
+    queryClient.setQueryData(qk.statuses, { [chat.id]: { type: "busy" } });
+    render(
+      <TestApp client={client} queryClient={queryClient}>
+        <div id="titlebar-actions" />
+      </TestApp>,
+    );
+    fireEvent.click(await screen.findByText(chat.title));
+    const radial = await screen.findByRole("button", { name: /Context and usage.*20% used/ });
+    fireEvent.click(radial);
+    let panel = within(await screen.findByRole("complementary", { name: "Context window" }));
+    expect(panel.getByRole("heading", { name: "Context window" })).toHaveFocus();
+    expect(panel.getByRole("meter", { name: "Context window used" })).toHaveValue(20);
+    expect(panel.getByText("Cache read")).toBeVisible();
+    expect(panel.getByText("Reasoning")).toBeVisible();
+
+    // The same usage as a pie, and back to the bar.
+    const region = screen.getByRole("complementary", { name: "Context window" });
+    expect(region.querySelector('[data-context-chart="bar"]')).not.toBeNull();
+    fireEvent.click(panel.getByRole("button", { name: "Show usage as a pie chart" }));
+    await waitFor(() => expect(region.querySelector('[data-context-chart="pie"]')).not.toBeNull());
+    expect(region.querySelector('[data-context-chart="bar"]')).toBeNull();
+    // One slice for each kind of token. Free space is the grey that's left, with a row of its own.
+    expect(
+      region.querySelectorAll('[data-context-chart="pie"] circle[stroke-dasharray]'),
+    ).toHaveLength(panel.getAllByRole("definition").length - 1);
+    expect(panel.getByText("Free space").closest("div")).toHaveTextContent("80,00080.0%");
+    expect(panel.getByRole("meter", { name: "Context window used" })).toHaveValue(20);
+    fireEvent.click(panel.getByRole("button", { name: "Show usage as a meter bar" }));
+    await waitFor(() => expect(region.querySelector('[data-context-chart="bar"]')).not.toBeNull());
+
+    // A window too narrow to fit it beside the chat closes it, and a wider one brings it back.
+    const resizeTo = (width: number) =>
+      act(() => {
+        Object.defineProperty(window, "innerWidth", { configurable: true, value: width });
+        window.dispatchEvent(new Event("resize"));
+      });
+    const wide = window.innerWidth;
+    resizeTo(700);
+    expect(screen.queryByRole("complementary", { name: "Context window" })).toBeNull();
+    resizeTo(wide);
+    panel = within(screen.getByRole("complementary", { name: "Context window" }));
+    expect(panel.getByRole("meter", { name: "Context window used" })).toHaveValue(20);
+
+    const button = panel.getByRole("button", { name: "Compact session" });
+    expect(button).toHaveAttribute("aria-disabled", "true");
+    fireEvent.click(button);
+    expect(compact).not.toHaveBeenCalled();
+
+    act(() => queryClient.setQueryData(qk.statuses, { [chat.id]: { type: "idle" } }));
+    await waitFor(() => expect(button).toHaveAttribute("aria-disabled", "false"));
+    fireEvent.click(button);
+    expect(await panel.findByText("Context compacted.")).toBeVisible();
+    expect(compact).toHaveBeenCalledWith(
+      {
+        sessionID: chat.id,
+        waitForCompletion: true,
+        model: { providerID: "anthropic", modelID: "claude-3.5-sonnet" },
+      },
+      { throwOnError: true },
+    );
+    expect(
+      panel.getByText(/Context usage will update after the next measured reply/),
+    ).toBeVisible();
+    expect(panel.queryByRole("meter")).not.toBeInTheDocument();
+    fireEvent.keyDown(panel.getByRole("heading", { name: "Context window" }), { key: "Escape" });
+    expect(radial).toHaveFocus();
+    await waitFor(() =>
+      expect(
+        screen.queryByRole("complementary", { name: "Context window" }),
+      ).not.toBeInTheDocument(),
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Context" }));
+    expect(await screen.findByRole("complementary", { name: "Context window" })).toBeVisible();
+  });
+
+  it("uses the last actual model or the selected model for the composer subscription meter", async () => {
+    const codexChat = makeSession("codex-context", "Codex chat");
+    const newChat = makeSession("new-context", "Unsent chat");
+    const client = createClient({
+      messages: vi.fn(async ({ sessionID }: { sessionID: string }) => ({
+        data:
+          sessionID === codexChat.id
+            ? [
+                {
+                  info: {
+                    id: "codex-reply",
+                    sessionID,
+                    role: "assistant",
+                    providerID: "openai",
+                    modelID: "gpt-6.1-sol",
+                    time: { created: 1, completed: 2 },
+                    tokens: { input: 10, output: 4, reasoning: 0, cache: { read: 0, write: 0 } },
+                  },
+                  parts: [],
+                },
+              ]
+            : [],
+      })),
+    });
+    const readUsage = vi.spyOn(desktop, "getSubscriptionUsage").mockResolvedValue({
+      status: "available",
+      checkedAt: Date.now(),
+      windows: [
+        { id: "codex/primary", label: "5-hour window", usedPercent: 15, resetsAt: null },
+        { id: "codex/secondary", label: "Weekly", usedPercent: 35, resetsAt: null },
+      ],
+    });
+    const queryClient = createQueryClient();
+    seedReadyState(queryClient, { sessions: [codexChat, newChat] });
+    queryClient.setQueryData<{ all: unknown[]; connected: string[] }>(
+      qk.providers,
+      (providers) =>
+        providers && {
+          ...providers,
+          all: [
+            ...providers.all,
+            {
+              id: "openai-oauth",
+              name: "OpenAI",
+              models: { "gpt-6.1-sol": { id: "gpt-6.1-sol", name: "GPT-6.1 Sol" } },
+            },
+          ],
+          connected: [...providers.connected, "openai-oauth"],
+        },
+    );
+    render(<TestApp client={client} queryClient={queryClient} />);
+
+    fireEvent.click(await screen.findByText(codexChat.title));
+    const quota = await screen.findByRole("button", {
+      name: /BloxBot ChatGPT connection.*Weekly.*65% left/,
+    });
+    expect(readUsage).toHaveBeenCalledWith("codex");
+    fireEvent.click(quota);
+    const panel = within(await screen.findByRole("complementary", { name: "Context window" }));
+    expect(panel.getByText("85% left")).toBeVisible();
+    expect(panel.getByText("65% left")).toBeVisible();
+
+    fireEvent.click(screen.getByText(newChat.title));
+    expect(await screen.findByRole("button", { name: "Context and usage" })).toBeVisible();
+    expect(screen.queryByRole("button", { name: /65% left/ })).not.toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: /Claude 3\.5 Sonnet/ }));
+    fireEvent.click(await screen.findByRole("button", { name: /GPT-6\.1 Sol/ }));
+    expect(
+      await screen.findByRole("button", { name: /BloxBot ChatGPT connection.*65% left/ }),
+    ).toBeVisible();
+  });
+
+  it("wraps long user messages and shows saved Studio references as chips", async () => {
+    const session = makeSession("reference-chat", "Studio references");
+    const longText = "UnbrokenText".repeat(50);
+    const path = "game.Workspace.AnimalDiscoSession";
+    const text = `**Literal user text**\n${longText} <Instance reference="${path}">@AnimalDiscoSession</Instance> trailing text`;
+    const message: MessageWithParts = {
+      info: {
+        id: "reference-message",
+        sessionID: session.id,
+        role: "user",
+        time: { created: Date.now() },
+        agent: "studio",
+        model: { providerID: "anthropic", modelID: "claude-3.5-sonnet" },
+      },
+      parts: [
+        {
+          id: "reference-text",
+          sessionID: session.id,
+          messageID: "reference-message",
+          type: "text",
+          text,
+        },
+      ],
+    };
+    const client = createClient({ messages: vi.fn(async () => ({ data: [message] })) });
+    const queryClient = createQueryClient();
+    seedReadyState(queryClient, { sessions: [session] });
+    render(<TestApp client={client} queryClient={queryClient} />);
+    fireEvent.click(await screen.findByText(session.title));
+
+    const transcript = within(await screen.findByRole("region", { name: "Chat transcript" }));
+    const chip = await transcript.findByText("AnimalDiscoSession");
+    expect(chip).toHaveAttribute("title", path);
+    expect(chip.querySelector("img")).toHaveAttribute(
+      "src",
+      "bloxbot-icon://studio/light/Placeholder",
+    );
+    expect(transcript.queryByText(/<Instance/)).not.toBeInTheDocument();
+    const textPart = chip.closest(".whitespace-pre-wrap");
+    expect(textPart).toHaveClass("whitespace-pre-wrap");
+    expect(textPart?.textContent).toBe(
+      `**Literal user text**\n${longText} AnimalDiscoSession trailing text`,
+    );
+    expect(chip.closest(".bg-secondary")).toHaveClass("wrap-anywhere");
+  });
+
+  it("keeps queued messages above the composer and shows steer receipts in the transcript", async () => {
+    const session = makeSession("inbox-chat", "Inbox chat");
+    function inboxMessage(id: string, text: string, delivery: "queue" | "steer") {
+      const info: UserMessage = {
+        id,
+        sessionID: session.id,
+        role: "user",
+        time: { created: Date.now() },
+        agent: "studio",
+        model: { providerID: "anthropic", modelID: "claude-3.5-sonnet" },
+        inbox: { delivery, state: "pending" },
+      };
+      return {
+        info,
+        parts: [{ id: `${id}:text`, sessionID: session.id, messageID: id, type: "text", text }],
+      } satisfies MessageWithParts;
+    }
+    const queued = inboxMessage("queue", "Run after the turn", "queue");
+    const cancelled = inboxMessage("cancel", "Remove this from the queue", "queue");
+    const promoted = inboxMessage("promote", "Promote me to a steer", "queue");
+    const steer = inboxMessage("steer", "Change the current task", "steer");
+    let history = [queued, cancelled, promoted, steer];
+    const cancel = vi.fn(async () => {
+      history = history.filter(({ info }) => info.id !== cancelled.info.id);
+    });
+    const update = vi.fn(async () => {
+      history = history.map((message) =>
+        message.info.id === promoted.info.id
+          ? {
+              ...message,
+              info: { ...message.info, inbox: { delivery: "steer", state: "pending" } },
+            }
+          : message,
+      );
+    });
+    const client = createClient({
+      messages: vi.fn(async () => ({ data: history })),
+      inbox: { cancel, update },
+    });
+    const queryClient = createQueryClient();
+    seedReadyState(queryClient, { sessions: [session] });
+    render(<TestApp client={client} queryClient={queryClient} />);
+    fireEvent.click(await screen.findByText(session.title));
+
+    const tray = within(await screen.findByRole("list", { name: "Queued messages" }));
+    const transcript = within(await screen.findByRole("region", { name: "Chat transcript" }));
+    expect(tray.getByText("Run after the turn")).toBeVisible();
+    expect(transcript.queryByText("Run after the turn")).not.toBeInTheDocument();
+    expect(transcript.getByText("Change the current task")).toBeVisible();
+    expect(transcript.getByRole("img", { name: "Waiting for the next model step" })).toBeVisible();
+    expect(transcript.queryByRole("img", { name: "Model received this steer" })).toBeNull();
+
+    const queuedRow = (preview: string) => {
+      const row = tray.getByText(preview).closest("li");
+      if (!row) throw new Error("Queued message row is missing");
+      return within(row);
+    };
+    fireEvent.click(
+      queuedRow("Remove this from the queue").getByRole("button", {
+        name: "Remove queued message",
+      }),
+    );
+    await waitFor(() => expect(tray.queryByText("Remove this from the queue")).toBeNull());
+    expect(cancel).toHaveBeenCalledWith(
+      { sessionID: session.id, inboxID: cancelled.info.id },
+      { throwOnError: true },
+    );
+    fireEvent.click(
+      queuedRow("Promote me to a steer").getByRole("button", { name: "Steer queued message" }),
+    );
+    expect(await transcript.findByText("Promote me to a steer")).toBeVisible();
+    expect(tray.queryByText("Promote me to a steer")).toBeNull();
+    expect(update).toHaveBeenCalledWith(
+      { sessionID: session.id, inboxID: promoted.info.id, delivery: "steer" },
+      { throwOnError: true },
+    );
+
+    const active = { current: session.id };
+    const deliver = (message: typeof queued, delivery: "steer" | "queue") =>
+      sseDispatch(
+        queryClient,
+        {
+          type: "message.updated",
+          properties: {
+            sessionID: session.id,
+            info: { ...message.info, inbox: { delivery, state: "delivered" } },
+            inboxDelivered: true,
+          },
+        },
+        active,
+      );
+    act(() => deliver(steer, "steer"));
+    expect(
+      await transcript.findByRole("img", { name: "Steer delivered to the conversation" }),
+    ).toBeVisible();
+    expect(transcript.queryByRole("img", { name: "Model received this steer" })).toBeNull();
+    act(() => {
+      sseDispatch(
+        queryClient,
+        {
+          type: "message.inbox.read",
+          properties: { sessionID: session.id, messageID: steer.info.id },
+        },
+        active,
+      );
+      deliver(queued, "queue");
+    });
+    expect(await transcript.findByRole("img", { name: "Model received this steer" })).toBeVisible();
+    expect(transcript.getByText("Run after the turn")).toBeVisible();
+    expect(screen.queryByRole("list", { name: "Queued messages" })).toBeNull();
+  });
+
+  it("opens a child chat, steers it with an image, and sends its result to the main chat", async () => {
+    const root = makeSession("root", "Main chat");
+    const plannerImage = {
+      uri: "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAIAAAABCAYAAAD0In+KAAAADklEQVR4nGP4z8DwHwQBEPgD/U6VwW8AAAAASUVORK5CYII=",
+      name: "Planner reference.png",
+    };
+    const planner = {
+      ...makeSession("planner", "Review layout"),
+      parentID: root.id,
+      agent: "planner",
+      model: { id: "claude-3.5-sonnet", providerID: "anthropic", variant: "xhigh" },
+      cost: 0.125,
+    };
+    const auditor = {
+      ...makeSession("auditor", "Inspect hierarchy"),
+      parentID: root.id,
+      agent: "explorer-auditor",
+      outcome: "succeeded" as const,
+    };
+    const unrelated = {
+      ...makeSession("unrelated", "Different workspace task"),
+      parentID: "other",
+    };
+    const nested = {
+      ...makeSession("nested", "Check contrast"),
+      parentID: planner.id,
+      outcome: "interrupted" as const,
+    };
+    const wideValue = "longunbrokencode".repeat(30);
+    const client = createClient({
+      promptInbox: vi.fn().mockResolvedValue({}),
+      messages: vi.fn(async ({ sessionID }: { sessionID: string }) => {
+        const messageID = `message-${sessionID}`;
+        const shared = { id: `part-${sessionID}`, sessionID, messageID };
+        return {
+          data: [
+            ...(sessionID === planner.id
+              ? [
+                  {
+                    info: { id: "reference", sessionID, role: "user", time: { created: 0 } },
+                    parts: [
+                      {
+                        id: "planner-image",
+                        type: "file",
+                        mime: "image/png",
+                        url: plannerImage.uri,
+                        filename: plannerImage.name,
+                      },
+                    ],
+                  },
+                ]
+              : []),
+            {
+              info: {
+                id: messageID,
+                sessionID,
+                role: "assistant",
+                time: { created: 1, completed: 2 },
+                tokens: { input: 10, output: 4, reasoning: 0, cache: { read: 0, write: 0 } },
+                ...(sessionID === nested.id && {
+                  providerID: "anthropic",
+                  modelID: "claude-3.5-sonnet",
+                  variant: "low",
+                }),
+              },
+              parts: [
+                sessionID === root.id
+                  ? {
+                      ...shared,
+                      callID: "call",
+                      type: "tool",
+                      tool: "task",
+                      state: {
+                        status: "running",
+                        input: { agent: "planner", description: "Review layout" },
+                        metadata: { sessionID: planner.id },
+                        time: { start: 1 },
+                      },
+                    }
+                  : {
+                      ...shared,
+                      type: "text",
+                      text:
+                        sessionID === planner.id
+                          ? `Planner transcript.\n\n\`\`\`\n${wideValue}\n\`\`\`\n\n| Column |\n| --- |\n| ${wideValue} |`
+                          : sessionID === nested.id
+                            ? "Nested transcript."
+                            : "Auditor transcript.",
+                    },
+                ...(sessionID === planner.id
+                  ? [
+                      {
+                        ...shared,
+                        id: "nested-task-part",
+                        callID: "nested-call",
+                        type: "tool",
+                        tool: "task",
+                        state: {
+                          status: "completed",
+                          input: { description: nested.title },
+                          metadata: { sessionID: nested.id },
+                        },
+                      },
+                    ]
+                  : []),
+              ],
+            },
+          ],
+        };
+      }),
+    });
+    const queryClient = createQueryClient();
+    seedReadyState(queryClient, { sessions: [root, planner, auditor, nested, unrelated] });
+    queryClient.setQueryData(qk.statuses, { [planner.id]: { type: "busy" } });
+    render(
+      <TestApp client={client} queryClient={queryClient}>
+        <div id="titlebar-actions" />
+      </TestApp>,
+    );
+    fireEvent.click(await screen.findByText("Main chat"));
+    const toggle = screen.getByRole("button", { name: "Subagents" });
+    fireEvent.click(toggle);
+    const drawer = await screen.findByRole("complementary", { name: "Subagent chats" });
+    const panel = within(drawer);
+    expect(panel.getByRole("heading", { name: "Subagents" })).toHaveFocus();
+    const active = within(panel.getByRole("region", { name: "Active" }));
+    const plannerRow = active.getByRole("button", { name: "Review layout, Running" });
+    expect(plannerRow).toBeVisible();
+    const done = within(panel.getByRole("region", { name: "Done" }));
+    const auditorRow = done.getByRole("button", { name: "Inspect hierarchy, Completed" });
+    expect(auditorRow).toBeVisible();
+    expect(plannerRow.querySelector(".lucide-bot")?.getAttribute("class")).toBeDefined();
+    expect(plannerRow.querySelector(".lucide-bot")?.getAttribute("class")).not.toBe(
+      auditorRow.querySelector(".lucide-bot")?.getAttribute("class"),
+    );
+    expect(done.getByRole("button", { name: "Check contrast, Stopped" })).toBeVisible();
+    expect(panel.queryByText("Different workspace task")).not.toBeInTheDocument();
+    expect(
+      await screen.findByTitle("Reported subagent session cost in US dollars"),
+    ).toHaveTextContent("$0.125");
+    fireEvent.click(await screen.findByRole("button", { name: "Open Subagent Chat" }));
+
+    expect(await panel.findByText("Planner transcript.")).toBeVisible();
+    expect(panel.getByRole("heading", { name: planner.title })).toBeVisible();
+    expect(panel.getByText("Claude 3.5 Sonnet (Anthropic)")).toBeVisible();
+    expect(panel.getByText("· Extra high effort")).toBeVisible();
+    const transcript = drawer.querySelector("[data-chat-scroll='subagent']");
+    expect(transcript?.querySelector("pre")).toHaveClass("overflow-x-auto");
+    expect(panel.getByRole("table").parentElement).toHaveClass("overflow-x-auto");
+    const message = panel.getByRole("textbox", { name: "Message subagent" });
+    fireEvent.click(panel.getByRole("button", { name: `Open ${plannerImage.name}` }));
+    const preview = screen.getByRole("dialog", { name: plannerImage.name });
+    fireEvent.contextMenu(within(preview).getByRole("img", { name: plannerImage.name }));
+    fireEvent.click(await screen.findByRole("menuitem", { name: "Add to Chat" }));
+    expect(await panel.findByRole("button", { name: `Remove ${plannerImage.name}` })).toBeVisible();
+    expect(preview).not.toBeInTheDocument();
+    expect(client.session.promptInbox).not.toHaveBeenCalled();
+    await waitFor(() => expect(message).toHaveFocus());
+    fireEvent.change(message, { target: { value: "Check spacing next." } });
+    fireEvent.keyDown(message, { key: "Enter", shiftKey: true });
+    fireEvent.keyDown(message, { key: "Enter", isComposing: true });
+    expect(client.session.promptInbox).not.toHaveBeenCalled();
+    fireEvent.keyDown(message, { key: "Enter" });
+    await waitFor(() =>
+      expect(client.session.promptInbox).toHaveBeenCalledWith(
+        expect.objectContaining({
+          sessionID: planner.id,
+          text: "Check spacing next.",
+          delivery: "steer",
+          files: [plannerImage],
+        }),
+        { throwOnError: true },
+      ),
+    );
+    await waitFor(() => expect(message).toHaveValue(""));
+    fireEvent.change(panel.getByRole("combobox", { name: "Subagent message delivery" }), {
+      target: { value: "steer" },
+    });
+    fireEvent.change(message, { target: { value: "Review accessibility afterwards." } });
+    fireEvent.keyDown(message, { key: "Enter", ctrlKey: true });
+    await waitFor(() =>
+      expect(client.session.promptInbox).toHaveBeenCalledWith(
+        expect.objectContaining({
+          sessionID: planner.id,
+          text: "Review accessibility afterwards.",
+          delivery: "queue",
+        }),
+        { throwOnError: true },
+      ),
+    );
+    await waitFor(() => expect(message).toHaveValue(""));
+    act(() => {
+      queryClient.setQueryData(qk.config, (config: Record<string, unknown>) => ({
+        ...config,
+        composerShortcuts: { steer: "alt-enter", queue: "mod-shift-enter" },
+      }));
+    });
+    fireEvent.change(message, { target: { value: "Use my custom shortcut." } });
+    fireEvent.keyDown(message, { key: "Enter" });
+    expect(client.session.promptInbox).toHaveBeenCalledTimes(2);
+    fireEvent.keyDown(message, { key: "Enter", altKey: true });
+    await waitFor(() =>
+      expect(client.session.promptInbox).toHaveBeenCalledWith(
+        expect.objectContaining({
+          sessionID: planner.id,
+          text: "Use my custom shortcut.",
+          delivery: "steer",
+        }),
+        { throwOnError: true },
+      ),
+    );
+    await waitFor(() => expect(message).toHaveValue(""));
+    fireEvent.change(message, { target: { value: "Keep my draft" } });
+    fireEvent.click(panel.getByRole("button", { name: "Open Subagent Chat" }));
+    expect(await panel.findByText("Nested transcript.")).toBeVisible();
+    expect(panel.getByText("· Low effort")).toBeVisible();
+    expect(panel.getByRole("textbox", { name: "Message subagent" })).toHaveFocus();
+
+    fireEvent.click(panel.getByRole("button", { name: "Back" }));
+    expect(panel.getByRole("button", { name: "Check contrast, Stopped" })).toHaveFocus();
+    fireEvent.click(panel.getByRole("button", { name: "Review layout, Running" }));
+    expect(panel.getByRole("textbox", { name: "Message subagent" })).toHaveValue("Keep my draft");
+    fireEvent.click(panel.getByRole("button", { name: "Back" }));
+    fireEvent.click(panel.getByRole("button", { name: "Inspect hierarchy, Completed" }));
+    expect(await panel.findByText("Auditor transcript.")).toBeVisible();
+    expect(panel.queryByText("Planner transcript.")).not.toBeInTheDocument();
+    expect(panel.queryByText(/effort/)).not.toBeInTheDocument();
+    fireEvent.click(panel.getByRole("button", { name: "Send Summary Back to Main Agent" }));
+    await waitFor(() =>
+      expect(client.session.promptInbox).toHaveBeenCalledWith(
+        expect.objectContaining({
+          sessionID: root.id,
+          text: expect.stringContaining("Auditor transcript."),
+          delivery: "queue",
+        }),
+        { throwOnError: true },
+      ),
+    );
+    fireEvent.click(panel.getByRole("button", { name: "Close subagent chats" }));
+    expect(toggle).toHaveFocus();
   });
 
   it("ends the turn at the free limit with the reason and a way to keep going", async () => {

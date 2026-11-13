@@ -10,6 +10,8 @@ import { createServer, type Server } from "node:http";
 import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
+import { Client as McpClient } from "@modelcontextprotocol/sdk/client/index.js";
+import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import { Server as McpServer } from "@modelcontextprotocol/sdk/server/index.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import { CallToolRequestSchema, ListToolsRequestSchema } from "@modelcontextprotocol/sdk/types.js";
@@ -24,8 +26,15 @@ import { qk } from "@/lib/queryKeys";
 import { type MessagesCache, sseDispatch } from "@/lib/sseDispatch";
 import { DEFAULT_SYSTEM_PROMPT } from "@/lib/systemPrompt";
 import { PASSWORD, shellCall, startScriptedProvider, startServer } from "@/test/support/liveServer";
+import { DEFAULT_APP_CONFIG } from "@/types/desktop";
 import { saveInstructions } from "../../electron/instructionFiles";
-import { createOpenCodeConfig, withSystemPrompt } from "../../electron/opencodeConfig";
+import {
+  createOpenCodeConfig,
+  withModelSettings,
+  withSystemPrompt,
+} from "../../electron/opencodeConfig";
+import { startStudioMcpBroker } from "../../electron/services/StudioMcpBroker";
+import { defaultSkillSources, importSkills } from "../../electron/skillImport";
 
 const BIN = process.env.OPENCODE_LIVE_BIN;
 // Points the real-model suite at another provider, so it doesn't spend the free tier.
@@ -720,6 +729,7 @@ describe.skipIf(!BIN)("[no model] Running a chat", () => {
     }) => Promise<void>,
     mcpUrl = "http://127.0.0.1:9/mcp",
     prepare?: (home: string) => Promise<void>,
+    modelInput?: string[],
   ) {
     const home = await mkdtemp(join(tmpdir(), "bloxbot-chat-"));
     await prepare?.(home);
@@ -730,7 +740,14 @@ describe.skipIf(!BIN)("[no model] Running a chat", () => {
       configFile,
       JSON.stringify({
         ...createOpenCodeConfig({ url: mcpUrl }),
-        providers: { opencode: { settings: { baseURL: url } } },
+        providers: {
+          opencode: {
+            settings: { baseURL: url },
+            ...(modelInput
+              ? { models: { [MODEL.modelID]: { capabilities: { input: modelInput } } } }
+              : {}),
+          },
+        },
       }),
     );
     const { child, baseUrl, workspace } = await startServer(BIN as string, home);
@@ -827,6 +844,66 @@ describe.skipIf(!BIN)("[no model] Running a chat", () => {
       await rm(fakeHome, { recursive: true, force: true }).catch(() => undefined);
     }
   }, 60_000);
+
+  it("offers skills imported while it runs, then their updates, and drops removed ones", async () => {
+    const fakeHome = await mkdtemp(join(tmpdir(), "bloxbot-home-"));
+    const source = (name: string) => join(fakeHome, ".codex", "skills", name);
+    const skill = async (name: string, marker: string) => {
+      await mkdir(source(name), { recursive: true });
+      await writeFile(
+        join(source(name), "SKILL.md"),
+        `---\nname: ${name}\ndescription: ${marker}\n---\nBody\n`,
+      );
+    };
+    try {
+      await withServer(
+        [{ content: "OK" }, { content: "OK" }, { content: "OK" }],
+        async ({ client, configFile, bodies, events }) => {
+          // What a new chat's request to the model contains.
+          const request = async () => {
+            const created = await client.session.create({}, { throwOnError: true });
+            await turn(client, events, created.data.id, "Hello");
+            return bodies.at(-1);
+          };
+          // As in the app: copy, then ask OpenCode to read its skills again.
+          const sync = async () => {
+            const result = await importSkills({
+              sources: defaultSkillSources(fakeHome),
+              configDirectory: dirname(configFile),
+              home: fakeHome,
+            });
+            await client.location.reload({ throwOnError: true });
+            return result;
+          };
+
+          // The first import creates the skills folder under an engine that started without one.
+          await expect(access(join(dirname(configFile), "skills"))).rejects.toThrow();
+          expect(await request()).not.toContain("SKILL_");
+
+          await skill("imported-kept", "SKILL_KEPT_FIRST");
+          await skill("imported-gone", "SKILL_GONE");
+          expect(await sync()).toMatchObject({ imported: ["imported-gone", "imported-kept"] });
+          const added = await request();
+          expect(added).toContain("SKILL_KEPT_FIRST");
+          expect(added).toContain("SKILL_GONE");
+
+          await skill("imported-kept", "SKILL_KEPT_SECOND");
+          await rm(source("imported-gone"), { recursive: true });
+          expect(await sync()).toMatchObject({
+            updated: ["imported-kept"],
+            removed: ["imported-gone"],
+            skipped: [],
+          });
+          const synced = await request();
+          expect(synced).toContain("SKILL_KEPT_SECOND");
+          expect(synced).not.toContain("SKILL_KEPT_FIRST");
+          expect(synced).not.toContain("SKILL_GONE");
+        },
+      );
+    } finally {
+      await rm(fakeHome, { recursive: true, force: true }).catch(() => undefined);
+    }
+  }, 90_000);
 
   async function turn(client: OpencodeClient, events: Event[], sessionID: string, text: string) {
     const from = events.length;
@@ -948,6 +1025,129 @@ describe.skipIf(!BIN)("[no model] Running a chat", () => {
         expect(shell?.state.status === "completed" && shell.state.output).toContain("ci-probe");
         expect(parts.some((part) => part.type === "text" && part.text === "All done")).toBe(true);
         expect(events.some((event) => event.type === "message.part.delta")).toBe(true);
+      },
+    );
+  }, 60_000);
+
+  it("opens a General subagent at its configured model and effort and preserves them on follow-up", async () => {
+    await withServer(
+      [
+        {
+          tool_calls: [
+            {
+              index: 0,
+              id: "call_general",
+              type: "function",
+              function: {
+                name: "subagent",
+                arguments: JSON.stringify({
+                  agent: "general",
+                  description: "Review fixture plan",
+                  prompt: "Review the fixture plan.",
+                }),
+              },
+            },
+          ],
+        },
+        { content: "Child plan ready" },
+        { content: "Root received the plan" },
+        { content: "Child follow-up complete" },
+      ],
+      async ({ client, configFile, bodies, events }) => {
+        const provider = (await client.provider.list({}, { throwOnError: true })).data.all.find(
+          (item) => item.id === "opencode",
+        );
+        const childModel = Object.keys(provider?.models ?? {}).find(
+          (id) => id !== MODEL.modelID && id.endsWith("-free"),
+        );
+        if (!childModel) throw new Error("The fixture needs two available OpenCode models.");
+        const config = JSON.parse(await readFile(configFile, "utf8"));
+        config.providers.opencode.models = {
+          [childModel]: { variants: [{ id: "low", body: { reasoning_effort: "low" } }] },
+        };
+        await writeFile(
+          configFile,
+          withModelSettings(JSON.stringify(config), {
+            ...DEFAULT_APP_CONFIG,
+            subagentModels: { general: `opencode/${childModel}` },
+            subagentEfforts: { general: "low" },
+          }),
+        );
+        await client.location.reload({ throwOnError: true });
+
+        const root = (await client.session.create({}, { throwOnError: true })).data;
+        await client.session.promptAsync(
+          {
+            sessionID: root.id,
+            model: MODEL,
+            parts: [{ type: "text", text: "Delegate the fixture plan." }],
+          },
+          { throwOnError: true },
+        );
+        const idleAfter = async (sessionID: string, from = 0) => {
+          await expect
+            .poll(
+              () =>
+                events
+                  .slice(from)
+                  .some(
+                    (event) =>
+                      event.type === "session.idle" && event.properties.sessionID === sessionID,
+                  ),
+              { timeout: 15_000 },
+            )
+            .toBe(true);
+        };
+        await idleAfter(root.id);
+        const child = (
+          await client.experimental.session.list({}, { throwOnError: true })
+        ).data.find((session) => session.parentID === root.id);
+        if (!child) throw new Error("OpenCode did not create a child session.");
+        expect(child).toMatchObject({
+          agent: "general",
+          model: { id: childModel, variant: "low" },
+          outcome: "succeeded",
+        });
+        expect(bodies[0]).toContain(`Configured model: opencode/${childModel}. Effort: low.`);
+        expect(
+          events.some(
+            (event) =>
+              event.type === "message.part.updated" &&
+              event.properties.part.type === "tool" &&
+              event.properties.part.tool === "task" &&
+              event.properties.part.state.status === "running" &&
+              event.properties.part.state.metadata?.sessionID === child.id,
+          ),
+        ).toBe(true);
+
+        const from = events.length;
+        await client.session.promptInbox(
+          {
+            sessionID: child.id,
+            text: "Expand the plan.",
+            delivery: "queue",
+          },
+          { throwOnError: true },
+        );
+        await idleAfter(child.id, from);
+        expect(JSON.parse(bodies.at(-1) ?? "{}")).toMatchObject({
+          model: childModel,
+          reasoning_effort: "low",
+        });
+        const messages = (
+          await client.session.messages({ sessionID: child.id }, { throwOnError: true })
+        ).data;
+        expect(
+          messages
+            .flatMap((message) => message.parts)
+            .flatMap((part) => (part.type === "text" ? [part.text] : [])),
+        ).toEqual(
+          expect.arrayContaining([
+            "Child plan ready",
+            "Expand the plan.",
+            "Child follow-up complete",
+          ]),
+        );
       },
     );
   }, 60_000);
@@ -1166,6 +1366,132 @@ describe.skipIf(!BIN)("[no model] Running a chat", () => {
       );
     } finally {
       mcp.close();
+    }
+  }, 60_000);
+
+  it("keeps a Studio capture in the tool stream, history and provider vision input", async () => {
+    const base64 =
+      "iVBORw0KGgoAAAANSUhEUgAAAAIAAAABCAYAAAD0In+KAAAADklEQVR4nGP4z8DwHwQBEPgD/U6VwW8AAAAASUVORK5CYII=";
+    const dataUrl = `data:image/png;base64,${base64}`;
+    const captureFolder = await mkdtemp(join(tmpdir(), "bloxbot-live-capture-"));
+    const capture = join(captureFolder, "viewport.png");
+    await writeFile(capture, Buffer.from(base64, "base64"));
+    const broker = await startStudioMcpBroker({
+      async listTools() {
+        return {
+          tools: [
+            {
+              name: "screen_capture",
+              description: "Capture Studio's viewport",
+              inputSchema: { type: "object" },
+            },
+          ],
+        };
+      },
+      async callTool() {
+        return { content: [{ type: "text", text: capture }] };
+      },
+      onToolsChanged() {},
+      async close() {},
+    });
+    try {
+      const probe = new McpClient({ name: "vision-test", version: "1.0.0" });
+      try {
+        await probe.connect(new StreamableHTTPClientTransport(new URL(broker.info.url)));
+        await expect(probe.callTool({ name: "screen_capture" })).resolves.toMatchObject({
+          content: expect.arrayContaining([{ type: "image", mimeType: "image/png", data: base64 }]),
+        });
+      } finally {
+        await probe.close();
+      }
+      await withServer(
+        [
+          {
+            tool_calls: [
+              {
+                index: 0,
+                id: "capture_call",
+                type: "function",
+                function: {
+                  name: "execute",
+                  arguments: JSON.stringify({
+                    code: 'return await tools["roblox-studio"].screen_capture({ capture_id: "viewport_check" });',
+                  }),
+                },
+              },
+            ],
+          },
+          { content: "![Viewport check](capture:viewport_check)" },
+        ],
+        async ({ client, events, bodies }) => {
+          const deadline = Date.now() + 20_000;
+          while (Date.now() < deadline) {
+            const { data } = await client.mcp.status({}, { throwOnError: true });
+            if (data["roblox-studio"]?.status === "connected") break;
+            await new Promise((resolve) => setTimeout(resolve, 200));
+          }
+          // The Code Mode catalog updates after the MCP connection is reported.
+          await new Promise((resolve) => setTimeout(resolve, 10_000));
+          const {
+            data: { id: sessionID },
+          } = await client.session.create({}, { throwOnError: true });
+          await turn(client, events, sessionID, "Capture Studio's viewport.");
+
+          const attachments = [{ mime: "image/png", url: dataUrl }];
+          const live = events.flatMap((event) =>
+            event.type === "message.part.updated" ? [event.properties.part] : [],
+          );
+          expect(live).toContainEqual(
+            expect.objectContaining({
+              tool: "execute",
+              state: expect.objectContaining({
+                status: "completed",
+                metadata: expect.objectContaining({
+                  toolCalls: expect.arrayContaining([
+                    expect.objectContaining({
+                      tool: expect.stringMatching(/screen_capture$/),
+                      input: expect.objectContaining({ capture_id: "viewport_check" }),
+                    }),
+                  ]),
+                }),
+                attachments: expect.arrayContaining([expect.objectContaining(attachments[0])]),
+              }),
+            }),
+          );
+          const history = await client.session.messages({ sessionID }, { throwOnError: true });
+          expect(history.data.flatMap((entry) => entry.parts)).toContainEqual(
+            expect.objectContaining({
+              tool: "execute",
+              state: expect.objectContaining({
+                status: "completed",
+                attachments: expect.arrayContaining([expect.objectContaining(attachments[0])]),
+              }),
+            }),
+          );
+          expect(bodies.map((body): unknown => JSON.parse(body))).toContainEqual(
+            expect.objectContaining({
+              messages: expect.arrayContaining([
+                expect.objectContaining({
+                  content: expect.arrayContaining([
+                    { type: "image_url", image_url: { url: dataUrl } },
+                  ]),
+                }),
+              ]),
+            }),
+          );
+          await client.session.delete({ sessionID }, { throwOnError: true });
+          await expect(
+            client.session.messages({ sessionID }, { throwOnError: true }),
+          ).rejects.toBeDefined();
+          expect(await readFile(capture)).toEqual(Buffer.from(base64, "base64"));
+        },
+        broker.info.url,
+        undefined,
+        ["text", "image"],
+      );
+    } finally {
+      await broker.close();
+      await rm(captureFolder, { recursive: true, force: true });
     }
   }, 60_000);
 });

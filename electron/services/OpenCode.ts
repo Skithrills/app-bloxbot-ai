@@ -3,14 +3,17 @@ import { randomBytes } from "node:crypto";
 import { writeFile } from "node:fs/promises";
 import { join } from "node:path";
 
+import { OpenCode as OpenCodeSdk } from "@opencode/client";
 import { Context, Data, Duration, Effect, Layer, Option, Schedule, type Scope } from "effect";
 import { networkConnections, type Systeminformation } from "systeminformation";
 
-import type { OpenCodeInfo, OpenCodeStartupProgress } from "../../src/types/desktop";
+import { OPENAI_API_KEY_ENV } from "../../src/lib/openAiProfiles";
+import type { ModelSettings, OpenCodeInfo, OpenCodeStartupProgress } from "../../src/types/desktop";
 import type { blenderMcpServerConfig } from "./BlenderTools";
 import { createOpenCodeConfig, OPENCODE_ISOLATION_ENV } from "../opencodeConfig";
 import { loadShellPath } from "../shellEnv";
 import { ensureFolder, workspaceFailureReason } from "../workspaceFolders";
+import { migrateLegacyOpenAiCredentials } from "./openAiCredentials";
 import {
   forgetOpenCodeProcess,
   recordOpenCodeProcess,
@@ -231,6 +234,8 @@ interface PreparedOpenCode {
 
 export interface OpenCodeOptions {
   loadSystemPrompt?: () => Effect.Effect<string | null>;
+  loadModelSettings?: () => Effect.Effect<ModelSettings>;
+  onOpenAiProfileMigrated?: (providerID: string) => Effect.Effect<void>;
   loadBlenderServer?: () => Effect.Effect<ReturnType<typeof blenderMcpServerConfig> | null>;
   binaryCacheDirectory: string;
   fetchWithSystemCertificates?: OpenCodeBinaryOptions["fetchWithSystemCertificates"];
@@ -647,7 +652,8 @@ function prepareOpenCode(
     );
     const systemPrompt = options.loadSystemPrompt ? yield* options.loadSystemPrompt() : null;
     const blender = options.loadBlenderServer ? yield* options.loadBlenderServer() : null;
-    const config = createOpenCodeConfig(broker.info, systemPrompt, blender);
+    const modelSettings = options.loadModelSettings ? yield* options.loadModelSettings() : undefined;
+    const config = createOpenCodeConfig(broker.info, systemPrompt, blender, modelSettings);
     yield* fileOperation("Failed to write the OpenCode configuration", () =>
       writeFile(
         join(configDirectory, "opencode.json"),
@@ -679,6 +685,11 @@ function prepareOpenCode(
 function spawnOpenCode(prepared: PreparedOpenCode): Effect.Effect<OpenCodeProcess, OpenCodeError> {
   return Effect.gen(function* () {
     const shellPath = yield* Effect.promise(loadShellPath);
+    // The stock "openai" integration is reserved for ChatGPT sign-in in BloxBot.
+    const engineEnv = { ...process.env };
+    for (const key of Object.keys(engineEnv)) {
+      if (key.toUpperCase() === "OPENAI_API_KEY") delete engineEnv[key];
+    }
     const child = yield* Effect.try({
       try: () =>
         spawn(
@@ -687,7 +698,8 @@ function spawnOpenCode(prepared: PreparedOpenCode): Effect.Effect<OpenCodeProces
           {
             cwd: prepared.workspace,
             env: {
-              ...process.env,
+              ...engineEnv,
+              [OPENAI_API_KEY_ENV]: process.env[OPENAI_API_KEY_ENV] ?? process.env.OPENAI_API_KEY,
               ...(shellPath ? { PATH: shellPath } : {}),
               ...OPENCODE_ISOLATION_ENV,
               XDG_CACHE_HOME: prepared.xdgCache,
@@ -833,6 +845,27 @@ export function makeOpenCodeLayer(options: OpenCodeOptions) {
           }),
         ),
       );
+      if (options.onOpenAiProfileMigrated) {
+        const profile = yield* Effect.tryPromise((signal) => {
+          const api = OpenCodeSdk.make({
+            baseUrl: `http://${LOOPBACK}:${resource.port}`,
+            headers: { Authorization: resource.authorization },
+            fetch: (request, init) => fetch(request, { ...init, signal }),
+          });
+          return migrateLegacyOpenAiCredentials(
+            api,
+            Boolean(process.env.OPENAI_API_KEY || process.env[OPENAI_API_KEY_ENV]),
+          );
+        }).pipe(
+          Effect.timeout("8 seconds"),
+          Effect.catchAll(() =>
+            Effect.logWarning("[opencode] Could not migrate the previous OpenAI connection").pipe(
+              Effect.as(undefined),
+            ),
+          ),
+        );
+        if (profile) yield* options.onOpenAiProfileMigrated(profile);
+      }
       const { pid } = resource.child;
       if (pid !== undefined && globalThis.process.platform === "win32") {
         yield* explainNetstatMiss(pid, resource.port).pipe(

@@ -5,9 +5,10 @@ import { qk } from "@/lib/queryKeys";
 import { useActiveSession } from "@/providers/ActiveSessionProvider";
 import { useOpenCodeClient } from "@/providers/OpenCodeClientProvider";
 
-export function useReplyPermission() {
+export function useReplyPermission(targetSessionId?: string) {
   const { client } = useOpenCodeClient();
-  const { activeSessionId } = useActiveSession();
+  const { activeSessionId: rootSessionId } = useActiveSession();
+  const activeSessionId = targetSessionId ?? rootSessionId;
   const queryClient = useQueryClient();
 
   return useMutation({
@@ -20,7 +21,7 @@ export function useReplyPermission() {
     }) => {
       if (!client || !activeSessionId) throw new Error("No client or session");
       const sessionID = activeSessionId;
-      await client.permission.reply({ requestID, reply }, { throwOnError: true });
+      await client.permission.reply({ requestID, sessionID, reply }, { throwOnError: true });
       return sessionID;
     },
     onSuccess: (sessionID) => {

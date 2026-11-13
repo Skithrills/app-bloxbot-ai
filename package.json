@@ -1,7 +1,7 @@
 {
   "name": "bloxbot",
   "private": true,
-  "version": "0.15.1",
+  "version": "0.15.5",
   "description": "AI-assisted Roblox development from a secure desktop app",
   "type": "module",
   "main": "dist-electron/main/main.js",
@@ -13,12 +13,12 @@
   "homepage": "https://bloxbot.ai",
   "repository": {
     "type": "git",
-    "url": "https://github.com/paralov/app-bloxbot-ai.git"
+    "url": "https://github.com/Skithrills/app-bloxbot-ai.git"
   },
   "scripts": {
     "dev": "vite",
     "build": "tsc && vite build",
-    "package": "pnpm build && electron-builder",
+    "package": "pnpm build && electron-builder --publish never",
     "preview": "vite preview",
     "lint": "biome check src/",
     "lint:fix": "biome check --write src/",

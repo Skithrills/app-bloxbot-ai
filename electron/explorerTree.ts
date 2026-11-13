@@ -20,6 +20,19 @@ const CONCURRENT_READS = 3;
 // more than this is split up. It can't be paged: the tool has no offset.
 const READ_LIMIT = 3_000;
 const NO_LIMIT = 1_000_000;
+// The most rows a read that goes deep may bring back. Studio builds one in about 25ms per thousand
+// rows, and an answer over about 16MB never arrives at all (88,000 rows came back, 100,000 didn't):
+// the read just times out, and the ones waiting behind it stall. So a deep read is always capped
+// well short of that, and one that hits the cap is thrown away, because its rows no longer say
+// which of them hold more. Rows deep in a map run to a few hundred bytes each, which is what this
+// leaves room for.
+const DEEP_READ_LIMIT = 30_000;
+// Studio answers in well under a second. Past this, the answer isn't coming.
+const READ_TIMEOUT_MS = 20_000;
+// After this many walks in a row where a place in the tree couldn't be read, it's left alone for a
+// while, unless the person asks for a fresh read.
+const MAX_READ_FAILURES = 2;
+const RETRY_FAILED_READ_MS = 5 * 60_000;
 const MAX_DEPTH = 10;
 // Past this many objects to read one by one, a single long read is quicker for everyone.
 const MAX_SPLIT = 256;
@@ -51,6 +64,8 @@ interface Plan {
   readonly nodes: number;
   /** How deep the objects sharing a path went last time, to start there. */
   readonly sharedPathDepth?: number;
+  /** The read that going deeper was given up at, so it isn't tried again until that read changes. */
+  readonly cappedAt?: string;
 }
 
 interface TreeState {
@@ -60,7 +75,10 @@ interface TreeState {
   complete: boolean;
   truncated: boolean;
   readAt: number;
+  retryAt: number;
   plans: Map<string, Plan>;
+  /** Places that couldn't be read: how many walks in a row, when, and what went wrong last. */
+  failures: Map<string, { count: number; at: number; error: unknown }>;
 }
 
 const trees = new Map<string, TreeState>();
@@ -125,7 +143,10 @@ async function readTree(
   args: Record<string, unknown>,
   signal?: AbortSignal,
 ): Promise<{ read: Read } | { error: string }> {
-  const result = await callTool("search_game_tree", args, signal ? { signal } : undefined);
+  const result = await callTool("search_game_tree", args, {
+    timeout: READ_TIMEOUT_MS,
+    ...(signal ? { signal } : {}),
+  });
   const error = mcpError(result);
   if (error) return { error };
   const data = mcpData(result);
@@ -185,6 +206,7 @@ interface BuiltNode {
   path: string;
   hasChildren: boolean;
   pending?: boolean;
+  unlisted?: number;
   children: BuiltNode[];
 }
 
@@ -326,12 +348,17 @@ async function buildChildren(
   identify(top.children, `${anchor.id}.`);
 
   // What this read stopped short of. Nothing can reach below an object that shares a path, so those
-  // don't offer an arrow that would do nothing.
+  // don't offer an arrow that would do nothing. They say how many they hold instead.
   const frontier: Anchor[] = [];
   for (const [key, entries] of byKey) {
-    if (!reachable.get(key) || key === anchorKey) continue;
+    if (key === anchorKey) continue;
+    const canRead = reachable.get(key);
     for (const { hidden, node, rowPath } of entries) {
       if (hidden <= 0 || node.children.length > 0 || !node.id) continue;
+      if (!canRead) {
+        node.unlisted = hidden;
+        continue;
+      }
       node.hasChildren = true;
       node.pending = true;
       frontier.push({ path: rowPath, id: node.id });
@@ -380,7 +407,9 @@ export async function syncExplorerTree(
           complete: false,
           truncated: false,
           readAt: 0,
+          retryAt: Infinity,
           plans: new Map(),
+          failures: new Map(),
         };
   trees.set(studioId, state);
 
@@ -421,16 +450,18 @@ export async function syncExplorerTree(
   if (services.length === 0) return waitingFor("place_loading");
   const rootHash = hashOf(JSON.stringify([placeName, services]));
   const watching = history.treeVersion !== null && model === "Edit";
+  const now = Date.now();
 
   if (
     !force &&
     !fresh &&
     watching &&
     state.complete &&
-    Date.now() - state.readAt < SAFETY_READ_MS &&
+    now - state.readAt < SAFETY_READ_MS &&
     state.model === model &&
     state.treeVersion === history.treeVersion &&
-    state.rootHash === rootHash
+    state.rootHash === rootHash &&
+    now < state.retryAt
   ) {
     return {
       changed: false,
@@ -440,13 +471,19 @@ export async function syncExplorerTree(
       slowestReadMs,
     };
   }
-  if (state.model !== model) state.plans.clear();
+  if (state.model !== model) {
+    state.plans.clear();
+    state.failures.clear();
+  }
 
   let changed = false;
+  let visited = 0;
+  const skipped = new Set<string>();
+  let retryAt = Infinity;
   let truncated = false;
   let complete = true;
   let nodeCount = services.length;
-  let firstError: unknown = null;
+  let lastError: unknown = null;
   let waiting = null as ExplorerWait | null;
   const seen = new Set<string>();
   const queue: Anchor[] = [];
@@ -494,11 +531,22 @@ export async function syncExplorerTree(
     return answer.read;
   };
 
-  const absorb = async (anchor: Anchor, whole: Read, splits: boolean, sharedPathDepth?: number) => {
+  const absorb = async (
+    anchor: Anchor,
+    whole: Read,
+    splits: boolean,
+    { sharedPathDepth, cappedAt }: { sharedPathDepth?: number; cappedAt?: string } = {},
+  ) => {
     if (whole.truncated) truncated = true;
     const before = state.plans.get(anchor.path);
     let plan: Plan;
-    if (before && !before.hasTwins && before.hash === whole.hash && before.splits === splits) {
+    if (
+      before &&
+      !before.hasTwins &&
+      before.hash === whole.hash &&
+      before.splits === splits &&
+      before.cappedAt === cappedAt
+    ) {
       plan = before;
     } else {
       const counts = new Map<number, Promise<ReadonlyMap<string, readonly number[]>>>();
@@ -506,7 +554,7 @@ export async function syncExplorerTree(
       const built = await buildChildren(whole.rows, anchor, (level) => {
         const pending =
           counts.get(level) ??
-          read(anchor.path, level, NO_LIMIT).then((edge) => {
+          read(anchor.path, level, level > 1 ? DEEP_READ_LIMIT : NO_LIMIT).then((edge) => {
             countHashes.push(edge.hash);
             const found = new Map<string, number[]>();
             for (const row of edge.rows) {
@@ -529,6 +577,7 @@ export async function syncExplorerTree(
         frontier: built.frontier,
         nodes: built.nodes,
         ...(sharedPathDepth ? { sharedPathDepth } : {}),
+        ...(cappedAt ? { cappedAt } : {}),
       };
       if (signal?.aborted) return;
       if (before?.hash !== hash) send(anchor.id, built.children);
@@ -539,11 +588,6 @@ export async function syncExplorerTree(
   };
 
   const visit = async (anchor: Anchor) => {
-    seen.add(anchor.path);
-    if (nodeCount > MAX_NODES) {
-      truncated = true;
-      return;
-    }
     if (!state.plans.get(anchor.path)?.splits) {
       const probe = await read(anchor.path, MAX_DEPTH, READ_LIMIT);
       if (!probe.truncated) return absorb(anchor, probe, false);
@@ -562,8 +606,14 @@ export async function syncExplorerTree(
       const path = rowPathOf(row);
       if (pathCounts.get(path) !== 1 || rowNameOf(row, path).includes(".")) unreachable.add(path);
     }
+    const before = state.plans.get(anchor.path);
     if (toRead.length - unreachable.size > MAX_SPLIT) {
-      return absorb(anchor, await read(anchor.path, MAX_DEPTH, NO_LIMIT), true);
+      // Unless that read was too much last time, and nothing here has changed since.
+      if (before?.cappedAt !== level.hash) {
+        const all = await read(anchor.path, MAX_DEPTH, DEEP_READ_LIMIT);
+        if (!all.truncated) return absorb(anchor, all, true);
+      }
+      if (unreachable.size === 0) return absorb(anchor, level, true, { cappedAt: level.hash });
     }
     if (unreachable.size === 0) return absorb(anchor, level, true);
 
@@ -574,22 +624,55 @@ export async function syncExplorerTree(
       }
       return false;
     };
-    let depth = state.plans.get(anchor.path)?.sharedPathDepth ?? SHARED_PATH_DEPTHS[0];
-    let deep = await read(anchor.path, depth, NO_LIMIT);
-    while (
-      depth < MAX_DEPTH &&
-      deep.rows.some((row) => below(rowPathOf(row)) && hiddenChildrenOf(row) > 0)
-    ) {
-      depth = SHARED_PATH_DEPTHS.find((next) => next > depth) ?? MAX_DEPTH;
-      deep = await read(anchor.path, depth, NO_LIMIT);
+    // Reading from here brings everything else down to that depth along too, so it only goes as
+    // deep as fits in one read. What's below that is counted on its row, not listed.
+    const holdsMore = (from: Read) =>
+      from.rows.some((row) => below(rowPathOf(row)) && hiddenChildrenOf(row) > 0);
+    // The rows at the edge say how many are on the next level down, so there's no need to ask.
+    const nextLevelFits = (from: Read) =>
+      from.rows.reduce((sum, row) => sum + hiddenChildrenOf(row), from.rows.length) <=
+      DEEP_READ_LIMIT;
+    const descend = async (start: number) => {
+      let depth = 1;
+      let deep = level;
+      let capped = false;
+      for (let next: number | undefined = start; next; ) {
+        if ((depth === 1 && before?.cappedAt === level.hash) || !nextLevelFits(deep)) {
+          capped = true;
+          break;
+        }
+        const deeper = await read(anchor.path, next, DEEP_READ_LIMIT);
+        if (deeper.truncated) {
+          capped = true;
+          break;
+        }
+        depth = next;
+        deep = deeper;
+        if (before?.cappedAt === deep.hash) {
+          capped = true;
+          break;
+        }
+        next =
+          depth < MAX_DEPTH && holdsMore(deep)
+            ? (SHARED_PATH_DEPTHS.find((further) => further > depth) ?? MAX_DEPTH)
+            : undefined;
+      }
+      return { depth, deep, capped };
+    };
+    const start = Math.max(before?.sharedPathDepth ?? 0, SHARED_PATH_DEPTHS[0]);
+    let found = await descend(start);
+    // Where it got to last time is too much now, so work down to it again from the top.
+    if (found.depth === 1 && found.capped && start > SHARED_PATH_DEPTHS[0]) {
+      found = await descend(SHARED_PATH_DEPTHS[0]);
     }
-    const rows = [...level.rows, ...deep.rows.filter((row) => below(rowPathOf(row)))];
-    return absorb(
-      anchor,
-      { rows, truncated: deep.truncated, hash: hashOf(JSON.stringify(rows)) },
-      true,
-      depth,
-    );
+    const { depth, deep, capped } = found;
+    if (capped) truncated = true;
+    const rows =
+      depth === 1 ? level.rows : [...level.rows, ...deep.rows.filter((row) => below(rowPathOf(row)))];
+    return absorb(anchor, { rows, truncated: false, hash: hashOf(JSON.stringify(rows)) }, true, {
+      sharedPathDepth: depth,
+      ...(capped ? { cappedAt: deep.hash } : {}),
+    });
   };
 
   await new Promise<void>((resolve) => {
@@ -599,8 +682,31 @@ export async function syncExplorerTree(
       // The data model was chosen before this walk, so once Studio moves on the rest would be refused.
       while (running < CONCURRENT_READS && next < queue.length && !signal?.aborted && !waiting) {
         const anchor = queue[next++];
+        seen.add(anchor.path);
+        // Asking again for something Studio keeps not answering holds up everything else.
+        const failure = state.failures.get(anchor.path);
+        if (
+          failure &&
+          failure.count >= MAX_READ_FAILURES &&
+          !force &&
+          Date.now() - failure.at < RETRY_FAILED_READ_MS
+        ) {
+          truncated = true;
+          skipped.add(anchor.path);
+          retryAt = Math.min(retryAt, failure.at + RETRY_FAILED_READ_MS);
+          continue;
+        }
+        if (nodeCount > MAX_NODES) {
+          truncated = true;
+          continue;
+        }
         running += 1;
         visit(anchor)
+          .then(() => {
+            if (signal?.aborted) return;
+            visited += 1;
+            state.failures.delete(anchor.path);
+          })
           .catch((error) => {
             complete = false;
             if (error instanceof StudioWaiting) {
@@ -609,7 +715,15 @@ export async function syncExplorerTree(
             }
             // Removed since its parent was read, the next sync sees the parent without it. And a read
             // that was cancelled has been replaced by a newer one.
-            if (!(error instanceof ObjectGone) && !signal?.aborted) firstError ??= error;
+            if (error instanceof ObjectGone || signal?.aborted) return;
+            lastError = error;
+            // Keep the most recent failure last, even when two reads fail in the same millisecond.
+            state.failures.delete(anchor.path);
+            state.failures.set(anchor.path, {
+              count: (failure?.count ?? 0) + 1,
+              at: Date.now(),
+              error,
+            });
           })
           .finally(() => {
             running -= 1;
@@ -622,17 +736,28 @@ export async function syncExplorerTree(
   });
 
   if (signal?.aborted) complete = false;
-  for (const path of state.plans.keys()) {
-    if (!seen.has(path) && complete) state.plans.delete(path);
+  if (complete) {
+    for (const path of state.plans.keys()) {
+      if (!seen.has(path)) state.plans.delete(path);
+    }
+  }
+  // A walk that only skipped failed reads still has to surface the latest real failure.
+  if (visited === 0 && lastError === null) {
+    for (const [path, failure] of state.failures) {
+      if (skipped.has(path)) lastError = failure.error;
+    }
   }
   state.model = model;
   state.rootHash = rootHash;
   state.treeVersion = history.treeVersion;
-  state.complete = complete;
+  state.complete = complete && (visited > 0 || lastError === null);
   state.truncated = truncated;
   state.readAt = Date.now();
+  state.retryAt = retryAt;
   // Reads that failed around a change of mode say nothing the next walk won't find out for itself.
   if (waiting) return { changed, watching, complete, truncated, slowestReadMs, waiting };
-  if (firstError) throw firstError;
+  // One part that couldn't be read doesn't take the rest with it. The next walk tries it again.
+  // Nothing below the services could be read, which is Studio not answering at all.
+  if (visited === 0 && lastError !== null) throw lastError;
   return { changed, watching, complete, truncated, slowestReadMs };
 }

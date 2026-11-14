@@ -10,7 +10,7 @@ const Strong = ({ children }: { children: ReactNode }) => (
 /** Looks like the label people have to find in Studio's corner. */
 const McpLabel = () => (
   <span className="inline-flex items-center gap-1 rounded bg-muted px-1 align-baseline font-medium text-foreground">
-    <span aria-hidden="true" className="h-1.5 w-1.5 rounded-full bg-emerald-500" />
+    <span aria-hidden="true" className="h-1.5 w-1.5 rounded-full bg-success" />
     MCP
   </span>
 );
@@ -175,7 +175,7 @@ export function UploadChecklist({
                 aria-hidden="true"
                 className={`mt-px flex h-4 w-4 flex-none items-center justify-center rounded-full text-[10px] font-medium tabular-nums ${
                   step.done
-                    ? "bg-emerald-500/15 text-emerald-600 dark:text-emerald-400"
+                    ? "bg-success/15 text-success"
                     : current
                       ? "bg-foreground text-background"
                       : "bg-muted text-muted-foreground"

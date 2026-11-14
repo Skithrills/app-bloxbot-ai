@@ -1,8 +1,11 @@
+import { webcrypto } from "node:crypto";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import {
+  composerNextMessageKey,
   composerPredictionContext,
   composerPredictionSuffix,
   createPredictionCache,
+  storedNextMessages,
 } from "@/lib/composerPredictions";
 import { createOpencodeClient } from "@/lib/opencode/client";
 import type { MessagesCache } from "@/lib/sseDispatch";
@@ -106,6 +109,36 @@ describe("composer predictions", () => {
     expect(engine.session.remove.mock.calls[0][1].signal.aborted).toBe(false);
   });
 
+  it("runs a replacement prediction after canceled scratch cleanup", async () => {
+    const client = makeClient();
+    const abort = new AbortController();
+    let finishCleanup = () => {};
+    engine.session.remove.mockImplementationOnce(
+      () =>
+        new Promise<void>((resolve) => {
+          finishCleanup = resolve;
+        }),
+    );
+    engine.session.generate.mockImplementationOnce(async () => {
+      abort.abort();
+      return { text: "Stale words" };
+    });
+    const old = client.composer.predict({ draft, modelID }, { signal: abort.signal });
+    await vi.waitFor(() => expect(engine.session.remove).toHaveBeenCalledOnce());
+    const onStatus = vi.fn();
+    const replacement = client.composer.predict(
+      { draft: "Build a Roblox arena with", modelID },
+      { onStatus },
+    );
+    expect(onStatus).toHaveBeenCalledExactlyOnceWith("waiting");
+    expect(engine.session.generate).toHaveBeenCalledOnce();
+    finishCleanup();
+    await expect(old).resolves.toBeNull();
+    await expect(replacement).resolves.toBe(" a shop and spawn area.");
+    expect(onStatus).toHaveBeenLastCalledWith("generating");
+    expect(engine.session.remove).toHaveBeenCalledTimes(2);
+  });
+
   it("keeps scratch sessions and their events out of the chat client", async () => {
     const client = makeClient();
     const metadata = { bloxbotHidden: true, bloxbotComposerPrediction: true };
@@ -126,7 +159,9 @@ describe("composer predictions", () => {
   it("backs off without retrying or switching models after the shared free quota is used", async () => {
     const client = makeClient();
     engine.session.generate.mockRejectedValueOnce({ reason: "provider.free-limit", status: 429 });
-    await expect(client.composer.predict({ draft, modelID })).resolves.toBeNull();
+    const onStatus = vi.fn();
+    await expect(client.composer.predict({ draft, modelID }, { onStatus })).resolves.toBeNull();
+    expect(onStatus).toHaveBeenLastCalledWith("free-limit");
     await expect(
       client.composer.predict({ draft: "Build a Roblox arena with", modelID }),
     ).resolves.toBeNull();
@@ -166,6 +201,58 @@ describe("composer predictions", () => {
     expect(composerPredictionSuffix("", "/goal pause")).toBeNull();
   });
 
+  it("uses the exact opted-in chat provider for next messages, rejects drafts and has no fallback", async () => {
+    const client = makeClient();
+    const chosen = { id: "chat-model", providerID: "openai" };
+    const context = JSON.stringify({ user: "Add a shop", assistant: "Done. Want a sign too?" });
+    const input = { draft: "", modelID: chosen.id, chatProviderID: "openai-oauth", context };
+    const provider = {
+      id: "openai",
+      methods: [],
+      connections: [{ type: "credential", method: "oauth" }],
+    };
+    const list = [
+      free,
+      { ...free, ...chosen, cost: [{ input: 1, output: 2, cache: { read: 0, write: 0 } }] },
+    ];
+    const beforeGenerate = vi.fn();
+    expect(await client.composer.predict({ ...input, draft }, { beforeGenerate })).toBeNull();
+    expect(beforeGenerate).not.toHaveBeenCalled();
+    expect(engine.session.create).not.toHaveBeenCalled();
+
+    engine.model.list.mockResolvedValue({ data: list });
+    engine.integration.list.mockResolvedValue({ data: [anonymous, provider] });
+    await expect(client.composer.predict(input)).resolves.toBeNull();
+    expect(engine.session.create).not.toHaveBeenCalled();
+    engine.session.create.mockResolvedValueOnce({ ...scratch, model: chosen });
+    engine.session.generate.mockResolvedValueOnce({ text: "Yes, add a sign" });
+    const onStatus = vi.fn();
+    const suggestion = await client.composer.predict(input, { beforeGenerate, onStatus });
+    expect(onStatus.mock.calls).toEqual([["requesting"], ["generating"]]);
+    expect(suggestion).toBe("Yes, add a sign");
+    expect(engine.session.create).toHaveBeenLastCalledWith(
+      expect.objectContaining({ model: chosen }),
+    );
+    expect(engine.session.generate).toHaveBeenCalledOnce();
+
+    beforeGenerate.mockReturnValueOnce("attempted");
+    engine.session.create.mockResolvedValueOnce({ ...scratch, model: chosen });
+    await expect(client.composer.predict(input, { beforeGenerate })).resolves.toBeNull();
+    expect(engine.session.generate).toHaveBeenCalledOnce();
+
+    // The scratch session responded with an unexpected model. Never generate against it.
+    await expect(client.composer.predict(input, { beforeGenerate })).resolves.toBeNull();
+    expect(engine.session.generate).toHaveBeenCalledOnce();
+
+    engine.integration.list.mockResolvedValue({
+      data: [anonymous, { ...provider, connections: [] }],
+    });
+    await expect(client.composer.predict(input, { beforeGenerate })).resolves.toBeNull();
+    expect(engine.session.create).toHaveBeenCalledTimes(3);
+    expect(engine.session.generate).toHaveBeenCalledOnce();
+    expect(beforeGenerate).toHaveBeenCalledTimes(2);
+  });
+
   it("reads the end of the chat only once its latest reply has finished", () => {
     const message = (id: string, role: string, text: string, extra: object = {}) => ({
       info: {
@@ -192,28 +279,71 @@ describe("composer predictions", () => {
     );
     const steps = [message("a1", "assistant", "Looking."), message("a2", "assistant", "Fixed it.")];
 
-    expect(
-      composerPredictionContext(cache(ask, message("a0", "assistant", "Old"), latest, ...steps)),
-    ).toBe(JSON.stringify({ user: "Fix Door", assistant: "Looking.\nFixed it." }));
-    // A queued message waits behind the reply and isn't part of what was said.
+    const old = message("a0", "assistant", "Old");
+    expect(composerPredictionContext(cache(ask, old, latest, ...steps))).toEqual({
+      status: "ready",
+      turnID: JSON.stringify(["u2", "a2"]),
+      text: JSON.stringify({ user: "Fix Door", assistant: "Looking.\nFixed it." }),
+    });
+    expect(composerPredictionContext(cache(ask, old, latest, ...steps), "u2")).toEqual({
+      status: "ready",
+      turnID: JSON.stringify(["u1", "a0"]),
+      text: JSON.stringify({ user: "Old question", assistant: "Old" }),
+    });
     const queued = message("u3", "user", "Later", {
       inbox: { state: "pending", delivery: "queue" },
     });
-    expect(composerPredictionContext(cache(latest, ...steps, queued))).toBe(
-      JSON.stringify({ user: "Fix Door", assistant: "Looking.\nFixed it." }),
-    );
+    expect(composerPredictionContext(cache(latest, ...steps, queued))).toEqual({
+      status: "pending",
+    });
 
-    expect(composerPredictionContext(cache())).toBeNull();
-    expect(composerPredictionContext(cache(latest))).toBeNull();
+    expect(composerPredictionContext(cache())).toEqual({ status: "no-context" });
+    expect(composerPredictionContext(cache(latest))).toEqual({ status: "no-context" });
     const arriving = message("a3", "assistant", "Still wri", { time: { created: 1 } });
-    expect(composerPredictionContext(cache(latest, steps[0], arriving))).toBeNull();
+    expect(composerPredictionContext(cache(latest, steps[0], arriving))).toEqual({
+      status: "streaming",
+    });
     const failed = message("a4", "assistant", "Partly", { error: { name: "APIError" } });
-    expect(composerPredictionContext(cache(latest, failed))).toBeNull();
+    expect(composerPredictionContext(cache(latest, failed))).toEqual({ status: "no-context" });
 
     const long = message("a5", "assistant", `${"x".repeat(3000)} Shall I continue?`);
-    const context = JSON.parse(composerPredictionContext(cache(latest, long)) ?? "{}");
-    expect(context.assistant).toHaveLength(1500);
-    expect(context.assistant.endsWith("Shall I continue?")).toBe(true);
+    const context = composerPredictionContext(cache(latest, long));
+    expect(context.status).toBe("ready");
+    if (context.status !== "ready") throw new Error("Expected a completed turn");
+    const { assistant } = JSON.parse(context.text);
+    expect(assistant).toHaveLength(1500);
+    expect(assistant.endsWith("Shall I continue?")).toBe(true);
+  });
+
+  it("persists only valid next-message suggestions against opaque chat and turn keys", async () => {
+    localStorage.clear();
+    vi.stubGlobal("crypto", webcrypto);
+    const scope = (chat: string, turn: string) =>
+      JSON.stringify([chat, turn, "synthetic transcript"]);
+    try {
+      const key = await composerNextMessageKey(scope("one", "latest"));
+      if (!key) throw new Error("Expected a storage key");
+      storedNextMessages().set(key, "Can you add a roof?");
+      expect(storedNextMessages().get(key)).toBe("Can you add a roof?");
+      expect(localStorage.getItem(localStorage.key(0) ?? "")).not.toContain("synthetic transcript");
+      for (const input of [scope("two", "latest"), scope("one", "earlier")]) {
+        const different = await composerNextMessageKey(input);
+        if (!different) throw new Error("Expected a storage key");
+        expect(storedNextMessages().get(different)).toBeUndefined();
+      }
+      storedNextMessages().set(key, "/example");
+      expect(storedNextMessages().get(key)).toBe("Can you add a roof?");
+      storedNextMessages().set(key, null);
+      expect(storedNextMessages().get(key)).toBeNull();
+      const failedStorage = vi.spyOn(localStorage, "setItem").mockImplementationOnce(() => {
+        throw new Error("Storage full");
+      });
+      expect(storedNextMessages().set(key, "A different suggestion")).toBe(false);
+      failedStorage.mockRestore();
+    } finally {
+      vi.unstubAllGlobals();
+      localStorage.clear();
+    }
   });
 
   it("reuses a suggestion for the same draft and for typing along it", () => {

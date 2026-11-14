@@ -5,6 +5,7 @@ import {
   CAPTURE_EMBED_PROMPT,
   DEFAULT_SYSTEM_PROMPT,
   INSTANCE_REFERENCE_PROMPT,
+  ROBLOX_SOURCE_WORKFLOW_PROMPT,
   STUDIO_TOOL_PROMPT,
 } from "@/lib/systemPrompt";
 import { isCaptureId } from "@/lib/toolImages";
@@ -20,6 +21,7 @@ const broker = { url: "http://127.0.0.1:43210/mcp" };
 const withAppInstructions = (prompt: string) =>
   [
     prompt,
+    ROBLOX_SOURCE_WORKFLOW_PROMPT,
     CAPTURE_EMBED_PROMPT,
     STUDIO_TOOL_PROMPT,
     INSTANCE_REFERENCE_PROMPT,
@@ -109,6 +111,7 @@ describe("system prompt", () => {
       const { system } = workers[profile.id];
       expect(system).toContain("Pass that studio_id on every Studio tool call.");
       expect(system).toContain(CAPTURE_EMBED_PROMPT);
+      expect(system).toContain(ROBLOX_SOURCE_WORKFLOW_PROMPT);
       expect(SUBAGENT_PROFILE_PROMPT).toContain(profile.id);
     }
   });

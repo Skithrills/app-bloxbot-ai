@@ -40,9 +40,14 @@ it.skipIf(!bin)(
       );
       const { child, baseUrl, workspace } = await startServer(bin, home);
       stopEngine = () => child.kill();
+      const projectFiles = [
+        join(workspace, "full.project.json"),
+        join(workspace, "jump.project.json"),
+      ];
       const options = {
         baseUrl,
         directory: workspace,
+        rojoProjectFiles: async () => projectFiles,
         headers: {
           Authorization: `Basic ${Buffer.from(`opencode:${PASSWORD}`).toString("base64")}`,
         },
@@ -131,6 +136,11 @@ it.skipIf(!bin)(
       expect(nextTurn).toContain("QUEUE_PROMPT");
       expect(nextStep).toContain(studioTargetID);
       expect(nextTurn).toContain(studioTargetID);
+      for (const body of [first, nextStep, nextTurn]) {
+        expect(body).toContain("Configured Rojo manifest paths for this chat's project folder");
+        expect(body).toContain("full.project.json");
+        expect(body).toContain("jump.project.json");
+      }
       expect(scripted.bodies.every((body) => JSON.parse(body).model === model.modelID)).toBe(true);
       expect(scripted.bodies.every((body) => !body.includes("CANCELLED_PROMPT"))).toBe(true);
 

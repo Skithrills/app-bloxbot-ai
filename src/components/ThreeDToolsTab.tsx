@@ -43,13 +43,11 @@ function StatePill({ on, children }: { on?: boolean; children: ReactNode }) {
   return (
     <output
       className={`flex shrink-0 items-center gap-1.5 whitespace-nowrap rounded-full px-2 py-0.5 text-xs font-medium ${
-        on
-          ? "bg-emerald-50 text-emerald-700 dark:bg-emerald-500/10 dark:text-emerald-400"
-          : "bg-muted text-muted-foreground"
+        on ? "bg-success/10 text-success" : "bg-muted text-muted-foreground"
       }`}
     >
       <span
-        className={`h-1.5 w-1.5 rounded-full ${on ? "bg-emerald-500" : "bg-muted-foreground/50"}`}
+        className={`h-1.5 w-1.5 rounded-full ${on ? "bg-success" : "bg-muted-foreground/50"}`}
       />
       {children}
     </output>
@@ -228,7 +226,7 @@ function BlenderRow() {
         </>
       )}
       {failure && !installing ? (
-        <p role="alert" className="text-red-600 dark:text-red-400">
+        <p role="alert" className="text-destructive">
           {failure}
         </p>
       ) : null}

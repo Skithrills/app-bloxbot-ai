@@ -6,11 +6,13 @@ import {
   FolderOpen,
   FolderPlus,
   Plus,
+  Server,
   Settings2,
 } from "lucide-react";
 import { type DragEvent, type MouseEvent, memo, useEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { ProjectFolderDialog } from "@/components/ProjectFolderDialog";
+import { RojoLauncher, useRojoServingCount } from "@/components/RojoLauncher";
 import { MENU_ITEM, MENU_SURFACE } from "@/components/ui/menu";
 import { useArchiveSession } from "@/hooks/mutations/useArchiveSession";
 import { useCreateSession } from "@/hooks/mutations/useCreateSession";
@@ -76,7 +78,7 @@ NO_DRAG_IMAGE.src =
 const DRAG_CARD_OFFSET = 14;
 
 const folderButtonClass =
-  "flex h-6 w-6 shrink-0 items-center justify-center rounded text-muted-foreground transition-colors hover:bg-accent hover:text-foreground disabled:opacity-40";
+  "flex h-6 w-6 shrink-0 items-center justify-center rounded text-sidebar-foreground/70 transition-colors hover:bg-sidebar-accent hover:text-sidebar-accent-foreground disabled:opacity-40";
 
 const ChatSidebar = memo(function ChatSidebar({
   collapsed,
@@ -94,6 +96,9 @@ const ChatSidebar = memo(function ChatSidebar({
   const unarchiveSession = useUnarchiveSession();
   const folders = useProjectFolders();
   const saveFolders = useSaveProjectFolders();
+  const rojoServingCount = useRojoServingCount();
+  const rojoLabel =
+    rojoServingCount === null ? "Rojo launcher" : `Rojo launcher (${rojoServingCount} serving)`;
   const { client } = useOpenCodeClient();
   const queryClient = useQueryClient();
   const moveSession = useMutation({
@@ -113,6 +118,7 @@ const ChatSidebar = memo(function ChatSidebar({
   const [editingId, setEditingId] = useState<string | null>(null);
   const [editValue, setEditValue] = useState("");
   const [snoozedExpanded, setSnoozedExpanded] = useState(false);
+  const [rojoOpen, setRojoOpen] = useState(false);
   const [folderEditor, setFolderEditor] = useState<{
     folder: ProjectFolder;
     isNew: boolean;
@@ -408,8 +414,8 @@ const ChatSidebar = memo(function ChatSidebar({
             draggedChat?.id === session.id ? "opacity-40" : ""
           } ${
             isActive
-              ? "bg-accent text-foreground"
-              : "text-muted-foreground hover:bg-accent/50 hover:text-foreground"
+              ? "bg-sidebar-accent text-sidebar-accent-foreground"
+              : "text-sidebar-foreground/70 hover:bg-sidebar-accent/50 hover:text-sidebar-accent-foreground"
           }`}
         >
           {isEditing ? (
@@ -427,7 +433,7 @@ const ChatSidebar = memo(function ChatSidebar({
                     if (e.key === "Enter") commitRename();
                     if (e.key === "Escape") setEditingId(null);
                   }}
-                  className="w-full rounded bg-transparent px-1 text-sm outline-none ring-1 ring-ring"
+                  className="w-full rounded bg-transparent px-1 text-sm outline-none ring-1 ring-sidebar-ring"
                 />
                 <div className="mt-0.5 text-xs text-muted-foreground">
                   {formatTime(session.time.updated)}
@@ -546,7 +552,10 @@ const ChatSidebar = memo(function ChatSidebar({
   }
 
   return (
-    <div id="chat-sidebar" className="flex w-full min-w-0 shrink-0 flex-col bg-sidebar">
+    <div
+      id="chat-sidebar"
+      className="flex w-full min-w-0 shrink-0 flex-col bg-sidebar text-sidebar-foreground"
+    >
       {collapsed ? (
         <div className="flex flex-1 flex-col items-center justify-between py-2">
           <div className="flex flex-col items-center">
@@ -612,7 +621,7 @@ const ChatSidebar = memo(function ChatSidebar({
       ) : (
         <>
           <div className="flex h-11 items-center justify-between px-3">
-            <span className="text-sm font-medium text-muted-foreground">Chats</span>
+            <span className="text-sm font-medium text-sidebar-foreground/70">Chats</span>
             <div className="flex items-center gap-0.5">
               <button
                 onClick={() => handleCreate(null)}
@@ -642,6 +651,23 @@ const ChatSidebar = memo(function ChatSidebar({
                 title="Add project folder"
               >
                 <FolderPlus size={15} aria-hidden="true" />
+              </button>
+              <button
+                type="button"
+                title={rojoLabel}
+                aria-label={rojoLabel}
+                className={`${folderButtonClass} ${rojoServingCount === null ? "" : "w-auto gap-1 px-1"}`}
+                onClick={() => setRojoOpen(true)}
+              >
+                <Server size={15} aria-hidden="true" />
+                {rojoServingCount !== null && (
+                  <span
+                    aria-hidden="true"
+                    className={`rounded px-1 text-[10px] leading-4 tabular-nums ${rojoServingCount > 0 ? "bg-success/15 text-success" : "bg-sidebar-accent"}`}
+                  >
+                    {rojoServingCount}
+                  </span>
+                )}
               </button>
               <button
                 onClick={onToggle}
@@ -692,7 +718,7 @@ const ChatSidebar = memo(function ChatSidebar({
                       aria-expanded={expanded}
                       title={folder.directory}
                       onClick={() => toggleFolder(folder.directory)}
-                      className="flex min-w-0 flex-1 items-center gap-1.5 rounded-md px-1 py-1.5 text-left text-xs font-medium text-muted-foreground hover:bg-accent/50 hover:text-foreground"
+                      className="flex min-w-0 flex-1 items-center gap-1.5 rounded-md px-1 py-1.5 text-left text-xs font-medium text-sidebar-foreground/70 hover:bg-sidebar-accent/50 hover:text-sidebar-accent-foreground"
                     >
                       <ChevronRight
                         size={12}
@@ -824,10 +850,10 @@ const ChatSidebar = memo(function ChatSidebar({
             </div>
           )}
 
-          <div className="shrink-0 border-t px-3 py-2 space-y-1">
+          <div className="shrink-0 space-y-1 border-t border-sidebar-border px-3 py-2">
             <button
               onClick={onOpenSettings}
-              className="flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-xs text-muted-foreground transition-colors hover:bg-accent hover:text-foreground"
+              className="flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-xs text-sidebar-foreground/70 transition-colors hover:bg-sidebar-accent hover:text-sidebar-accent-foreground"
             >
               <svg
                 width="13"
@@ -916,6 +942,8 @@ const ChatSidebar = memo(function ChatSidebar({
               </div>,
               document.body,
             )}
+
+          {rojoOpen && <RojoLauncher onClose={() => setRojoOpen(false)} />}
 
           {folderEditor && (
             <ProjectFolderDialog
@@ -1054,7 +1082,7 @@ const ChatSidebar = memo(function ChatSidebar({
                     <button
                       type="button"
                       onClick={confirmDelete}
-                      className="rounded-md bg-destructive px-3 py-1.5 text-xs font-medium text-white transition-opacity hover:opacity-90"
+                      className="rounded-md bg-destructive px-3 py-1.5 text-xs font-medium text-destructive-foreground transition-opacity hover:opacity-90"
                     >
                       Delete
                     </button>

@@ -11,11 +11,13 @@ import {
   type PermissionRequest as V2PermissionRequest,
 } from "@opencode/client";
 import {
+  type ComposerPredictionRequestStatus,
   canPredictDraft,
   composerNextMessagePrompt,
   composerPredictionPrompt,
   composerPredictionSuffix,
   isComposerPredictionModel,
+  isTextPredictionModel,
   isZeroCost,
 } from "../composerPredictions";
 import { isKnownFreeModelKey } from "../freeModels";
@@ -29,6 +31,7 @@ import {
 } from "../openAiProfiles";
 import { lastCompaction, summarizeSessionContext } from "../sessionContext";
 import { withDelegationRouting } from "../subagentProfiles";
+import { rojoProjectPrompt } from "../systemPrompt";
 import { EventTranslator } from "./events";
 import {
   historyToMessages,
@@ -328,6 +331,7 @@ export function createOpencodeClient(options: {
   baseUrl: string;
   directory?: string;
   headers?: Record<string, string>;
+  rojoProjectFiles?: (sessionID: string) => Promise<readonly string[]>;
 }) {
   const api: OpenCodeClient = OpenCode.make({ baseUrl: options.baseUrl, headers: options.headers });
   const translator = new EventTranslator();
@@ -338,8 +342,9 @@ export function createOpencodeClient(options: {
   const oauthAttempts = new Map<string, string>();
   const sessionModels = new Map<string, string>();
   const exchanges = new Map<string, string[]>();
-  let predictionInFlight = false;
+  let predictionInFlight: Promise<void> | undefined;
   let predictionRetryAt = 0;
+  let predictionRateLimited = false;
 
   const remember = (info: SessionInfo): Session => {
     const session = toSession(info);
@@ -440,9 +445,13 @@ export function createOpencodeClient(options: {
   const prepareTurn = async (input: PromptInput) => {
     await applyTurnModel(input);
     const { sessionID } = input;
-    const system = input.system?.includes("studio_id")
+    const studioInstructions = input.system?.includes("studio_id")
       ? withDelegationRouting(input.system)
       : input.system;
+    const projectFiles = await options.rojoProjectFiles?.(sessionID);
+    const system = [studioInstructions, projectFiles && rojoProjectPrompt(projectFiles)]
+      .filter(Boolean)
+      .join("\n\n");
     if (system) {
       await api.experimental.session.instructions.entry.put({
         sessionID,
@@ -531,58 +540,100 @@ export function createOpencodeClient(options: {
        * suggestion is the whole next message.
        */
       predict: async (
-        { draft, modelID, context }: { draft: string; modelID: string; context?: string },
-        { signal }: Pick<RequestOptions, "signal"> = {},
+        {
+          draft,
+          modelID,
+          context,
+          chatProviderID,
+        }: { draft: string; modelID: string; context?: string; chatProviderID?: string },
+        {
+          signal,
+          onStatus,
+          beforeGenerate,
+        }: Pick<RequestOptions, "signal"> & {
+          onStatus?: (status: ComposerPredictionRequestStatus) => void;
+          beforeGenerate?: () => "attempted" | "storage-unavailable" | undefined;
+        } = {},
       ): Promise<string | null> => {
         const nextMessage = draft === "" && context ? context : null;
-        if (
-          predictionInFlight ||
-          Date.now() < predictionRetryAt ||
-          signal?.aborted ||
-          (!nextMessage && !canPredictDraft(draft)) ||
-          !isKnownFreeModelKey(`opencode/${modelID}`)
-        ) {
+        if (signal?.aborted || (!nextMessage && !canPredictDraft(draft))) return null;
+        if (chatProviderID && !beforeGenerate) {
+          onStatus?.("storage-unavailable");
+          return null;
+        }
+        if (chatProviderID ? !nextMessage : !isKnownFreeModelKey(`opencode/${modelID}`)) {
+          onStatus?.("ineligible");
+          return null;
+        }
+        const providerID = chatProviderID ?? "opencode";
+        const engineProviderID = toEngineProviderID(providerID);
+        // A replaced draft may arrive while the previous request is deleting its scratch chat.
+        while (predictionInFlight) {
+          onStatus?.("waiting");
+          if (signal?.aborted) return null;
+          let cancel = () => {};
+          const aborted = new Promise<void>((resolve) => {
+            cancel = resolve;
+            signal?.addEventListener("abort", cancel, { once: true });
+          });
+          await Promise.race([predictionInFlight, aborted]);
+          signal?.removeEventListener("abort", cancel);
+          if (signal?.aborted) return null;
+        }
+        if (!chatProviderID && Date.now() < predictionRetryAt) {
+          onStatus?.(predictionRateLimited ? "free-limit" : "cooldown");
           return null;
         }
 
-        predictionInFlight = true;
+        let release = () => {};
+        predictionInFlight = new Promise<void>((resolve) => {
+          release = resolve;
+        });
         let sessionID: string | undefined;
         try {
+          onStatus?.("requesting");
           const { integrations, models } = await providerCatalog();
           const native = models.find(
-            (item) => item.providerID === "opencode" && item.id === modelID,
+            (item) => item.providerID === engineProviderID && item.id === modelID,
           );
-          const provider = toProviderList(integrations, native ? [native] : [], null).all.find(
-            ({ id }) => id === "opencode",
-          );
+          const list = toProviderList(integrations, native ? [native] : [], null);
+          const provider = list.all.find(({ id }) => id === providerID);
           const model = provider?.models[modelID];
-          // Use the built-in anonymous Zen connection, with explicit zero pricing in the catalog.
+          if (signal?.aborted) return null;
           if (
-            signal?.aborted ||
-            !native?.cost.length ||
-            !native.cost.every(isZeroCost) ||
             !provider ||
             !model ||
-            !isComposerPredictionModel(provider, model)
+            !list.connected.includes(providerID) ||
+            (chatProviderID
+              ? !isTextPredictionModel(model)
+              : !native?.cost.length ||
+                !native.cost.every(isZeroCost) ||
+                !isComposerPredictionModel(provider, model))
           ) {
+            onStatus?.("ineligible");
             return null;
           }
 
           const scratch = await api.session.create({
             title: "Composer prediction",
-            model: { id: modelID, providerID: "opencode" },
+            model: { id: modelID, providerID: engineProviderID },
             metadata: { bloxbotHidden: true, [PREDICTION_SESSION]: true },
             location,
           });
           sessionID = scratch.id;
-          if (
-            signal?.aborted ||
-            scratch.model?.providerID !== "opencode" ||
-            scratch.model.id !== modelID
-          ) {
+          if (signal?.aborted) return null;
+          if (scratch.model?.providerID !== engineProviderID || scratch.model.id !== modelID) {
+            onStatus?.("ineligible");
             return null;
           }
           // This endpoint supplies the tools Zen expects without running them or writing history.
+          const blocked = beforeGenerate?.();
+          if (blocked) {
+            onStatus?.(blocked);
+            return null;
+          }
+          onStatus?.("generating");
+          if (signal?.aborted) return null;
           const reply = await api.session.generate(
             {
               sessionID,
@@ -592,13 +643,21 @@ export function createOpencodeClient(options: {
             },
             { signal },
           );
-          return signal?.aborted ? null : composerPredictionSuffix(draft, reply.text);
+          if (signal?.aborted) return null;
+          const suffix = composerPredictionSuffix(draft, reply.text);
+          if (!suffix) onStatus?.("empty");
+          return suffix;
         } catch (error) {
           if (!signal?.aborted) {
             const failure = toModelError(toStructuredError(error));
-            predictionRetryAt = isFreeUsageLimit(failure)
-              ? freeLimitEndsAt(failure, Date.now())
-              : Date.now() + 30_000;
+            const limited = isFreeUsageLimit(failure);
+            if (!chatProviderID) {
+              predictionRateLimited = limited;
+              predictionRetryAt = limited
+                ? freeLimitEndsAt(failure, Date.now())
+                : Date.now() + 30_000;
+            }
+            onStatus?.(limited ? "free-limit" : "request-failed");
           }
           return null;
         } finally {
@@ -607,7 +666,8 @@ export function createOpencodeClient(options: {
               .remove({ sessionID }, { signal: AbortSignal.timeout(5000) })
               .catch(() => undefined);
           }
-          predictionInFlight = false;
+          predictionInFlight = undefined;
+          release();
         }
       },
     },

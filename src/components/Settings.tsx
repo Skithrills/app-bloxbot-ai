@@ -11,9 +11,10 @@ import {
   RefreshCw,
   Search,
   Shield,
+  SlidersHorizontal,
   UsersRound,
 } from "lucide-react";
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useMemo, useRef, useState } from "react";
 import { FunSettings } from "@/components/AudioVisualizer";
 import { BloxBotMascot } from "@/components/BloxBotMascot";
 import PersonalisationSettings from "@/components/PersonalisationSettings";
@@ -24,7 +25,7 @@ import SkillsSettings from "@/components/SkillsSettings";
 import SubagentsSettings from "@/components/SubagentsSettings";
 import { SubscriptionUsage } from "@/components/SubscriptionUsage";
 import { ThreeDToolsTab } from "@/components/ThreeDToolsTab";
-import { THEME_OPTIONS, type Theme, useTheme } from "@/components/theme-provider";
+import { WhatsNew } from "@/components/WhatsNew";
 import { useCheckProvider } from "@/hooks/mutations/useCheckProvider";
 import { useSaveInstructions } from "@/hooks/mutations/useSaveInstructions";
 import { useSaveModelSettings } from "@/hooks/mutations/useSaveModelSettings";
@@ -106,7 +107,7 @@ type SettingsTab =
   | "providers"
   | "subagents"
   | "threeD"
-  | "appearance"
+  | "workflow"
   | "personalisation"
   | "fun"
   | "instructions"
@@ -120,14 +121,6 @@ interface SettingsProps {
 
 function Settings({ onClose }: SettingsProps) {
   const [tab, setTab] = useState<SettingsTab>("providers");
-  const [appVersion, setAppVersion] = useState<string | null>(null);
-
-  useEffect(() => {
-    desktop
-      .getVersion()
-      .then(setAppVersion)
-      .catch(() => {});
-  }, []);
 
   return (
     <div className="@container flex min-h-0 min-w-0 flex-1 bg-sidebar">
@@ -260,27 +253,15 @@ function Settings({ onClose }: SettingsProps) {
               Notifications
             </button>
             <button
-              onClick={() => setTab("appearance")}
+              onClick={() => setTab("workflow")}
               className={`flex shrink-0 items-center gap-2 whitespace-nowrap rounded-md px-2 h-8 text-left text-sm transition-colors ${
-                tab === "appearance"
+                tab === "workflow"
                   ? "bg-accent font-medium text-foreground"
                   : "text-muted-foreground hover:bg-accent hover:text-foreground"
               }`}
             >
-              <svg
-                width="13"
-                height="13"
-                viewBox="0 0 24 24"
-                fill="none"
-                stroke="currentColor"
-                strokeWidth="2"
-                strokeLinecap="round"
-                strokeLinejoin="round"
-              >
-                <circle cx="12" cy="12" r="5" />
-                <path d="M12 1v2M12 21v2M4.22 4.22l1.42 1.42M18.36 18.36l1.42 1.42M1 12h2M21 12h2M4.22 19.78l1.42-1.42M18.36 5.64l1.42-1.42" />
-              </svg>
-              Appearance
+              <SlidersHorizontal size={13} aria-hidden="true" />
+              Workflow
             </button>
             <button
               type="button"
@@ -361,13 +342,13 @@ function Settings({ onClose }: SettingsProps) {
           {tab === "providers" && <ProvidersTab />}
           {tab === "subagents" && <SubagentsSettings />}
           {tab === "threeD" && <ThreeDToolsTab />}
-          {tab === "appearance" && <AppearanceTab />}
+          {tab === "workflow" && <WorkflowTab />}
           {tab === "personalisation" && <PersonalisationSettings />}
           {tab === "fun" && <FunSettings />}
           {tab === "instructions" && <InstructionsTab />}
           {tab === "notifications" && <NotificationsTab />}
           {tab === "privacy" && <PrivacyTab />}
-          {tab === "about" && <AboutTab appVersion={appVersion} />}
+          {tab === "about" && <AboutTab />}
         </div>
       </div>
     </div>
@@ -633,13 +614,11 @@ function ProvidersTab() {
           {check && check !== "checking" && (
             <span
               className={`flex shrink-0 items-center gap-1.5 whitespace-nowrap rounded-full px-2 py-0.5 text-xs font-medium ${
-                check.ok
-                  ? "bg-emerald-50 text-emerald-700 dark:bg-emerald-500/10 dark:text-emerald-400"
-                  : "bg-red-50 text-red-700 dark:bg-red-500/10 dark:text-red-400"
+                check.ok ? "bg-success/10 text-success" : "bg-destructive/10 text-destructive"
               }`}
             >
               <span
-                className={`h-1.5 w-1.5 rounded-full ${check.ok ? "bg-emerald-500" : "bg-red-500"}`}
+                className={`h-1.5 w-1.5 rounded-full ${check.ok ? "bg-success" : "bg-destructive"}`}
               />
               {check.ok ? "Working" : "Not working"}
             </span>
@@ -672,7 +651,7 @@ function ProvidersTab() {
               }
               onClick={() => handleDisconnect(provider)}
               disabled={disconnecting === provider.id}
-              className="shrink-0 whitespace-nowrap text-xs text-muted-foreground transition-colors hover:text-red-600 disabled:opacity-50"
+              className="shrink-0 whitespace-nowrap text-xs text-muted-foreground transition-colors hover:text-destructive disabled:opacity-50"
             >
               {disconnecting === provider.id
                 ? "..."
@@ -689,7 +668,7 @@ function ProvidersTab() {
             ) : (
               <>
                 {check.modelName && `Didn't work with ${check.modelName}. `}
-                <span className="text-red-700 dark:text-red-400">{check.message}</span>
+                <span className="text-destructive">{check.message}</span>
                 {check.keyRejected && !isFreeZen(provider) && (
                   <button
                     onClick={() => setConnecting(provider)}
@@ -979,22 +958,26 @@ function ProvidersTab() {
 }
 
 // ═══════════════════════════════════════════════════════════════════════
-// Appearance Tab
+// Workflow Tab
 // ═══════════════════════════════════════════════════════════════════════
 
-function AppearanceTab() {
-  const { theme, setTheme } = useTheme();
+function WorkflowTab() {
   const queryClient = useQueryClient();
   const { data: config } = useQuery({ queryKey: qk.config, queryFn: loadConfig });
-  const predictions = useMutation({
-    mutationFn: (enabled: boolean) => patchConfig({ composerPredictions: enabled }),
-    onSuccess: (_result, enabled) => {
+  const workflowSettings = useMutation({
+    mutationFn: (patch: Partial<AppConfig>) => patchConfig(patch),
+    onSuccess: (_result, patch) => {
       queryClient.setQueryData<AppConfig>(qk.config, (current) =>
-        current ? { ...current, composerPredictions: enabled } : current,
+        current ? { ...current, ...patch } : current,
       );
     },
-    onError: () => notify.error("Couldn't save composer predictions"),
+    onError: () => notify.error("Couldn't save workflow settings"),
   });
+  const nextMessageEnabled = config?.composerPredictions === true;
+  const autocompleteEnabled = (config?.composerAutocomplete ?? nextMessageEnabled) === true;
+  const predictionSource = config?.composerPredictionSource ?? "free";
+  const predictionModelHint =
+    "Uses a verified free OpenCode Zen model. Your selected chat model stays separate.";
   const {
     effortControl,
     setEffortControl,
@@ -1005,32 +988,7 @@ function AppearanceTab() {
 
   return (
     <div className="mx-auto w-full max-w-md px-4 py-6 @xl:px-6 @xl:py-8">
-      <h4 className="text-lg font-medium text-foreground">Appearance</h4>
-
-      <div className="mt-6">
-        <div className="mb-1.5 text-xs font-medium text-muted-foreground">Theme</div>
-        <div className="grid grid-cols-3 gap-2">
-          {THEME_OPTIONS.map((option) => {
-            const selected = theme === option.value;
-            return (
-              <button
-                key={option.value}
-                type="button"
-                onClick={() => setTheme(option.value)}
-                aria-pressed={selected}
-                className={`rounded-lg border px-3 py-3 text-center transition-colors ${
-                  selected
-                    ? "border-foreground/40 bg-accent font-medium text-foreground"
-                    : "border-border bg-card text-muted-foreground hover:bg-accent hover:text-foreground"
-                }`}
-              >
-                <ThemePreview swatch={option.value} />
-                <span className="mt-2 block text-xs">{option.label}</span>
-              </button>
-            );
-          })}
-        </div>
-      </div>
+      <h4 className="text-lg font-medium text-foreground">Workflow</h4>
 
       <fieldset className="mt-6">
         <legend className="mb-1.5 text-xs font-medium text-muted-foreground">
@@ -1088,45 +1046,74 @@ function AppearanceTab() {
         </p>
       </fieldset>
       <div className="mt-6">
-        <div className="overflow-hidden rounded-lg border bg-card">
+        <h5 className="mb-1.5 text-xs font-medium text-muted-foreground">Composer suggestions</h5>
+        <div className="divide-y overflow-hidden rounded-lg border bg-card">
           <SettingSwitch
-            label="Composer predictions"
-            checked={config?.composerPredictions === true}
-            disabled={!config || predictions.isPending}
-            onChange={predictions.mutate}
+            label="Next-message predictions"
+            title={
+              predictionSource === "free"
+                ? predictionModelHint
+                : "Uses the selected model’s provider and may count toward its usage or charges."
+            }
+            checked={nextMessageEnabled}
+            disabled={!config || workflowSettings.isPending}
+            onChange={(enabled) =>
+              workflowSettings.mutate({
+                composerPredictions: enabled,
+                ...(config?.composerAutocomplete === undefined && {
+                  composerAutocomplete: autocompleteEnabled,
+                }),
+              })
+            }
+          />
+          <label className="flex w-full items-center justify-between gap-4 px-3.5 py-2.5 text-xs">
+            Next-message model
+            <select
+              aria-describedby="next-message-model-help"
+              value={predictionSource}
+              disabled={!config || workflowSettings.isPending}
+              className="rounded-md border bg-background px-2 py-1 text-xs disabled:opacity-50"
+              onChange={(event) =>
+                workflowSettings.mutate({
+                  composerPredictionSource: event.target.value === "chat" ? "chat" : "free",
+                })
+              }
+            >
+              <option value="free">Free OpenCode Zen</option>
+              <option value="chat">Use chat model</option>
+            </select>
+          </label>
+          <SettingSwitch
+            label="Autocomplete"
+            title={predictionModelHint}
+            checked={autocompleteEnabled}
+            disabled={!config || workflowSettings.isPending}
+            onChange={(enabled) => workflowSettings.mutate({ composerAutocomplete: enabled })}
+          />
+          <SettingSwitch
+            label="Composer prediction status"
+            checked={config?.composerPredictionDebug === true}
+            disabled={!config || workflowSettings.isPending}
+            onChange={(enabled) => workflowSettings.mutate({ composerPredictionDebug: enabled })}
           />
         </div>
+        <p id="next-message-model-help" className="mt-1.5 text-xs text-muted-foreground">
+          {predictionSource === "chat"
+            ? "New next-message suggestions use your selected model and may count toward its provider’s usage limits or charges. OpenAI fast aliases use the standard model when available. Your provider’s configured service tier applies. A saved suggestion is reused for the same turn."
+            : "Next-message predictions use a verified free OpenCode Zen model and the latest completed reply. A saved suggestion is reused for the same turn."}
+        </p>
         <p className="mt-1.5 text-xs text-muted-foreground">
-          A free OpenCode Zen model uses your draft to suggest a continuation. With nothing typed,
-          it reads your last message and the latest reply to suggest what to send next. Press Tab to
-          accept.
+          Autocomplete uses a verified free OpenCode Zen model. Press Tab to accept suggestions.
         </p>
       </div>
-    </div>
-  );
-}
-
-function ThemePreview({ swatch }: { swatch: Theme }) {
-  if (swatch === "light") {
-    return (
-      <div className="mx-auto flex h-10 w-full max-w-[72px] overflow-hidden rounded-md border border-black/10">
-        <div className="w-1/3 bg-[#f6f6f7]" />
-        <div className="flex-1 bg-white" />
+      <div className="mt-6 overflow-hidden rounded-lg border bg-card">
+        <SettingSwitch
+          label="Model switch warning"
+          checked={config?.hideModelSwitchWarning !== true}
+          disabled={!config || workflowSettings.isPending}
+          onChange={(enabled) => workflowSettings.mutate({ hideModelSwitchWarning: !enabled })}
+        />
       </div>
-    );
-  }
-  if (swatch === "dark") {
-    return (
-      <div className="mx-auto flex h-10 w-full max-w-[72px] overflow-hidden rounded-md border border-white/10">
-        <div className="w-1/3 bg-[#161618]" />
-        <div className="flex-1 bg-[#0e0e10]" />
-      </div>
-    );
-  }
-  return (
-    <div className="mx-auto flex h-10 w-full max-w-[72px] overflow-hidden rounded-md border border-border">
-      <div className="w-1/2 bg-white" />
-      <div className="w-1/2 bg-[#0e0e10]" />
     </div>
   );
 }
@@ -1246,12 +1233,12 @@ function SystemPromptSection({ chatRunning }: { chatRunning: boolean }) {
           className={`transition-transform ${open ? "rotate-90" : ""}`}
         />
         System prompt
-        {customized && <span className="text-amber-700 dark:text-amber-400">(changed)</span>}
+        {customized && <span className="text-warning">(changed)</span>}
       </button>
 
       {open && (
         <>
-          <p className="mt-3 rounded-lg border border-amber-200 bg-amber-50 p-3 text-xs leading-relaxed text-amber-800 dark:border-amber-900 dark:bg-amber-950/30 dark:text-amber-300">
+          <p className="mt-3 rounded-lg border border-warning/25 bg-warning/10 p-3 text-xs leading-relaxed text-warning">
             Not recommended. BloxBot can get worse at Studio work, and your next message costs more
             because the AI has to rebuild its cache. Use Instructions instead.
           </p>
@@ -1299,11 +1286,13 @@ const NOTIFICATION_KINDS: ReadonlyArray<{ kind: keyof NotificationKinds; label: 
 
 function SettingSwitch({
   label,
+  title,
   checked,
   disabled,
   onChange,
 }: {
   label: string;
+  title?: string;
   checked: boolean;
   disabled?: boolean;
   onChange: (checked: boolean) => void;
@@ -1312,6 +1301,7 @@ function SettingSwitch({
     <button
       type="button"
       role="switch"
+      title={title}
       aria-checked={checked}
       disabled={disabled}
       onClick={() => onChange(!checked)}
@@ -1325,7 +1315,7 @@ function SettingSwitch({
       >
         <span
           className={`inline-block h-3.5 w-3.5 rounded-full bg-background transition-transform ${
-            checked ? "translate-x-4" : "translate-x-0.5"
+            checked ? "translate-x-5" : "translate-x-0.5"
           }`}
         />
       </span>
@@ -1423,7 +1413,12 @@ const ABOUT_LINKS = [
   { name: "Terms of Service", url: TERMS_URL, icon: FileText },
 ];
 
-function AboutTab({ appVersion }: { appVersion: string | null }) {
+function AboutTab() {
+  const { data: appVersion } = useQuery({
+    queryKey: qk.appVersion,
+    queryFn: () => desktop.getVersion(),
+    staleTime: Infinity,
+  });
   const {
     result,
     update,
@@ -1475,7 +1470,7 @@ function AboutTab({ appVersion }: { appVersion: string | null }) {
           </div>
 
           {result?.status === "up-to-date" && !checkError && (
-            <output className="mt-2 block text-xs text-emerald-700 dark:text-emerald-400">
+            <output className="mt-2 block text-xs text-success">
               Up to date. Latest release v{result.version}.
             </output>
           )}
@@ -1506,10 +1501,13 @@ function AboutTab({ appVersion }: { appVersion: string | null }) {
           )}
 
           {updateError && (
-            <output className="mt-3 block rounded-md bg-red-50 px-2 py-1 text-xs text-red-600 dark:bg-red-950/40 dark:text-red-400">
+            <output className="mt-3 block rounded-md bg-destructive/10 px-2 py-1 text-xs text-destructive">
               {updateError}
             </output>
           )}
+          <div className="mt-3 border-t pt-2">
+            <WhatsNew />
+          </div>
         </div>
       </div>
 

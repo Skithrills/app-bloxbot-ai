@@ -90,7 +90,7 @@ function FastModeSwitch({ enabled, onToggle }: FastControl) {
       >
         <span
           className={`inline-block size-3.5 rounded-full bg-background transition-transform ${
-            enabled ? "translate-x-4" : "translate-x-0.5"
+            enabled ? "translate-x-5" : "translate-x-0.5"
           }`}
         />
       </span>

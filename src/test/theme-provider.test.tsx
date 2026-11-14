@@ -1,9 +1,10 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { act, render, screen, waitFor } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { ThemeProvider, useTheme } from "@/components/theme-provider";
 import { qk } from "@/lib/queryKeys";
+import { createCustomTheme } from "@/types/customTheme";
 import { DEFAULT_APP_CONFIG } from "@/types/desktop";
 
 function makeQueryClient() {
@@ -13,7 +14,7 @@ function makeQueryClient() {
 }
 
 function ThemeProbe() {
-  const { theme, resolvedTheme, setTheme, accent, setAccent } = useTheme();
+  const { theme, resolvedTheme, setTheme, accent, setAccent, previewTheme } = useTheme();
   return (
     <div>
       <span data-testid="theme">{theme}</span>
@@ -30,6 +31,20 @@ function ThemeProbe() {
       </button>
       <button type="button" onClick={() => setTheme("system")}>
         system
+      </button>
+      <button
+        type="button"
+        onClick={() =>
+          previewTheme(
+            { ...createCustomTheme("Preview"), light: { foreground: "#123456" } },
+            "light",
+          )
+        }
+      >
+        preview
+      </button>
+      <button type="button" onClick={() => previewTheme(null)}>
+        cancel preview
       </button>
     </div>
   );
@@ -113,5 +128,71 @@ describe("ThemeProvider", () => {
     );
     expect(screen.getByTestId("accent")).toHaveTextContent("violet");
     expect(document.documentElement.dataset.accent).toBe("violet");
+  });
+
+  it("applies the saved palette for each system mode and cleans up preview overrides", async () => {
+    const media = Object.assign(new EventTarget(), { matches: false });
+    vi.stubGlobal("matchMedia", () => media);
+    const theme = {
+      ...createCustomTheme("Slate"),
+      light: { background: "#eeeeff" },
+      dark: { background: "#111122", "syntax-foreground": "#999999" },
+      uiFont: "serif" as const,
+      codeFont: "courier" as const,
+      fontScale: 115,
+      radius: 0,
+    };
+    const queryClient = makeQueryClient();
+    queryClient.setQueryData(qk.config, {
+      ...DEFAULT_APP_CONFIG,
+      themeLibrary: { activeId: theme.id, themes: [theme] },
+    });
+    renderThemeProvider(queryClient);
+    const { style } = document.documentElement;
+    expect(style.getPropertyValue("--background")).toBe("#eeeeff");
+    expect(style.getPropertyValue("--theme-scale")).toBe("115%");
+    expect(style.getPropertyValue("--radius")).toBe("0px");
+    expect(style.getPropertyValue("--theme-ui-font")).toContain("Georgia");
+    expect(style.getPropertyValue("--theme-code-font")).toContain("Courier New");
+
+    act(() => {
+      media.matches = true;
+      media.dispatchEvent(new Event("change"));
+    });
+    expect(screen.getByTestId("resolved")).toHaveTextContent("dark");
+    expect(style.getPropertyValue("--background")).toBe("#111122");
+    expect(style.getPropertyValue("--syntax-foreground")).toBe("#999999");
+
+    fireEvent.click(screen.getByRole("button", { name: "preview", exact: true }));
+    expect(screen.getByTestId("theme")).toHaveTextContent("system");
+    expect(screen.getByTestId("resolved")).toHaveTextContent("light");
+    expect(style.getPropertyValue("--foreground")).toBe("#123456");
+    expect(style.getPropertyValue("--background")).toBe("");
+    fireEvent.click(screen.getByRole("button", { name: "cancel preview" }));
+    expect(screen.getByTestId("resolved")).toHaveTextContent("dark");
+    expect(style.getPropertyValue("--foreground")).toBe("");
+    expect(style.getPropertyValue("--background")).toBe("#111122");
+  });
+
+  it("restores the default palette immediately and keeps saved themes for reuse", async () => {
+    const theme = { ...createCustomTheme("Low contrast"), light: { foreground: "#ffffff" } };
+    const queryClient = makeQueryClient();
+    queryClient.setQueryData(qk.config, {
+      ...DEFAULT_APP_CONFIG,
+      theme: "light",
+      themeLibrary: { activeId: theme.id, themes: [theme] },
+    });
+    renderThemeProvider(queryClient);
+    const { style } = document.documentElement;
+    await waitFor(() => expect(style.getPropertyValue("--foreground")).toBe("#ffffff"));
+
+    fireEvent.keyDown(window, { code: "Digit0", shiftKey: true, ctrlKey: true });
+    expect(style.getPropertyValue("--foreground")).toBe("");
+    const { desktop } = await import("@/lib/desktop");
+    await waitFor(async () => {
+      await expect(desktop.loadConfig()).resolves.toMatchObject({
+        themeLibrary: { activeId: null, themes: [theme] },
+      });
+    });
   });
 });

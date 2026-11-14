@@ -3,7 +3,13 @@ import { describe, expect, it, vi } from "vitest";
 import type { OpencodeClient } from "@/lib/opencode/client";
 import type { Session } from "@/lib/opencode/types";
 import { qk } from "@/lib/queryKeys";
-import { prefetchServerState, reconcileServerState } from "@/providers/OpenCodeClientProvider";
+import {
+  chatRojoProjectFiles,
+  prefetchServerState,
+  reconcileServerState,
+} from "@/providers/OpenCodeClientProvider";
+import { DEFAULT_APP_CONFIG } from "@/types/desktop";
+import { ROJO_STANDALONE_PROJECT } from "@/types/rojo";
 
 function makeQueryClient() {
   return new QueryClient({
@@ -12,6 +18,40 @@ function makeQueryClient() {
 }
 
 describe("OpenCode query lifecycle", () => {
+  it("uses only the manifests configured for the chat's exact project folder", async () => {
+    const queryClient = makeQueryClient();
+    const project = "C:\\Games\\Combat";
+    const other = "C:\\Games\\Other";
+    const manifests = [`${project}\\full.project.json`, `${project}\\range.project.json`];
+    const oldManifest = `${other}\\default.project.json`;
+    queryClient.setQueryData(qk.config, {
+      ...DEFAULT_APP_CONFIG,
+      projectFolders: [
+        { directory: project, name: "Combat", studio: null },
+        { directory: other, name: "Other", studio: null },
+      ],
+      rojoManifests: {
+        [project]: manifests,
+        [ROJO_STANDALONE_PROJECT]: ["C:\\standalone.project.json"],
+      },
+      rojoProjectFiles: { [project]: "C:\\ignored.project.json", [other]: oldManifest },
+    });
+    queryClient.setQueryData(qk.sessions, [
+      { id: "combat", directory: "c:/games/combat/" },
+      { id: "other", directory: other },
+      { id: "subfolder", directory: `${project}\\Lobby` },
+      { id: "unfiled", directory: "C:\\BloxBot" },
+    ]);
+    await expect(chatRojoProjectFiles(queryClient, "combat")).resolves.toEqual(manifests);
+    await expect(chatRojoProjectFiles(queryClient, "other")).resolves.toEqual([oldManifest]);
+    for (const id of ["subfolder", "unfiled", "unknown"]) {
+      await expect(chatRojoProjectFiles(queryClient, id)).resolves.toEqual([]);
+    }
+
+    queryClient.setQueryData(qk.sessions, [{ id: "combat", directory: "C:\\BloxBot" }]);
+    await expect(chatRojoProjectFiles(queryClient, "combat")).resolves.toEqual([]);
+  });
+
   it("keeps successful startup snapshots when another endpoint fails", async () => {
     const client = {
       experimental: {

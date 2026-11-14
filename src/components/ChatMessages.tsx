@@ -268,7 +268,7 @@ function ToolText({ text, language }: { text: string; language?: HighlightLangua
     </pre>
   );
   return (
-    <div className="app-scrollbar max-h-72 overflow-auto rounded-md bg-muted/50 px-2.5 py-2 text-xs">
+    <div className="app-scrollbar max-h-72 overflow-auto rounded-md bg-[color:var(--syntax-background,color-mix(in_oklab,var(--muted)_50%,transparent))] px-2.5 py-2 text-xs">
       {language ? (
         <Suspense fallback={body}>
           <SyntaxHighlightedOutput code={text} language={language} />
@@ -586,7 +586,11 @@ const markdownComponents: Components = {
   },
   pre({ children }) {
     if (!isValidElement<{ className?: string; children?: ReactNode }>(children)) {
-      return <pre className="app-scrollbar max-w-full overflow-x-auto">{children}</pre>;
+      return (
+        <pre className="app-scrollbar max-w-full overflow-x-auto bg-syntax-background">
+          {children}
+        </pre>
+      );
     }
     const lang = children.props.className?.match(/\blanguage-(\S+)/)?.[1];
     const language = lang ? HIGHLIGHT_LANGUAGE_ALIASES[lang.toLowerCase()] : undefined;
@@ -594,7 +598,7 @@ const markdownComponents: Components = {
     return (
       <div className="mb-2 min-w-0 max-w-full pl-3 last:mb-0">
         {lang && <div className="mb-1 text-xs font-medium text-muted-foreground/60">{lang}</div>}
-        <pre className="app-scrollbar max-w-full overflow-x-auto overscroll-x-contain whitespace-pre font-mono text-sm leading-relaxed wrap-normal text-muted-foreground/80">
+        <pre className="app-scrollbar max-w-full overflow-x-auto overscroll-x-contain whitespace-pre bg-syntax-background font-mono text-sm leading-relaxed wrap-normal text-muted-foreground/80">
           {language ? (
             <span className="block in-[[data-chat-scroll=subagent]]:w-max in-[[data-chat-scroll=subagent]]:min-w-full">
               <Suspense fallback={<code>{code}</code>}>
@@ -832,8 +836,7 @@ const CompactionPartView = memo(function CompactionPartView({
 }) {
   const failed = part.status === "failed";
   return (
-    <div
-      role="status"
+    <output
       data-compaction={part.status ?? "completed"}
       title={failed ? part.error : undefined}
       className={`my-1 flex items-center gap-1.5 text-xs ${failed ? "text-destructive" : "text-muted-foreground"}`}
@@ -850,7 +853,7 @@ const CompactionPartView = memo(function CompactionPartView({
         : failed
           ? `Couldn't compact context${part.error ? `: ${part.error}` : ""}`
           : "Context compacted"}
-    </div>
+    </output>
   );
 });
 
@@ -977,7 +980,7 @@ const ModelErrorCard = memo(function ModelErrorCard({
   }
 
   return (
-    <div role="alert" className="my-1 text-[#cf222e]/75 dark:text-[#ff7b72]/70">
+    <div role="alert" className="my-1 text-destructive">
       <div className="flex min-w-0 items-start gap-2">
         <svg
           width="16"
@@ -1875,7 +1878,8 @@ function UserMessage({ message, sessionID }: { message: MessageWithParts; sessio
   return (
     <div className="group/message flex flex-col items-end pb-4">
       <div
-        className={`min-w-0 max-w-[85%] rounded-2xl bg-secondary px-3.5 py-2 text-foreground wrap-anywhere ${editing ? "w-full" : ""}`}
+        data-user-message=""
+        className={`min-w-0 max-w-[85%] rounded-2xl bg-user-message px-3.5 py-2 text-user-message-foreground wrap-anywhere ${editing ? "w-full" : ""}`}
       >
         <UserPartsView parts={message.parts} hideText={editing} />
         {editing && <MessageEditor message={message} onDone={() => setEditing(false)} />}
@@ -1887,7 +1891,7 @@ function UserMessage({ message, sessionID }: { message: MessageWithParts; sessio
           role="img"
           aria-label={receipt}
           title={receipt}
-          className={steer === "read" ? "text-sky-600 dark:text-sky-400" : undefined}
+          className={steer === "read" ? "text-info" : undefined}
         >
           <ReceiptIcon size={14} aria-hidden="true" />
         </span>

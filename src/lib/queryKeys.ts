@@ -16,6 +16,7 @@ export const qk = {
   permissions: (id: string) => ["sessions", id, "permissions"] as const,
   config: ["config"] as const,
   appUpdate: ["app-update"] as const,
+  appVersion: ["app-version"] as const,
   instructions: ["instructions"] as const,
   skillImport: ["skill-import"] as const,
   studioConnection: ["studio-connection"] as const,

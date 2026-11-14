@@ -14,3 +14,13 @@ export const AppUpdateCheckSchema = Schema.Union(
 );
 
 export type AppUpdateCheck = typeof AppUpdateCheckSchema.Type;
+
+const ForkReleaseSchema = Schema.Struct({
+  version: Schema.String,
+  publishedAt: Schema.String,
+  body: Schema.String,
+  url: Schema.String,
+});
+
+export const ReleaseHistorySchema = Schema.Array(ForkReleaseSchema);
+export type ForkRelease = typeof ForkReleaseSchema.Type;

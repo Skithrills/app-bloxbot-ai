@@ -10,7 +10,7 @@ import {
   type ExplorerSyncResult,
   ExplorerSyncResultSchema,
 } from "@/lib/explorer";
-import { type AppUpdateCheck, AppUpdateCheckSchema } from "@/types/appUpdate";
+import { type AppUpdateCheck, AppUpdateCheckSchema, ReleaseHistorySchema } from "@/types/appUpdate";
 import {
   type AppConfig,
   AppConfigPatchSchema,
@@ -349,6 +349,21 @@ export const desktop: DesktopApi = {
     runPromise(desktopEffects.getSubscriptionUsage(provider)),
   getOpenCodeInstallFolder: () => runPromise(desktopEffects.getOpenCodeInstallFolder),
   chooseProjectFolder: () => runPromise(desktopEffects.chooseProjectFolder),
+  addRojoProjectFiles: (projectId) =>
+    window.bloxbot?.addRojoProjectFiles?.(projectId) ??
+    Promise.reject(new DesktopError({ message: "Rojo requires the desktop app." })),
+  removeRojoProjectFile: (projectId, projectFile) =>
+    window.bloxbot?.removeRojoProjectFile?.(projectId, projectFile) ??
+    Promise.reject(new DesktopError({ message: "Rojo requires the desktop app." })),
+  listRojoServers: () => window.bloxbot?.listRojoServers?.() ?? Promise.resolve([]),
+  startRojoServer: (projectId, projectFile) =>
+    window.bloxbot?.startRojoServer?.(projectId, projectFile) ??
+    Promise.reject(new DesktopError({ message: "Rojo requires the desktop app." })),
+  stopRojoServer: (projectId, projectFile) =>
+    window.bloxbot?.stopRojoServer?.(projectId, projectFile) ?? Promise.resolve(null),
+  readStudioRojoConnection: (studioId) =>
+    window.bloxbot?.readStudioRojoConnection?.(studioId) ??
+    Promise.reject(new DesktopError({ message: "Rojo requires the desktop app." })),
   getStudioMcpStatus: () => runPromise(desktopEffects.getStudioMcpStatus),
   onOpenCodeStartupProgress: (listener: StartupProgressListener) =>
     window.bloxbot?.onOpenCodeStartupProgress(listener) ?? (() => {}),
@@ -364,6 +379,15 @@ export const desktop: DesktopApi = {
   setModelSettings: (patch) => runPromise(desktopEffects.setModelSettings(patch)),
   setSystemPrompt: (systemPrompt) => runPromise(desktopEffects.setSystemPrompt(systemPrompt)),
   checkForUpdate: () => runUpdaterPromise(desktopEffects.checkForUpdate),
+  listReleaseHistory: () =>
+    runUpdaterPromise(
+      invokeUpdater(
+        "Could not load release history.",
+        () =>
+          window.bloxbot?.listReleaseHistory?.() ??
+          Promise.reject(new Error("Release history is available in the desktop app.")),
+      ).pipe(decodeBridgeValue("Release history is invalid.", ReleaseHistorySchema)),
+    ),
   installUpdate: () => runUpdaterPromise(desktopEffects.installUpdate),
   relaunch: () => runPromise(desktopEffects.relaunch),
   getBlenderToolsState: () => runPromise(desktopEffects.getBlenderToolsState),

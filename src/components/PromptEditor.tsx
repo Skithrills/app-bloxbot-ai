@@ -46,7 +46,10 @@ import { createPortal } from "react-dom";
 import { ReferenceChip } from "@/components/ReferenceChip";
 import { StudioClassIcon } from "@/components/StudioClassIcon";
 import { MENU_LABEL, MENU_SURFACE } from "@/components/ui/menu";
-import { useComposerPrediction } from "@/hooks/useComposerPrediction";
+import {
+  type ComposerPredictionOptions,
+  useComposerPrediction,
+} from "@/hooks/useComposerPrediction";
 import type { ExplorerNode, ExplorerReference } from "@/lib/explorer";
 import { serializeInstanceReference } from "@/lib/instanceReferences";
 import type { Command } from "@/lib/opencode/types";
@@ -527,32 +530,51 @@ function $predictionTarget() {
 }
 
 function ComposerPredictionPlugin({
-  context,
+  options,
   onNextMessage,
 }: {
-  /** The end of the chat, which a suggestion for an empty composer is read from. */
-  context: string | null;
+  options: ComposerPredictionOptions;
   /** The whole message suggested for an empty composer, or null when there is none to show. */
   onNextMessage: (suggestion: string | null) => void;
 }) {
   const [editor] = useLexicalComposerContext();
   const [candidate, setCandidate] = useState<ReturnType<typeof $predictionTarget>>(null);
+  const [idleReason, setIdleReason] = useState("Waiting for the editor");
   const composing = useRef(false);
   const dismissed = useRef<{ draft: string; accepted?: string }>();
-  const suffix = useComposerPrediction(candidate, context);
+  const { suffix, status } = useComposerPrediction(candidate, idleReason, options);
 
   useEffect(() => {
     function sync() {
-      const target =
-        editor.getRootElement() === document.activeElement &&
-        !composing.current &&
-        !editor.isComposing()
-          ? editor.getEditorState().read($predictionTarget)
-          : null;
-      const next =
-        target?.draft === dismissed.current?.draft || target?.draft === dismissed.current?.accepted
-          ? null
-          : target;
+      const focused = editor.getRootElement() === document.activeElement;
+      const writing = composing.current || editor.isComposing();
+      const target = writing
+        ? null
+        : editor.getEditorState().read(() => {
+            const root = $getRoot();
+            const paragraph = root.getFirstChild();
+            if (
+              root.getChildrenSize() === 1 &&
+              $isParagraphNode(paragraph) &&
+              paragraph.isEmpty()
+            ) {
+              return { draft: "", key: paragraph.getKey() };
+            }
+            return focused ? $predictionTarget() : null;
+          });
+      const dismissedTarget =
+        !!target &&
+        (target.draft === dismissed.current?.draft || target.draft === dismissed.current?.accepted);
+      const next = dismissedTarget ? null : target;
+      setIdleReason(
+        writing
+          ? "Waiting for typed text to commit"
+          : dismissedTarget
+            ? "Suggestion dismissed or accepted"
+            : focused
+              ? "Place the caret after plain text"
+              : "Focus the composer to autocomplete",
+      );
       setCandidate((current) =>
         current?.draft === next?.draft && current?.key === next?.key ? current : next,
       );
@@ -562,11 +584,11 @@ function ComposerPredictionPlugin({
       if (!root) return;
       function blur() {
         composing.current = false;
-        setCandidate(null);
+        queueMicrotask(sync);
       }
       function compositionStart() {
         composing.current = true;
-        setCandidate(null);
+        sync();
       }
       function compositionEnd() {
         composing.current = false;
@@ -624,6 +646,7 @@ function ComposerPredictionPlugin({
         draft: candidate.draft,
         accepted: accept ? candidate.draft + suffix : undefined,
       };
+      setIdleReason("Suggestion dismissed or accepted");
       setCandidate(null);
       event.preventDefault();
       if (accept) {
@@ -651,9 +674,19 @@ function ComposerPredictionPlugin({
   }, [candidate, editor, onNextMessage, suffix]);
 
   return (
-    <output className="sr-only">
-      {suffix && `Press Tab to accept the suggestion or Escape to dismiss it. ${suffix.trim()}`}
-    </output>
+    <>
+      <output className="sr-only">
+        {suffix && `Press Tab to accept the suggestion or Escape to dismiss it. ${suffix.trim()}`}
+      </output>
+      {options.debug && (
+        <output
+          aria-label="Composer prediction status"
+          className="block pb-1 text-[11px] text-muted-foreground"
+        >
+          {status}
+        </output>
+      )}
+    </>
   );
 }
 
@@ -664,9 +697,7 @@ interface PromptEditorProps {
   objectsLoading?: boolean;
   objectsUnavailable?: string | null;
   noStudio?: boolean;
-  predictionScope?: string | null;
-  /** The end of the chat. With it, an empty composer suggests the whole next message. */
-  predictionContext?: string | null;
+  prediction?: ComposerPredictionOptions;
   /** Typing "@" asks for a fresh copy of the place's objects. */
   onObjectsWanted?: () => void;
   onChange(text: string, state: SerializedEditorState): void;
@@ -683,8 +714,7 @@ export default forwardRef<PromptEditorHandle, PromptEditorProps>(function Prompt
     objectsLoading,
     objectsUnavailable,
     noStudio,
-    predictionScope,
-    predictionContext = null,
+    prediction,
     onObjectsWanted,
     onChange,
     onSubmit,
@@ -819,10 +849,13 @@ export default forwardRef<PromptEditorHandle, PromptEditorProps>(function Prompt
           commands={commands}
           onSubmit={onSubmit}
         />
-        {predictionScope && (
+        {prediction && (
           <ComposerPredictionPlugin
-            key={predictionScope}
-            context={predictionContext}
+            key={JSON.stringify([
+              prediction.sessionID,
+              prediction.context?.status === "ready" ? prediction.context.turnID : null,
+            ])}
+            options={prediction}
             onNextMessage={setNextMessage}
           />
         )}

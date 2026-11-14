@@ -33,30 +33,30 @@ function contextSegments(data: ChatContext["context"]["data"]) {
   const tokens = data?.measurement?.tokens;
   if (!tokens) return [];
   return [
-    { label: "Input", count: tokens.input, color: "bg-sky-500", stroke: "stroke-sky-500" },
+    { label: "Input", count: tokens.input, color: "bg-chart-1", stroke: "stroke-chart-1" },
     {
       label: "Cache read",
       count: tokens.cache.read,
-      color: "bg-violet-500",
-      stroke: "stroke-violet-500",
+      color: "bg-chart-2",
+      stroke: "stroke-chart-2",
     },
     {
       label: "Cache write",
       count: tokens.cache.write,
-      color: "bg-fuchsia-500",
-      stroke: "stroke-fuchsia-500",
+      color: "bg-chart-3",
+      stroke: "stroke-chart-3",
     },
     {
       label: "Output",
       count: tokens.output,
-      color: "bg-emerald-500",
-      stroke: "stroke-emerald-500",
+      color: "bg-chart-4",
+      stroke: "stroke-chart-4",
     },
     {
       label: "Reasoning",
       count: tokens.reasoning,
-      color: "bg-amber-500",
-      stroke: "stroke-amber-500",
+      color: "bg-chart-5",
+      stroke: "stroke-chart-5",
     },
   ].filter(({ count }) => Number.isFinite(count) && count > 0);
 }

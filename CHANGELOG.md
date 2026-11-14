@@ -7,6 +7,28 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+## [0.16.4] - 2026-11-14
+
+### Added
+
+- **What’s new.** Open the title-bar button for the fork’s published release notes back to v0.15.5. The button hides after opening and returns after an app update. Reopen the notes from **Settings → About → Release history**.
+- **Custom themes.** Go to **Settings → Personalisation** to edit separate light and dark palettes, fonts, text size, and corner radius. Preview changes live or share themes as JSON.
+- **Six theme presets.** Preview or apply Vesper, Dracula, Solarized Dark, Tokyo Night, Catppuccin Latte, and Everforest Dark. Save an editable copy to make a preset your own.
+- **Optional Rojo launcher.** Open it from the chat sidebar. Save multiple `.project.json` files in one project folder, start and stop servers manually, and copy addresses or open logs for each server.
+
+### Improved
+
+- **Rojo status in Studio and chat.** The launcher shows serving ports, reports conflicts, and can check the endpoint reported by Studio’s Rojo plugin. Chats receive the registered manifest paths for their project folder.
+- **Workflow settings.** Go to **Settings → Workflow** for shortcuts, reasoning effort controls, and separate switches for next-message predictions and draft autocomplete. Both default to free OpenCode Zen models. Next-message predictions can also use the chat model and count toward its provider’s usage.
+- **Saved predictions.** Next-message suggestions survive an app restart while the latest turn still matches. Turn on **Composer prediction status** for details when a suggestion is waiting, cached, or unavailable.
+- **Free prediction timeouts.** Free next-message models have more time to generate a suggestion. Composer status distinguishes a setup timeout from a generation timeout.
+- **Colour mode and preset accents.** Choose Light, Dark, or System in **Personalisation**. Each built-in preset can remember a different accent colour.
+
+### Fixed
+
+- **Fast mode warning.** Switching between Standard and Fast keeps the same model selected and leaves the Last used card on the base model name. Selecting a different model still shows the model-change warning.
+- **Model picker scrolling.** Scroll through other models while the warning is visible. Choose **Do not show again** to hide it, or turn it back on in **Settings → Workflow**.
+
 ## [0.16.3] - 2026-11-14
 
 ### Added

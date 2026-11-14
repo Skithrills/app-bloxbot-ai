@@ -543,7 +543,7 @@ function ProviderConnectDialog({ provider, onClose, onConnected }: ProviderConne
                 {copied ? <Check size={14} /> : <Copy size={14} />}
               </button>
             </div>
-            <div className="space-y-2 rounded-lg border border-amber-500/40 bg-amber-500/10 px-3 py-2.5">
+            <div className="space-y-2 rounded-lg border border-warning/40 bg-warning/10 px-3 py-2.5">
               <p className="text-sm font-medium">You're proceeding on your own</p>
               <p className="text-xs leading-relaxed text-muted-foreground">
                 BloxBot isn't affiliated with Anthropic. Its terms may limit using Claude plans in

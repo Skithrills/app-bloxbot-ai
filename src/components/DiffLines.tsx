@@ -1,6 +1,6 @@
 const LINE = {
-  "+": "border-emerald-500 bg-emerald-500/10",
-  "-": "border-red-500 bg-red-500/10",
+  "+": "border-diff-add bg-diff-add/10",
+  "-": "border-diff-remove bg-diff-remove/10",
   "@": "border-transparent text-muted-foreground/70",
   " ": "border-transparent",
 } as const;
@@ -65,9 +65,9 @@ export function DiffStat({
 }
 
 // Written out in full: Tailwind only makes the classes it can find as whole words.
-const ADDED = "text-emerald-600 dark:text-emerald-400";
-const REMOVED = "text-red-600 dark:text-red-400";
+const ADDED = "text-diff-add";
+const REMOVED = "text-diff-remove";
 const QUIET_ADDED =
-  "opacity-70 transition-colors group-hover/row:text-emerald-600 group-hover/row:opacity-100 group-focus-visible/row:text-emerald-600 group-focus-visible/row:opacity-100 dark:group-hover/row:text-emerald-400 dark:group-focus-visible/row:text-emerald-400";
+  "opacity-70 transition-colors group-hover/row:text-diff-add group-hover/row:opacity-100 group-focus-visible/row:text-diff-add group-focus-visible/row:opacity-100";
 const QUIET_REMOVED =
-  "opacity-70 transition-colors group-hover/row:text-red-600 group-hover/row:opacity-100 group-focus-visible/row:text-red-600 group-focus-visible/row:opacity-100 dark:group-hover/row:text-red-400 dark:group-focus-visible/row:text-red-400";
+  "opacity-70 transition-colors group-hover/row:text-diff-remove group-hover/row:opacity-100 group-focus-visible/row:text-diff-remove group-focus-visible/row:opacity-100";

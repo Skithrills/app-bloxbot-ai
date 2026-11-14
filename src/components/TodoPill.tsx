@@ -6,7 +6,7 @@ import type { Todo } from "@/lib/opencode/types";
 
 function TodoGlyph({ status }: { status: Todo["status"] }) {
   if (status === "completed") {
-    return <Check aria-hidden="true" size={14} className="shrink-0 text-emerald-500" />;
+    return <Check aria-hidden="true" size={14} className="shrink-0 text-success" />;
   }
   if (status === "cancelled") {
     return <X aria-hidden="true" size={14} className="shrink-0 text-muted-foreground" />;

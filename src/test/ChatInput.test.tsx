@@ -5,6 +5,7 @@
  * model selection, and send/abort button states.
  */
 
+import { webcrypto } from "node:crypto";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { useEffect, useRef } from "react";
@@ -275,6 +276,7 @@ beforeEach(() => {
 
 afterEach(() => {
   vi.restoreAllMocks();
+  vi.unstubAllGlobals();
 });
 
 // ── Tests ────────────────────────────────────────────────────────────
@@ -402,7 +404,8 @@ describe("ChatInput", () => {
       }) as unknown as MessagesCache;
     client.composer.predict.mockResolvedValueOnce("Yes, pull more frames");
     const queryClient = createQueryClient();
-    const { container } = render(
+    vi.stubGlobal("crypto", webcrypto);
+    const { container, unmount } = render(
       <TestChatInput
         client={client}
         queryClient={queryClient}
@@ -451,7 +454,7 @@ describe("ChatInput", () => {
           assistant: "You broke a skylight. Want more frames?",
         }),
       },
-      { signal: expect.any(AbortSignal) },
+      { signal: expect.any(AbortSignal), onStatus: expect.any(Function) },
     );
     expect(screen.queryByText(placeholder)).toBeNull();
     expect(editor).toHaveTextContent("");
@@ -485,6 +488,143 @@ describe("ChatInput", () => {
     expect(suggestion()).toBeNull();
     expect(client.composer.predict).toHaveBeenCalledOnce();
     expect(client.session.promptAsync).not.toHaveBeenCalled();
+
+    unmount();
+    composerPredictionCache.clear();
+    saveComposerDraft("s1", EMPTY_COMPOSER_DRAFT);
+    const reopenedClient = createClient();
+    const reopenedQueryClient = createQueryClient();
+    const reopened = render(
+      <TestChatInput
+        client={reopenedClient}
+        queryClient={reopenedQueryClient}
+        prepareCache={(qc) => {
+          qc.setQueryData(qk.config, {
+            ...DEFAULT_APP_CONFIG,
+            composerPredictions: true,
+            composerAutocomplete: false,
+            composerPredictionSource: "chat",
+            composerPredictionDebug: true,
+            lastModel: "anthropic/claude-3.5-sonnet",
+          });
+          qc.setQueryData(qk.providers, {
+            all: [
+              {
+                id: "anthropic",
+                name: "Anthropic",
+                models: {
+                  "claude-3.5-sonnet": {
+                    id: "claude-3.5-sonnet",
+                    name: "Claude 3.5 Sonnet",
+                    capabilities: { input: { text: true }, output: { text: true } },
+                  },
+                },
+              },
+            ],
+            connected: ["anthropic"],
+            default: { anthropic: "claude-3.5-sonnet" },
+          });
+          qc.setQueryData(
+            qk.messages("s1"),
+            chat(reply("done", "You broke a skylight. Want more frames?", true)),
+          );
+        }}
+      />,
+    );
+    const reopenedSuggestion = () =>
+      reopened.container.querySelector("[data-composer-next-message]");
+    const reopenedEditor = screen.getByRole("textbox", { name: "Message" });
+    expect(reopenedEditor).not.toHaveFocus();
+    await waitFor(() =>
+      expect(reopenedSuggestion()).toHaveAttribute(
+        "data-composer-next-message",
+        "Yes, pull more frames",
+      ),
+    );
+    expect(screen.getByLabelText("Composer prediction status")).toHaveTextContent(
+      "Reusing a saved suggestion",
+    );
+    expect(reopenedClient.composer.predict).not.toHaveBeenCalled();
+
+    await act(async () => {
+      reopenedQueryClient.setQueryData(qk.statuses, { s1: { type: "busy" } });
+    });
+    await waitFor(() => expect(reopenedSuggestion()).toBeNull());
+    expect(screen.getByLabelText("Composer prediction status")).toHaveTextContent(
+      "Waiting for the chat to finish",
+    );
+    await act(async () => {
+      reopenedQueryClient.setQueryData(qk.statuses, {});
+    });
+    await waitFor(() => expect(reopenedSuggestion()).not.toBeNull());
+
+    await act(async () => {
+      reopenedEditor.focus();
+      fireEvent.input(reopenedEditor, { target: { textContent: "Yes, pull" } });
+    });
+    const reopenedTail = reopenedEditor.querySelector("[data-lexical-text]")?.firstChild;
+    if (!reopenedTail) throw new Error("Expected a Lexical text node");
+    await act(async () => {
+      window.getSelection()?.collapse(reopenedTail, "Yes, pull".length);
+      document.dispatchEvent(new Event("selectionchange"));
+    });
+    expect(reopenedEditor.querySelector("[data-composer-prediction]")).toBeNull();
+    expect(screen.getByLabelText("Composer prediction status")).toHaveTextContent(
+      "Autocomplete is off",
+    );
+    await act(async () => {
+      fireEvent.input(reopenedEditor, { target: { textContent: "" } });
+    });
+    await waitFor(() => expect(reopenedSuggestion()).not.toBeNull());
+    reopenedClient.composer.predict.mockImplementationOnce(async (_input, options) => {
+      expect(options.beforeGenerate()).toBeUndefined();
+      options.onStatus("generating");
+      return null;
+    });
+    await act(async () => {
+      reopenedQueryClient.setQueryData(
+        qk.messages("s1"),
+        chat(reply("different", "You broke a skylight. Want more frames?", true)),
+      );
+    });
+    await waitFor(() => expect(reopenedSuggestion()).toBeNull());
+    await waitFor(
+      () =>
+        expect(screen.getByLabelText("Composer prediction status")).toHaveTextContent(
+          "The model returned no usable suggestion",
+        ),
+      waitForPrediction,
+    );
+    expect(reopenedClient.composer.predict).toHaveBeenCalledExactlyOnceWith(
+      expect.objectContaining({
+        draft: "",
+        modelID: "claude-3.5-sonnet",
+        chatProviderID: "anthropic",
+      }),
+      expect.objectContaining({
+        signal: expect.any(AbortSignal),
+        beforeGenerate: expect.any(Function),
+      }),
+    );
+    await act(async () => {
+      reopenedQueryClient.setQueryData(qk.statuses, { s1: { type: "busy" } });
+    });
+    await waitFor(() =>
+      expect(screen.getByLabelText("Composer prediction status")).toHaveTextContent(
+        "Waiting for the chat to finish",
+      ),
+    );
+    await act(async () => {
+      reopenedQueryClient.setQueryData(qk.statuses, {});
+    });
+    await waitFor(
+      () =>
+        expect(screen.getByLabelText("Composer prediction status")).toHaveTextContent(
+          "The chat model already attempted a prediction for this turn",
+        ),
+      waitForPrediction,
+    );
+    expect(reopenedClient.composer.predict).toHaveBeenCalledOnce();
   });
 
   it("attaches a video as still frames and tells the model which images they are", async () => {
@@ -598,7 +738,16 @@ describe("ChatInput", () => {
       env: [],
       models: {
         big: { id: "big", name: "Claude Big", limit: { context: 1_000_000, output: 1 } },
-        small: { id: "small", name: "Claude Small", limit: { context: 200_000, output: 1 } },
+        "big-fast": {
+          id: "big-fast",
+          name: "Claude Big Fast",
+          limit: { context: 1_000_000, output: 1 },
+        },
+        "small-fast": {
+          id: "small-fast",
+          name: "Claude Small Fast",
+          limit: { context: 200_000, output: 1 },
+        },
       },
     };
     render(
@@ -611,7 +760,7 @@ describe("ChatInput", () => {
             connected: ["anthropic"],
             default: { anthropic: "big" },
           });
-          cache.setQueryData(qk.config, { ...DEFAULT_APP_CONFIG, lastModel: "anthropic/big" });
+          cache.setQueryData(qk.config, { ...DEFAULT_APP_CONFIG, lastModel: "anthropic/big-fast" });
           cache.setQueryData(qk.messages("s1"), {
             messageIds: ["reply"],
             messagesById: {
@@ -621,7 +770,7 @@ describe("ChatInput", () => {
                   sessionID: "s1",
                   role: "assistant",
                   providerID: "anthropic",
-                  modelID: "big",
+                  modelID: "big-fast",
                   time: { created: 1, completed: 2 },
                 },
                 parts: [],
@@ -631,15 +780,15 @@ describe("ChatInput", () => {
         }}
       />,
     );
-    const picker = () => screen.getByRole("button", { name: /Claude (Big|Small)$/ });
+    const picker = () => screen.getByRole("button", { name: /Claude (Big|Small Fast)$/ });
     fireEvent.click(await screen.findByRole("button", { name: "Claude Big" }));
     // On the chat's own model there is nothing to warn about.
     const lastUsed = await screen.findByRole("button", { name: /Last used.*Claude Big/ });
     expect(lastUsed).toHaveAttribute("aria-pressed", "true");
     expect(screen.queryByText(/reads the whole chat again/)).toBeNull();
 
-    // Another model, picked by accident or not, is marked on the picker and explained in it.
-    fireEvent.click(screen.getByRole("button", { name: "Claude Small" }));
+    // A model with no matching standard entry keeps its own name and switch warning.
+    fireEvent.click(screen.getByRole("button", { name: "Claude Small Fast" }));
     await waitFor(() =>
       expect(picker()).toHaveAccessibleDescription(/^This chat has been using Claude Big\./),
     );
@@ -656,12 +805,30 @@ describe("ChatInput", () => {
     const back = await screen.findByRole("button", { name: "Claude Big" });
     expect(back).not.toHaveAttribute("title");
     expect(back.querySelector("[data-model-switched]")).toBeNull();
+    expect(qc.getQueryData(qk.config)).toMatchObject({
+      chatModels: { s1: { key: "anthropic/big-fast" } },
+    });
+
+    fireEvent.click(back);
+    fireEvent.click(await screen.findByRole("button", { name: "Claude Small Fast" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Claude Small Fast" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Do not show again" }));
+    await waitFor(() => expect(screen.queryByText(/reads the whole chat again/)).toBeNull());
+    expect(screen.getByRole("button", { name: /Last used.*Claude Big/ })).toBeVisible();
+    expect(qc.getQueryData(qk.config)).toMatchObject({ hideModelSwitchWarning: true });
   });
 
-  it("groups a Fast model with its standard version and keeps compatible effort when toggled", async () => {
+  it.each([
+    { lastUsedFast: false, lastUsedMode: "standard" },
+    { lastUsedFast: true, lastUsedMode: "Fast" },
+  ])("treats $lastUsedMode as the same model after toggling Fast, and keeps compatible effort", async ({
+    lastUsedFast,
+  }) => {
     const client = createClient();
     const qc = createQueryClient();
     const id = "gpt-6.1-sol";
+    const lastUsedID = lastUsedFast ? `${id}-fast` : id;
+    const nextID = lastUsedFast ? id : `${id}-fast`;
     const provider = {
       id: "openai-oauth",
       name: "ChatGPT Subscription",
@@ -684,38 +851,68 @@ describe("ChatInput", () => {
           });
           cache.setQueryData(qk.config, {
             ...DEFAULT_APP_CONFIG,
-            lastModel: `${provider.id}/${id}`,
+            lastModel: `${provider.id}/${lastUsedID}`,
           });
+          cache.setQueryData(qk.messages("s1"), {
+            messageIds: ["reply"],
+            messagesById: {
+              reply: {
+                info: {
+                  id: "reply",
+                  sessionID: "s1",
+                  role: "assistant",
+                  providerID: provider.id,
+                  modelID: lastUsedID,
+                  time: { created: 1, completed: 2 },
+                },
+                parts: [],
+              },
+            },
+          } as unknown as MessagesCache);
         }}
       />,
     );
     const modelPicker = await screen.findByRole("button", { name: /GPT-6.1 Sol.*ChatGPT Sub/ });
     fireEvent.click(modelPicker);
     expect(await screen.findByRole("button", { name: "GPT-6.1 Sol", pressed: true })).toBeVisible();
+    expect(
+      screen.getByRole("button", { name: /^Last used\s*GPT-6\.1 Sol$/, pressed: true }),
+    ).toBeVisible();
     expect(screen.queryByRole("button", { name: "GPT-6.1 Sol Fast" })).toBeNull();
     fireEvent.keyDown(screen.getByRole("textbox", { name: "Search models" }), { key: "Escape" });
     await waitFor(() => expect(modelPicker).toHaveFocus());
 
-    fireEvent.click(screen.getByRole("button", { name: "Auto effort" }));
+    fireEvent.click(screen.getByRole("button", { name: /Auto effort$/ }));
     const slider = await screen.findByRole("slider", { name: "Reasoning effort" });
     await waitFor(() => expect(slider).toHaveFocus());
     fireEvent.change(slider, { target: { value: "1" } });
     await waitFor(() => expect(slider).toHaveAttribute("aria-valuetext", "Low"));
-    fireEvent.click(await screen.findByRole("button", { name: "Fast mode", pressed: false }));
-    expect(await screen.findByRole("button", { name: "Fast mode", pressed: true })).toBeVisible();
+    fireEvent.click(
+      await screen.findByRole("button", { name: "Fast mode", pressed: lastUsedFast }),
+    );
+    expect(
+      await screen.findByRole("button", { name: "Fast mode", pressed: !lastUsedFast }),
+    ).toBeVisible();
     expect(slider).toHaveAttribute("aria-valuetext", "Low");
-    expect(slider.parentElement).toHaveAttribute("data-fast");
+    expect(slider.parentElement?.hasAttribute("data-fast")).toBe(!lastUsedFast);
     fireEvent.keyDown(slider, { key: "Escape" });
+    await waitFor(() => expect(modelPicker).not.toHaveAttribute("title"));
+    expect(modelPicker.querySelector("[data-model-switched]")).toBeNull();
+    fireEvent.click(modelPicker);
+    expect(screen.queryByText(/reads the whole chat again/)).toBeNull();
+    fireEvent.click(
+      await screen.findByRole("button", { name: /^Last used\s*GPT-6\.1 Sol$/, pressed: true }),
+    );
 
     const editor = screen.getByRole("textbox", { name: "Message" });
     await act(async () => {
-      fireEvent.input(editor, { target: { textContent: "Use the Fast version." } });
+      fireEvent.input(editor, { target: { textContent: "Use the selected speed." } });
     });
     fireEvent.click(screen.getByTitle("Send"));
     await waitFor(() =>
       expect(client.session.promptAsync).toHaveBeenCalledWith(
         expect.objectContaining({
-          model: { providerID: provider.id, modelID: `${id}-fast` },
+          model: { providerID: provider.id, modelID: nextID },
           variant: "low",
         }),
         expect.anything(),

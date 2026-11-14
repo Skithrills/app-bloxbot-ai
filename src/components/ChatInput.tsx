@@ -1,4 +1,4 @@
-import { useIsMutating, useQuery, useQueryClient } from "@tanstack/react-query";
+import { useIsMutating, useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import type { SerializedEditorState } from "lexical";
 import { Check, Film, History, Loader2, Paperclip, Plus, TriangleAlert } from "lucide-react";
 import { ContextMenu } from "radix-ui";
@@ -40,6 +40,7 @@ import { useTranscript } from "@/hooks/useMessages";
 import { useAllModels, useProviderList } from "@/hooks/useProviders";
 import { useSessionGoal } from "@/hooks/useSessionGoal";
 import { useIsBusy } from "@/hooks/useSessionStatuses";
+import { useSessions } from "@/hooks/useSessions";
 import { useTodos } from "@/hooks/useTodos";
 import {
   type ComposerDelivery,
@@ -68,7 +69,7 @@ import {
   readVideoFrames,
   videoPoster,
 } from "@/lib/composerVideos";
-import { loadConfig } from "@/lib/config";
+import { type AppConfig, loadConfig, patchConfig } from "@/lib/config";
 import { desktop } from "@/lib/desktop";
 import {
   EXPLORER_WAIT_NOTICES,
@@ -579,20 +580,33 @@ function ChatInput({
     predicate: ({ state }) => state.variables === activeSessionId,
   });
   // A compaction asked for from the context panel is under way before the chat shows it.
-  const compacting =
-    compactRequests > 0 || (useTranscript(activeSessionId, compactionRunning) ?? false);
+  const transcriptCompacting = useTranscript(activeSessionId, compactionRunning);
+  const compacting = compactRequests > 0 || (transcriptCompacting ?? false);
   const isBusy = useIsBusy(activeSessionId) || compacting;
-  const { data: predictionsEnabled } = useQuery({
+  const { data: predictionSettings } = useQuery({
     queryKey: qk.config,
     queryFn: loadConfig,
-    select: (config) => config.composerPredictions === true,
+    select: (config) => ({
+      nextMessageEnabled: config.composerPredictions === true,
+      nextMessageSource: config.composerPredictionSource ?? "free",
+      autocompleteEnabled: (config.composerAutocomplete ?? config.composerPredictions) === true,
+      debug: config.composerPredictionDebug === true,
+      hideModelSwitchWarning: config.hideModelSwitchWarning === true,
+    }),
   });
-  // Read only while the chat waits for a message, so a streaming reply doesn't redraw the composer.
-  const predictionContext =
-    useTranscript(
-      predictionsEnabled && !isBusy ? activeSessionId : null,
-      composerPredictionContext,
-    ) ?? null;
+  const useComposerSuggestions =
+    predictionSettings?.nextMessageEnabled || predictionSettings?.autocompleteEnabled;
+  const { data: sessions } = useSessions();
+  const revertedID = sessions?.find(({ id }) => id === activeSessionId)?.revert?.messageID;
+  const selectPredictionContext = useCallback(
+    (cache: MessagesCache) => composerPredictionContext(cache, revertedID),
+    [revertedID],
+  );
+  // Streaming changes don't rerender the prediction UI while a reply is running.
+  const predictionContext = useTranscript(
+    useComposerSuggestions && !isBusy ? activeSessionId : null,
+    selectPredictionContext,
+  );
   const {
     composerShortcuts = DEFAULT_COMPOSER_SHORTCUTS,
     selectedModel,
@@ -666,6 +680,17 @@ function ChatInput({
   const editorSessionRef = useRef<string | null>(null);
   const sendMessage = useSendMessage();
   const queryClient = useQueryClient();
+  const hideSwitchWarning = useMutation({
+    mutationFn: () => patchConfig({ hideModelSwitchWarning: true }),
+    onSuccess: async () => {
+      await queryClient.cancelQueries({ queryKey: qk.config, exact: true });
+      queryClient.setQueryData<AppConfig>(qk.config, (config) =>
+        config ? { ...config, hideModelSwitchWarning: true } : config,
+      );
+      modelSearchRef.current?.focus();
+    },
+    onError: () => notify.error("Couldn't save the model switch warning setting"),
+  });
   const sendFilter = { mutationKey: sendMessageMutationKey(activeSessionId), exact: true };
   const isSending = useIsMutating(sendFilter) > 0;
 
@@ -1072,20 +1097,27 @@ function ChatInput({
     lastUsedKey && !unavailableModels.has(lastUsedKey) && lastUsedListed?.status !== "deprecated"
       ? lastUsedListed
       : undefined;
-  const switchedFrom = lastUsedKey && lastUsed && selectedModel && selectedModel !== lastUsedKey;
+  const lastUsedPair = lastUsedKey ? fastPairs.get(lastUsedKey) : undefined;
+  const lastUsedModelKey = lastUsedPair
+    ? `${lastUsedPair.standard.providerId}/${lastUsedPair.standard.id}`
+    : lastUsedKey;
+  const lastUsedName = lastUsedPair?.standard.name ?? lastUsed?.name;
+  const usingLastUsedModel = displayModelKey !== null && displayModelKey === lastUsedModelKey;
+  const switchedFrom = lastUsed && selectedModel && !usingLastUsedModel;
   const selectedLimit =
     selectedModel && providerList ? listedModel(providerList, selectedModel)?.limit?.context : 0;
   const holdsLess =
     switchedFrom && selectedLimit && lastUsed.limit?.context
       ? selectedLimit < lastUsed.limit.context
       : false;
-  const switchWarning = switchedFrom
-    ? `This chat has been using ${lastUsed.name}. A different model reads the whole chat again from the start, which costs more${
-        holdsLess
-          ? `, and this one holds less (${tokenCount.format(selectedLimit || 0)} against ${tokenCount.format(lastUsed.limit?.context ?? 0)} tokens), so the chat may be compacted`
-          : ""
-      }.`
-    : null;
+  const switchWarning =
+    switchedFrom && !predictionSettings?.hideModelSwitchWarning
+      ? `This chat has been using ${lastUsedName}. A different model reads the whole chat again from the start, which costs more${
+          holdsLess
+            ? `, and this one holds less (${tokenCount.format(selectedLimit || 0)} against ${tokenCount.format(lastUsed.limit?.context ?? 0)} tokens), so the chat may be compacted`
+            : ""
+        }.`
+      : null;
 
   function handleModelClick(model: ModelInfo) {
     const fullId = `${model.providerId}/${model.id}`;
@@ -1263,17 +1295,26 @@ function ChatInput({
               }
               onObjectsWanted={requestSync}
               noStudio={!studioId}
-              predictionScope={
-                predictionsEnabled &&
-                !isBusy &&
-                !isSending &&
-                !isDragging &&
-                attachments.length === 0 &&
-                readingVideos === 0
-                  ? activeSessionId
-                  : null
+              prediction={
+                predictionSettings && (useComposerSuggestions || predictionSettings.debug)
+                  ? {
+                      ...predictionSettings,
+                      sessionID: activeSessionId,
+                      context: predictionContext,
+                      paused: !activeSessionId
+                        ? "Open a chat to see suggestions"
+                        : isBusy || isSending
+                          ? "Waiting for the chat to finish"
+                          : readingVideos > 0
+                            ? "Waiting for video to finish loading"
+                            : attachments.length > 0
+                              ? "Suggestions are paused with attachments"
+                              : isDragging
+                                ? "Suggestions are paused while dragging"
+                                : null,
+                    }
+                  : undefined
               }
-              predictionContext={predictionContext}
               onChange={handleEditorChange}
               onSubmit={handleSubmit}
               onEnter={handleEnter}
@@ -1326,7 +1367,7 @@ function ChatInput({
                       <span
                         aria-hidden="true"
                         data-model-switched=""
-                        className="h-1.5 w-1.5 shrink-0 rounded-full bg-amber-500"
+                        className="h-1.5 w-1.5 shrink-0 rounded-full bg-warning"
                       />
                     )}
                     <span className="truncate">{modelDisplay}</span>
@@ -1341,7 +1382,7 @@ function ChatInput({
                 <PopoverContent
                   side="top"
                   align="start"
-                  className="flex max-h-80 w-80 flex-col p-0!"
+                  className="flex max-h-[min(24rem,var(--radix-popover-content-available-height))] w-80 max-w-[calc(100vw-1rem)] flex-col overflow-hidden p-0!"
                 >
                   <MenuSearch
                     inputRef={modelSearchRef}
@@ -1349,94 +1390,108 @@ function ChatInput({
                     onChange={setModelSearch}
                     placeholder="Search models..."
                   />
-                  <label className="flex shrink-0 items-center justify-between gap-2 border-b px-3 py-2 text-xs">
-                    Hide free models
-                    <input
-                      type="checkbox"
-                      checked={hideFreeModels}
-                      disabled={savingModelSettings}
-                      onChange={(event) => setHideFreeModels(event.target.checked)}
-                    />
-                  </label>
-                  <label className="flex shrink-0 items-center justify-between gap-2 border-b px-3 py-2 text-xs">
-                    Model order
-                    <select
-                      value={modelCatalogOrder}
-                      onChange={(event) =>
-                        setModelCatalogOrder(event.target.value === "newest" ? "newest" : "name")
-                      }
-                      className="rounded-md border bg-background px-2 py-1"
-                    >
-                      <option value="name">Name (A–Z)</option>
-                      <option value="newest">Newest first</option>
-                    </select>
-                  </label>
-                  {lastUsedKey && lastUsed && !modelSearch && (
-                    <div className="shrink-0 border-b p-1.5">
-                      <button
-                        type="button"
-                        aria-pressed={selectedModel === lastUsedKey}
-                        title={
-                          selectedModel === lastUsedKey
-                            ? "This chat's model"
-                            : `Go back to ${lastUsed.name}`
+                  <div className="app-scrollbar min-h-0 flex-1 overflow-y-auto overscroll-contain">
+                    <label className="flex shrink-0 items-center justify-between gap-2 border-b px-3 py-2 text-xs">
+                      Hide free models
+                      <input
+                        type="checkbox"
+                        checked={hideFreeModels}
+                        disabled={savingModelSettings}
+                        onChange={(event) => setHideFreeModels(event.target.checked)}
+                      />
+                    </label>
+                    <label className="flex shrink-0 items-center justify-between gap-2 border-b px-3 py-2 text-xs">
+                      Model order
+                      <select
+                        value={modelCatalogOrder}
+                        onChange={(event) =>
+                          setModelCatalogOrder(event.target.value === "newest" ? "newest" : "name")
                         }
-                        onClick={() => {
-                          if (selectedModel !== lastUsedKey) setSelectedModel(lastUsedKey);
-                          setShowModelPicker(false);
-                        }}
-                        className="flex w-full min-w-0 items-center gap-2 rounded-md border bg-card px-2 py-1.5 text-left outline-none transition-colors hover:bg-accent focus-visible:ring-2 focus-visible:ring-ring"
+                        className="rounded-md border bg-background px-2 py-1"
                       >
-                        <History
-                          aria-hidden="true"
-                          size={14}
-                          className="shrink-0 text-muted-foreground"
-                        />
-                        <span className="min-w-0 flex-1">
-                          <span className="block text-[10px] font-medium uppercase tracking-wide text-muted-foreground">
-                            Last used
+                        <option value="name">Name (A–Z)</option>
+                        <option value="newest">Newest first</option>
+                      </select>
+                    </label>
+                    {lastUsedKey && lastUsed && !modelSearch && (
+                      <div className="shrink-0 border-b p-1.5">
+                        <button
+                          type="button"
+                          aria-pressed={usingLastUsedModel}
+                          title={
+                            usingLastUsedModel ? "This chat's model" : `Go back to ${lastUsedName}`
+                          }
+                          onClick={() => {
+                            if (!usingLastUsedModel) setSelectedModel(lastUsedKey);
+                            setShowModelPicker(false);
+                          }}
+                          className="flex w-full min-w-0 items-center gap-2 rounded-md border bg-card px-2 py-1.5 text-left outline-none transition-colors hover:bg-accent focus-visible:ring-2 focus-visible:ring-ring"
+                        >
+                          <History
+                            aria-hidden="true"
+                            size={14}
+                            className="shrink-0 text-muted-foreground"
+                          />
+                          <span className="min-w-0 flex-1">
+                            <span className="block text-[10px] font-medium uppercase tracking-wide text-muted-foreground">
+                              Last used
+                            </span>
+                            <span className="block truncate text-sm">{lastUsedName}</span>
                           </span>
-                          <span className="block truncate text-sm">{lastUsed.name}</span>
-                        </span>
-                        {selectedModel === lastUsedKey && (
-                          <Check aria-hidden="true" size={14} className="shrink-0" />
+                          {usingLastUsedModel && (
+                            <Check aria-hidden="true" size={14} className="shrink-0" />
+                          )}
+                        </button>
+                        {switchWarning && (
+                          <div className="mt-1.5 flex gap-1.5 px-1 text-xs leading-relaxed">
+                            <TriangleAlert
+                              aria-hidden="true"
+                              size={13}
+                              className="mt-0.5 shrink-0 text-warning"
+                            />
+                            <div>
+                              <p className="text-warning">{switchWarning}</p>
+                              <button
+                                type="button"
+                                disabled={hideSwitchWarning.isPending}
+                                onClick={() => hideSwitchWarning.mutate()}
+                                className="mt-1 rounded-sm text-muted-foreground underline underline-offset-2 hover:text-foreground focus-visible:outline-2 focus-visible:outline-ring disabled:opacity-50"
+                              >
+                                Do not show again
+                              </button>
+                            </div>
+                          </div>
                         )}
-                      </button>
-                      {switchWarning && (
-                        <p className="mt-1.5 flex gap-1.5 px-1 text-xs leading-relaxed text-amber-700 dark:text-amber-400">
-                          <TriangleAlert aria-hidden="true" size={13} className="mt-0.5 shrink-0" />
-                          <span>{switchWarning}</span>
-                        </p>
+                      </div>
+                    )}
+                    <div className="p-1">
+                      {modelsByProvider.map(([id, group]) => renderProviderGroup(id, group))}
+                      {modelsByProvider.length === 0 && (
+                        <MenuLabel className="text-center">
+                          {modelSearch
+                            ? `No models matching "${modelSearch}"`
+                            : hideFreeModels
+                              ? "No paid models connected"
+                              : "No models yet"}
+                        </MenuLabel>
                       )}
                     </div>
-                  )}
-                  <div className="min-h-0 flex-1 overflow-y-auto p-1">
-                    {modelsByProvider.map(([id, group]) => renderProviderGroup(id, group))}
-                    {modelsByProvider.length === 0 && (
-                      <MenuLabel className="text-center">
-                        {modelSearch
-                          ? `No models matching "${modelSearch}"`
-                          : hideFreeModels
-                            ? "No paid models connected"
-                            : "No models yet"}
-                      </MenuLabel>
-                    )}
+                    {onOpenSettings ? (
+                      <div className="shrink-0 border-t p-1">
+                        <MenuItem
+                          role="button"
+                          onClick={() => {
+                            setShowModelPicker(false);
+                            setModelSearch("");
+                            onOpenSettings();
+                          }}
+                        >
+                          <Plus aria-hidden="true" size={14} className="shrink-0" />
+                          Add providers and models
+                        </MenuItem>
+                      </div>
+                    ) : null}
                   </div>
-                  {onOpenSettings ? (
-                    <div className="shrink-0 border-t p-1">
-                      <MenuItem
-                        role="button"
-                        onClick={() => {
-                          setShowModelPicker(false);
-                          setModelSearch("");
-                          onOpenSettings();
-                        }}
-                      >
-                        <Plus aria-hidden="true" size={14} className="shrink-0" />
-                        Add providers and models
-                      </MenuItem>
-                    </div>
-                  ) : null}
                 </PopoverContent>
               </Popover>
 

@@ -5,6 +5,7 @@ import { EventTranslator } from "@/lib/opencode/events";
 const engine = vi.hoisted(() => ({
   session: {
     prompt: vi.fn(),
+    command: vi.fn(),
     switchModel: vi.fn(),
     remove: vi.fn(),
     inbox: { update: vi.fn() },
@@ -29,6 +30,51 @@ describe("main chat native inbox", () => {
     vi.resetAllMocks();
     localStorage.clear();
     entry.list.mockResolvedValue([ROUTING]);
+    entry.remove.mockResolvedValue(undefined);
+  });
+
+  it("updates project context alongside Studio routing on ordinary turns and commands", async () => {
+    let projectFiles = ["C:\\Project\\full.project.json", "C:\\Project\\jump.project.json"];
+    const client = createOpencodeClient({
+      baseUrl: "http://localhost:4096",
+      rojoProjectFiles: async () => projectFiles,
+    });
+    const options = { throwOnError: true } as const;
+    const prompt = {
+      sessionID: "s1",
+      system: ROUTING.value,
+      model: { modelID: "fixture", providerID: "fixture" },
+      parts: [{ type: "text", text: "Work on jump" }],
+    };
+    await client.session.promptAsync(prompt, options);
+    const stored = entry.put.mock.calls[0]?.[0];
+    expect(stored).toMatchObject({ sessionID: "s1", key: ROUTING.key });
+    expect(stored.value).toMatch(/^Route every Roblox Studio MCP tool call/);
+    expect(stored.value).toContain("include the Studio routing instructions above verbatim");
+    expect(stored.value).toContain(JSON.stringify(projectFiles));
+    expect(entry.put.mock.invocationCallOrder[0]).toBeLessThan(
+      engine.session.prompt.mock.invocationCallOrder[0],
+    );
+
+    entry.list.mockResolvedValue([stored]);
+    projectFiles = [];
+    await client.session.promptInbox(
+      {
+        sessionID: "s1",
+        studioTargetID: "studio-1",
+        text: "Queue in the same turn",
+        delivery: "queue",
+      },
+      options,
+    );
+    expect(entry.put).toHaveBeenCalledTimes(1);
+    expect(entry.remove).not.toHaveBeenCalled();
+
+    await client.session.command({ ...prompt, name: "review" }, options);
+    expect(entry.put.mock.calls[1]?.[0].value).not.toContain("full.project.json");
+    expect(engine.session.command).toHaveBeenCalledOnce();
+    await client.session.promptAsync({ ...prompt, system: undefined }, options);
+    expect(entry.remove).toHaveBeenCalledExactlyOnceWith({ sessionID: "s1", key: ROUTING.key });
   });
 
   it.each([

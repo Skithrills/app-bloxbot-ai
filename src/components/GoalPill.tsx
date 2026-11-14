@@ -6,11 +6,11 @@ import type { SessionGoal } from "@/lib/opencode/types";
 
 const STATUS = {
   active: { label: "Goal", icon: Target, tone: "" },
-  paused: { label: "Goal paused", icon: CircleAlert, tone: "text-amber-600 dark:text-amber-400" },
+  paused: { label: "Goal paused", icon: CircleAlert, tone: "text-warning" },
   complete: {
     label: "Goal met",
     icon: CircleCheck,
-    tone: "text-emerald-600 dark:text-emerald-400",
+    tone: "text-success",
   },
 } as const;
 
@@ -35,13 +35,11 @@ export default function GoalPill({
   return (
     <Popover open={open} onOpenChange={setOpen}>
       <PopoverTrigger asChild>
-        <button
-          type="button"
-          className={`${MENU_TRIGGER} gap-1.5 ${status.tone}`}
-          title={goal.objective}
-        >
-          <status.icon aria-hidden="true" size={14} className="shrink-0" />
-          {status.label}
+        <button type="button" className={MENU_TRIGGER} title={goal.objective}>
+          <span className={`flex items-center gap-1.5 ${status.tone}`}>
+            <status.icon aria-hidden="true" size={14} className="shrink-0" />
+            {status.label}
+          </span>
         </button>
       </PopoverTrigger>
       <MenuContent side="top" align="start" className="w-72">

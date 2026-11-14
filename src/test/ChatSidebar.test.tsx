@@ -19,6 +19,7 @@ import { OpenCodeClientContext } from "@/providers/OpenCodeClientProvider";
 import { PreferencesProvider } from "@/providers/PreferencesProvider";
 import { StudioTargetProvider } from "@/providers/StudioTargetProvider";
 import type { ProjectFolder } from "@/types/desktop";
+import { ROJO_STANDALONE_PROJECT } from "@/types/rojo";
 
 // ── Helpers ──────────────────────────────────────────────────────────
 
@@ -149,6 +150,43 @@ afterEach(() => {
 // ── Tests ────────────────────────────────────────────────────────────
 
 describe("ChatSidebar", () => {
+  it("shows the number of serving manifests and keeps the launcher accessible without files", async () => {
+    const qc = createQueryClient();
+    seedState(qc);
+    const projectFile = "C:/Games/lobby.project.json";
+    const list = vi.spyOn(desktop, "listRojoServers").mockResolvedValue([]);
+    render(<TestSidebar client={createClient()} queryClient={qc} />);
+    expect(screen.getByRole("button", { name: "Rojo launcher" })).toBeInTheDocument();
+    await waitFor(() => expect(list).toHaveBeenCalled());
+
+    await act(async () => {
+      qc.setQueryData(qk.config, (config) => ({
+        ...config,
+        rojoManifests: { [ROJO_STANDALONE_PROJECT]: [projectFile] },
+      }));
+    });
+    expect(
+      await screen.findByRole("button", { name: "Rojo launcher (0 serving)" }),
+    ).toBeInTheDocument();
+    list.mockResolvedValue([
+      {
+        projectId: ROJO_STANDALONE_PROJECT,
+        projectFile,
+        status: "running",
+        port: 34872,
+        error: null,
+        output: "",
+      },
+    ]);
+    fireEvent.click(screen.getByRole("button", { name: "Rojo launcher (0 serving)" }));
+    const dialog = await screen.findByRole("dialog", { name: "Rojo server launcher" });
+    expect(await within(dialog).findByText("127.0.0.1:34872")).toBeInTheDocument();
+    fireEvent.click(within(dialog).getByRole("button", { name: "Close" }));
+    expect(
+      await screen.findByRole("button", { name: "Rojo launcher (1 serving)" }),
+    ).toBeInTheDocument();
+  });
+
   it("adds a real project folder, creates in it, and keeps grouping after a fresh configuration load", async () => {
     const directory = "C:\\Games\\Game A";
     const session = { ...makeSession("project1", "A project chat"), directory: "c:/games/game a" };

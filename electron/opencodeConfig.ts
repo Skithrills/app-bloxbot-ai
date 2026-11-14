@@ -5,7 +5,13 @@ import { OPENAI_API_PROVIDER, toEngineModelKey } from "../src/lib/openAiProfiles
 import { splitModelKey } from "../src/lib/splitModelKey";
 import { STUDIO_MCP_SERVER_NAME } from "../src/lib/studioMcp";
 import { SUBAGENT_PROFILE_PROMPT, SUBAGENT_PROFILES } from "../src/lib/subagentProfiles";
-import { CAPTURE_EMBED_PROMPT, DEFAULT_SYSTEM_PROMPT, INSTANCE_REFERENCE_PROMPT, STUDIO_TOOL_PROMPT } from "../src/lib/systemPrompt";
+import {
+  CAPTURE_EMBED_PROMPT,
+  DEFAULT_SYSTEM_PROMPT,
+  INSTANCE_REFERENCE_PROMPT,
+  ROBLOX_SOURCE_WORKFLOW_PROMPT,
+  STUDIO_TOOL_PROMPT,
+} from "../src/lib/systemPrompt";
 import type { ModelSettings } from "../src/types/desktop";
 import { openAiApiProvider } from "./openAiApiProvider";
 
@@ -71,7 +77,14 @@ interface McpLocalServer {
 }
 
 const agentSystem = (systemPrompt: string | null | undefined, hasBlender: boolean) => {
-  const base = [systemPrompt ?? DEFAULT_SYSTEM_PROMPT, CAPTURE_EMBED_PROMPT, STUDIO_TOOL_PROMPT, INSTANCE_REFERENCE_PROMPT, SUBAGENT_PROFILE_PROMPT].join("\n\n");
+  const base = [
+    systemPrompt ?? DEFAULT_SYSTEM_PROMPT,
+    ROBLOX_SOURCE_WORKFLOW_PROMPT,
+    CAPTURE_EMBED_PROMPT,
+    STUDIO_TOOL_PROMPT,
+    INSTANCE_REFERENCE_PROMPT,
+    SUBAGENT_PROFILE_PROMPT,
+  ].join("\n\n");
   return hasBlender ? `${base}\n\n${BLENDER_PROMPT}` : base;
 };
 
@@ -92,7 +105,13 @@ function subagents(settings?: ModelSettings) {
           description: model
             ? `${description} Configured model: ${model}. Effort: ${variant ?? "model default"}.`
             : description,
-          system: [system, CAPTURE_EMBED_PROMPT, STUDIO_TOOL_PROMPT, INSTANCE_REFERENCE_PROMPT].filter(Boolean).join("\n\n"),
+          system: [
+            system,
+            ROBLOX_SOURCE_WORKFLOW_PROMPT,
+            CAPTURE_EMBED_PROMPT,
+            STUDIO_TOOL_PROMPT,
+            INSTANCE_REFERENCE_PROMPT,
+          ].join("\n\n"),
           ...(model && {
             model: variant ? { providerID, model: modelID, variant } : model,
           }),

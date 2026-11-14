@@ -267,7 +267,10 @@ function StudioSetup({
         <div className="mt-3 flex flex-col items-center gap-1 text-center text-xs leading-relaxed text-muted-foreground">
           {problem ? (
             <output className="flex max-w-lg items-start justify-center gap-2">
-              <span className="mt-1 h-2 w-2 shrink-0 rounded-full bg-red-400" aria-hidden="true" />
+              <span
+                className="mt-1 h-2 w-2 shrink-0 rounded-full bg-destructive"
+                aria-hidden="true"
+              />
               <span>
                 {PROBLEM_COPY[problem]}
                 {problem === "not_installed" ? (
@@ -287,7 +290,7 @@ function StudioSetup({
             </output>
           ) : notFound ? null : (
             <p className="flex items-center gap-2">
-              <span className="h-2 w-2 animate-pulse rounded-full bg-amber-400" />
+              <span className="h-2 w-2 animate-pulse rounded-full bg-warning" />
               Looking for Roblox Studio
             </p>
           )}

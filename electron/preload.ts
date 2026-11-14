@@ -14,6 +14,16 @@ const api: DesktopApi = {
   getOpenCodeInfo: () => ipcRenderer.invoke(channels.getOpenCodeInfo),
   getOpenCodeInstallFolder: () => ipcRenderer.invoke(channels.getOpenCodeInstallFolder),
   chooseProjectFolder: () => ipcRenderer.invoke(channels.chooseProjectFolder),
+  addRojoProjectFiles: (projectId) => ipcRenderer.invoke(channels.addRojoProjectFiles, projectId),
+  removeRojoProjectFile: (projectId, projectFile) =>
+    ipcRenderer.invoke(channels.removeRojoProjectFile, projectId, projectFile),
+  listRojoServers: () => ipcRenderer.invoke(channels.listRojoServers),
+  startRojoServer: (projectId, projectFile) =>
+    ipcRenderer.invoke(channels.startRojoServer, projectId, projectFile),
+  stopRojoServer: (projectId, projectFile) =>
+    ipcRenderer.invoke(channels.stopRojoServer, projectId, projectFile),
+  readStudioRojoConnection: (studioId) =>
+    ipcRenderer.invoke(channels.readStudioRojoConnection, studioId),
   getSubscriptionUsage: (provider) => ipcRenderer.invoke(channels.getSubscriptionUsage, provider),
   getStudioMcpStatus: () => ipcRenderer.invoke(channels.getStudioMcpStatus),
   onOpenCodeStartupProgress: (listener) => {
@@ -29,6 +39,7 @@ const api: DesktopApi = {
   setModelSettings: (patch) => ipcRenderer.invoke(channels.setModelSettings, patch),
   setSystemPrompt: (systemPrompt) => ipcRenderer.invoke(channels.setSystemPrompt, systemPrompt),
   checkForUpdate: () => ipcRenderer.invoke(channels.checkForUpdate),
+  listReleaseHistory: () => ipcRenderer.invoke(channels.listReleaseHistory),
   installUpdate: () => ipcRenderer.invoke(channels.installUpdate),
   relaunch: () => ipcRenderer.invoke(channels.relaunch),
   getBlenderToolsState: () => ipcRenderer.invoke(channels.getBlenderToolsState),

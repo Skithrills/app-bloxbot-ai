@@ -2,15 +2,13 @@
 export default function ModelStatusBadge({ status }: { status?: string }) {
   if (status === "beta")
     return (
-      <span className="shrink-0 rounded bg-amber-100 px-1 text-xs font-medium text-amber-700 dark:bg-amber-950/50 dark:text-amber-400">
+      <span className="shrink-0 rounded bg-warning/15 px-1 text-xs font-medium text-warning">
         beta
       </span>
     );
   if (status === "alpha")
     return (
-      <span className="shrink-0 rounded bg-purple-100 px-1 text-xs font-medium text-purple-700 dark:bg-purple-950/50 dark:text-purple-300">
-        alpha
-      </span>
+      <span className="shrink-0 rounded bg-info/15 px-1 text-xs font-medium text-info">alpha</span>
     );
   if (status === "deprecated")
     return (

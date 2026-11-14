@@ -6,6 +6,7 @@ import ErrorBoundary from "@/components/ErrorBoundary";
 import { ThemeProvider } from "@/components/theme-provider";
 import { UpdateButton } from "@/components/UpdateButton";
 import { Toaster } from "@/components/ui/sonner";
+import { WhatsNew } from "@/components/WhatsNew";
 import { useStarCalloutForReturningUsers } from "@/hooks/useStarCalloutForReturningUsers";
 import { ActiveSessionProvider } from "@/providers/ActiveSessionProvider";
 import { ExplorerReferenceProvider } from "@/providers/ExplorerReferenceProvider";
@@ -22,8 +23,10 @@ function AppInner() {
     <main className="flex h-full flex-col overflow-hidden">
       <div
         id="titlebar-actions"
-        className="app-titlebar flex h-9 shrink-0 items-center justify-end gap-1 bg-sidebar px-2"
+        tabIndex={-1}
+        className="app-titlebar flex h-9 shrink-0 items-center justify-end gap-1 bg-sidebar px-2 outline-none"
       >
+        <WhatsNew titleBar />
         <UpdateButton />
       </div>
       <ErrorBoundary>

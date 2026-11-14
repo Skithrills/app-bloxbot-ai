@@ -82,6 +82,45 @@ export async function discoverStudioTargets(
   return { targets: await listStudios(callTool), selectedKey: null };
 }
 
+/** Reads the endpoint Rojo exposes for Auto Connect Playtest Server without running Luau. */
+export async function readStudioRojoConnection(
+  callTool: CallStudioTool,
+  studioId: string,
+): Promise<{ port: number; placeId: string | null } | null> {
+  const options = { timeout: 2_000 };
+  const readEditPlace = async () => {
+    const result = await callTool("list_roblox_studios", {}, options);
+    const error = mcpError(result);
+    if (error) throw new Error(error);
+    const data = mcpData(result);
+    const studios = Array.isArray(data) ? data : data?.studios;
+    if (!Array.isArray(studios)) return null;
+    const studio = studios.find((entry) => toTarget(entry)?.key === studioId);
+    if (studio?.mode !== "Edit") return null;
+    return toTarget(studio);
+  };
+
+  const before = await readEditPlace();
+  if (!before) return null;
+  const result = await callTool("inspect_instance", { studio_id: studioId, path: "Workspace" }, options);
+  const error = mcpError(result);
+  if (error) throw new Error(error);
+  const workspace = mcpData(result);
+  if (workspace?.className !== "Workspace") return null;
+  const endpoint = workspace.attributes?.__Rojo_ConnectionUrl;
+  if (typeof endpoint !== "string") return null;
+  // Match the explicit port before URL normalization can discard a port like HTTP's 80.
+  const match = /^https?:\/\/(?:localhost|127\.0\.0\.1|\[::1\]):(\d{1,5})\/?$/i.exec(endpoint);
+  if (!match || match[0] !== endpoint) return null;
+  const port = Number(match[1]);
+  if (port < 1 || port > 65_535) return null;
+
+  // Inspector reads the active data model, so check that Studio stayed in the same place in Edit.
+  const after = await readEditPlace();
+  if (!after || after.placeId !== before.placeId) return null;
+  return { port, placeId: after.placeId ?? null };
+}
+
 /**
  * Runs a script in whichever data model is open. Studio rejects "Edit" during a playtest, which may not
  * have a server either. Returns the first answer, or the last error when none would run it.

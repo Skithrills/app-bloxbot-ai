@@ -17,7 +17,7 @@ import {
   openBlender,
   removeBlenderTools,
 } from "./services/BlenderTools";
-import { dirname, join, resolve } from "node:path";
+import { dirname, isAbsolute, join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
 import {
@@ -52,6 +52,12 @@ import {
 import { OPENAI_ENGINE_OAUTH_PROVIDER } from "../src/lib/openAiProfiles";
 import { SubscriptionProviderSchema } from "../src/types/subscriptionUsage";
 import {
+  isActiveRojoServer,
+  rojoManifestKey,
+  rojoProjectFilesFor,
+  ROJO_STANDALONE_PROJECT,
+} from "../src/types/rojo";
+import {
   ExplorerDetailsRequestSchema,
   ExplorerEditSchema,
   ExplorerNodeDetailsSchema,
@@ -62,7 +68,7 @@ import {
   StudioTargetSelectionSchema,
 } from "../src/types/studioTarget";
 import { handleLastWindowClosed } from "./appLifecycle";
-import { checkForAppUpdate, installAppUpdate } from "./appUpdater";
+import { checkForAppUpdate, installAppUpdate, listReleaseHistory } from "./appUpdater";
 import { blenderToolsFolder, engineFolder } from "./machineFolders";
 import { syncExplorerTree } from "./explorerTree";
 import {
@@ -77,6 +83,7 @@ import {
   discoverStudioTargets,
   editExplorerObject,
   inspectExplorerNode,
+  readStudioRojoConnection,
   selectStudioTarget,
 } from "./studioQueries";
 import { withBlender, withModelSettings, withSystemPrompt } from "./opencodeConfig";
@@ -88,6 +95,7 @@ import {
   videoSaveOptions,
 } from "./localVideo";
 import { makeOpenCodeLayer, OpenCode } from "./services/OpenCode";
+import { isRojoManifestPath, RojoServers } from "./services/Rojo";
 import { createSubscriptionUsageReader } from "./services/SubscriptionUsage";
 import { createSystemNotifier, notificationSettingsUrl } from "./systemNotifications";
 import { makeStudioMcpBrokerLayer, StudioMcpBroker } from "./services/StudioMcpBroker";
@@ -104,6 +112,7 @@ protocol.registerSchemesAsPrivileged([
 const currentDirectory = dirname(fileURLToPath(import.meta.url));
 const defaultConfig: AppConfig = DEFAULT_APP_CONFIG;
 const configMutex = Effect.unsafeMakeSemaphore(1);
+const rojoServers = new RojoServers();
 
 function configPath(): string {
   return join(app.getPath("userData"), "bloxbot-store.json");
@@ -111,6 +120,7 @@ function configPath(): string {
 
 let mainWindow: BrowserWindow | null = null;
 let quitting = false;
+let shuttingDown = false;
 
 const showSystemNotification = createSystemNotifier({
   isSupported: () => Notification.isSupported(),
@@ -323,6 +333,125 @@ function migrateOpenAiPreferences(providerID: string) {
 
 const runMain = <A, E>(effect: Effect.Effect<A, E>) => Effect.runPromise(effect);
 
+function requireRojoProject(config: AppConfig, projectId: string) {
+  if (
+    projectId !== ROJO_STANDALONE_PROJECT &&
+    !config.projectFolders?.some((folder) => folder.directory === projectId)
+  ) {
+    throw new Error("This project folder is no longer in BloxBot.");
+  }
+}
+
+function registerRojoHandlers() {
+  const projectId = Schema.decodeUnknownSync(
+    Schema.String.pipe(Schema.filter((id) => id === ROJO_STANDALONE_PROJECT || isAbsolute(id))),
+  );
+  const projectFile = Schema.decodeUnknownSync(Schema.String.pipe(Schema.filter(isRojoManifestPath)));
+
+  function updateManifestFiles(
+    id: string,
+    update: (files: readonly string[]) => readonly string[],
+  ): Promise<readonly string[]> {
+    return runMain(
+      Effect.gen(function* () {
+        const config = yield* loadConfig;
+        return yield* Effect.tryPromise({
+          try: async () => {
+            requireRojoProject(config, id);
+            const files = update(rojoProjectFilesFor(config, id));
+            // Older review builds can still read the first manifest.
+            const legacy = { ...config.rojoProjectFiles };
+            if (files[0]) legacy[id] = files[0];
+            else delete legacy[id];
+            await writeConfigFile(
+              configPath(),
+              JSON.stringify(
+                {
+                  ...config,
+                  rojoProjectFiles: legacy,
+                  rojoManifests: { ...config.rojoManifests, [id]: files },
+                },
+                null,
+                2,
+              ),
+            );
+            return files;
+          },
+          catch: (cause) =>
+            cause instanceof Error ? cause : new Error("Could not save the Rojo project files."),
+        });
+      }).pipe(configMutex.withPermits(1)),
+    );
+  }
+
+  ipcMain.handle(channels.addRojoProjectFiles, async (event, rawId: unknown) => {
+    const id = projectId(rawId);
+    const config = await runMain(loadConfig);
+    requireRojoProject(config, id);
+    const window = BrowserWindow.fromWebContents(event.sender);
+    const options: Electron.OpenDialogOptions = {
+      title: "Choose Rojo project files",
+      defaultPath: id || rojoProjectFilesFor(config, id)[0],
+      filters: [{ name: "Rojo project files", extensions: ["json", "jsonc"] }],
+      properties: ["openFile", "multiSelections"],
+    };
+    const result = await (window
+      ? dialog.showOpenDialog(window, options)
+      : dialog.showOpenDialog(options));
+    if (result.canceled || !result.filePaths.length) return [];
+    if (!result.filePaths.every(isRojoManifestPath)) {
+      throw new Error("Choose files ending in .project.json or .project.jsonc.");
+    }
+    return updateManifestFiles(id, (files) => {
+      const unique = new Map(files.map((file) => [rojoManifestKey(id, file), file]));
+      for (const file of result.filePaths) {
+        const key = rojoManifestKey(id, file);
+        if (!unique.has(key)) unique.set(key, file);
+      }
+      return [...unique.values()];
+    });
+  });
+
+  ipcMain.handle(channels.removeRojoProjectFile, async (_event, rawId: unknown, rawFile: unknown) => {
+    const id = projectId(rawId);
+    const file = projectFile(rawFile);
+    const key = rojoManifestKey(id, file);
+    await updateManifestFiles(id, (files) => {
+      const server = rojoServers.list().find(
+        (run) => rojoManifestKey(run.projectId, run.projectFile) === key,
+      );
+      if (isActiveRojoServer(server)) {
+        throw new Error("Stop this Rojo server before removing its file.");
+      }
+      return files.filter((saved) => rojoManifestKey(id, saved) !== key);
+    });
+  });
+
+  ipcMain.handle(channels.listRojoServers, () => rojoServers.list());
+  ipcMain.handle(channels.startRojoServer, async (_event, rawId: unknown, rawFile: unknown) => {
+    const id = projectId(rawId);
+    const file = projectFile(rawFile);
+    const key = rojoManifestKey(id, file);
+    const { started } = await runMain(
+      configMutex.withPermits(1)(
+        loadConfig.pipe(
+          Effect.map((config) => {
+            requireRojoProject(config, id);
+            const saved = rojoProjectFilesFor(config, id).find(
+              (candidate) => rojoManifestKey(id, candidate) === key,
+            );
+            if (!saved) throw new Error("Add the Rojo project file before starting it.");
+            return { started: rojoServers.start(id, saved) };
+          }),
+        ),
+      ),
+    );
+    return started;
+  });
+  ipcMain.handle(channels.stopRojoServer, (_event, rawId: unknown, rawFile: unknown) =>
+    rojoServers.stop(projectId(rawId), projectFile(rawFile)),
+  );
+}
 const StudioKeySchema = Schema.String.pipe(Schema.minLength(1), Schema.maxLength(512));
 // Left out, it means every skill, which is also the only time removed ones are cleaned up.
 const SkillNamesSchema = Schema.NullishOr(
@@ -351,6 +480,11 @@ const queryStudio = <A>(query: (callTool: CallStudioTool) => Promise<A>) =>
   );
 
 const registerIpcHandlers = Effect.sync(() => {
+  registerRojoHandlers();
+  ipcMain.handle(channels.readStudioRojoConnection, (_event, input: unknown) => {
+    const studioId = Schema.decodeUnknownSync(StudioKeySchema)(input);
+    return queryStudio((callTool) => readStudioRojoConnection(callTool, studioId));
+  });
   const getOpenCodeInfo = () =>
     openCodeRuntime.runPromise(
       OpenCode.pipe(Effect.flatMap((service) => service.info)),
@@ -541,6 +675,9 @@ const registerIpcHandlers = Effect.sync(() => {
     ),
   );
   let updateCheck: ReturnType<typeof checkForAppUpdate> | undefined;
+  ipcMain.handle(channels.listReleaseHistory, () =>
+    listReleaseHistory((url, options) => net.fetch(url, options)),
+  );
   let updateInstall: ReturnType<typeof installAppUpdate> | undefined;
   ipcMain.handle(channels.checkForUpdate, () => {
     if (!app.isPackaged) return { status: "unsupported" };
@@ -912,13 +1049,15 @@ const registerAppLifecycle = Effect.sync(() => {
   app.on("before-quit", (event) => {
     if (quitting) return;
     event.preventDefault();
+    if (shuttingDown) return;
+    shuttingDown = true;
     Effect.runFork(
-      Effect.tryPromise({
-        try: () => openCodeRuntime.dispose(),
-        catch: (cause) =>
-          new DesktopMainError({ message: "Failed to stop the OpenCode runtime", cause }),
+      Effect.promise(async () => {
+        const results = await Promise.allSettled([rojoServers.stopAll(), openCodeRuntime.dispose()]);
+        for (const result of results) {
+          if (result.status === "rejected") reportMainError("shutdown", result.reason);
+        }
       }).pipe(
-        Effect.catchAll(Effect.logError),
         Effect.ensuring(
           Effect.sync(() => {
             quitting = true;

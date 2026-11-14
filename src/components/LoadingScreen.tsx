@@ -323,9 +323,7 @@ function LoadingScreen({
                 </span>
               )}
 
-              {updateStatus === "up-to-date" && (
-                <span className="text-emerald-700 dark:text-emerald-400">Up to date</span>
-              )}
+              {updateStatus === "up-to-date" && <span className="text-success">Up to date</span>}
 
               {updateStatus === "no-releases" && <span>No stable releases yet</span>}
 

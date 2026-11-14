@@ -1,15 +1,61 @@
-import { Check } from "lucide-react";
-import { ACCENT_OPTIONS, useTheme } from "@/components/theme-provider";
+import { Check, Monitor, Moon, Sun } from "lucide-react";
+import ThemeEditor from "@/components/ThemeEditor";
+import { ACCENT_OPTIONS, THEME_OPTIONS, useTheme } from "@/components/theme-provider";
+
+const modeIcons = { light: Sun, dark: Moon, system: Monitor };
 
 export default function PersonalisationSettings() {
-  const { accent, setAccent } = useTheme();
+  const { theme, setTheme, accent, setAccent, presetAccent } = useTheme();
 
   return (
-    <div className="mx-auto w-full max-w-md px-4 py-6 @xl:px-6 @xl:py-8">
+    <div className="mx-auto w-full max-w-2xl px-4 py-6 @xl:px-6 @xl:py-8">
       <h4 className="text-lg font-medium text-foreground">Personalisation</h4>
 
       <fieldset className="mt-6">
+        <legend className="mb-1.5 text-xs font-medium text-muted-foreground">Colour mode</legend>
+        <div className="grid grid-cols-3 gap-2">
+          {THEME_OPTIONS.map(({ value, label }) => {
+            const Icon = modeIcons[value];
+            return (
+              <button
+                key={value}
+                type="button"
+                onClick={() => setTheme(value)}
+                aria-pressed={theme === value}
+                className="flex items-center justify-center gap-1.5 rounded-lg border bg-card px-2 py-2.5 text-xs text-muted-foreground transition-colors hover:bg-accent hover:text-foreground focus-visible:outline-2 focus-visible:outline-ring aria-pressed:border-foreground/40 aria-pressed:bg-accent aria-pressed:font-medium aria-pressed:text-foreground"
+              >
+                <Icon size={14} aria-hidden="true" />
+                {label}
+              </button>
+            );
+          })}
+        </div>
+        {presetAccent && (
+          <p className="mt-1.5 text-xs text-muted-foreground">
+            {presetAccent.name} uses its own colour mode. This setting applies to Default and custom
+            themes.
+          </p>
+        )}
+      </fieldset>
+
+      <ThemeEditor />
+
+      <fieldset className="mt-6">
         <legend className="mb-1.5 text-xs font-medium text-muted-foreground">Accent colour</legend>
+        {presetAccent && (
+          <button
+            type="button"
+            aria-pressed={accent === null}
+            onClick={() => setAccent(null)}
+            className="mb-2 flex w-full items-center gap-2 rounded-lg border bg-card px-3 py-2 text-xs text-muted-foreground transition-colors hover:bg-accent hover:text-foreground focus-visible:outline-2 focus-visible:outline-ring aria-pressed:border-foreground/40 aria-pressed:text-foreground"
+          >
+            <span
+              className="size-3.5 rounded-full"
+              style={{ backgroundColor: presetAccent.palette.brand }}
+            />
+            {presetAccent.name} accent
+          </button>
+        )}
         <div className="grid grid-cols-4 gap-2">
           {ACCENT_OPTIONS.map((option) => {
             const selected = accent === option.value;
@@ -38,13 +84,14 @@ export default function PersonalisationSettings() {
           })}
         </div>
         <p className="mt-1.5 text-xs text-muted-foreground">
-          Colours the send button, links, focus outlines, switches, running chats and the top of the
-          effort slider, and tints the sidebar.
+          {presetAccent
+            ? `Changes the accent for ${presetAccent.name} on send buttons, links, focus outlines and running chats.`
+            : "Sets the default accent for send buttons, links, focus outlines and running chats. Custom palettes can override it."}
         </p>
       </fieldset>
 
       <div className="mt-6">
-        <div className="mb-1.5 text-xs font-medium text-muted-foreground">Preview</div>
+        <div className="mb-1.5 text-xs font-medium text-muted-foreground">Accent preview</div>
         <AccentPreview />
       </div>
     </div>
@@ -84,7 +131,7 @@ function AccentPreview() {
           A link in a reply
         </span>
         <span className="relative inline-flex h-5 w-9 shrink-0 items-center rounded-full bg-brand">
-          <span className="inline-block size-3.5 translate-x-4 rounded-full bg-background" />
+          <span className="inline-block size-3.5 translate-x-5 rounded-full bg-background" />
         </span>
       </div>
     </div>

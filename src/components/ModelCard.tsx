@@ -210,9 +210,7 @@ export function ModelCard({ url }: { url: string }) {
     if (result?.status === "added") {
       return (
         <>
-          <output className="block text-xs font-medium text-emerald-600 dark:text-emerald-400">
-            Added to your place
-          </output>
+          <output className="block text-xs font-medium text-success">Added to your place</output>
           <p className="text-xs leading-relaxed text-muted-foreground">
             It's at {result.path.replace(/^game\./, "")}. Imports often arrive the wrong size,
             unanchored and away from where you want them.
@@ -242,7 +240,7 @@ export function ModelCard({ url }: { url: string }) {
     if (rejected) {
       return (
         <>
-          <p role="alert" className="text-xs font-medium text-red-600 dark:text-red-400">
+          <p role="alert" className="text-xs font-medium text-destructive">
             Roblox rejected it
           </p>
           <p className="text-xs leading-relaxed text-muted-foreground">

@@ -1797,7 +1797,7 @@ describe("User journeys", () => {
     expect(textPart?.textContent).toBe(
       `**Literal user text**\n${longText} AnimalDiscoSession trailing text`,
     );
-    expect(chip.closest(".bg-secondary")).toHaveClass("wrap-anywhere");
+    expect(chip.closest("[data-user-message]")).toHaveClass("wrap-anywhere");
   });
 
   it("keeps queued messages above the composer and shows steer receipts in the transcript", async () => {

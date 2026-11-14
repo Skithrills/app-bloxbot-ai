@@ -10,7 +10,9 @@ import type {
   ExplorerTreeUpdate,
 } from "../lib/explorer";
 import { OPENAI_SERVICE_TIERS } from "../lib/openAiProfiles";
-import type { AppUpdateCheck } from "./appUpdate";
+import type { AppUpdateCheck, ForkRelease } from "./appUpdate";
+import { ThemeLibrarySchema } from "./customTheme";
+import type { RojoServer, StudioRojoConnection } from "./rojo";
 import type { SkillImportList, SkillImportResult } from "./skillImport";
 import {
   type StudioTargetDiscovery,
@@ -92,48 +94,62 @@ export const ModelSettingsPatchSchema = Schema.partial(ModelSettingsSchema);
 export type ModelSettings = typeof ModelSettingsSchema.Type;
 export type ModelSettingsPatch = typeof ModelSettingsPatchSchema.Type;
 
-export const AppConfigSchema = Schema.mutable(
-  Schema.Struct({
-    ...ModelSettingsSchema.fields,
-    lastModel: Schema.NullOr(Schema.String),
-    lastModelVariant: Schema.NullOr(Schema.String),
-    chatModels: Schema.Record({ key: Schema.String, value: ChatModelSelectionSchema }),
-    modelCatalogOrder: ModelCatalogOrderSchema,
-    paidDefaultModel: Schema.NullOr(Schema.String),
-    lastPaidModel: Schema.NullOr(Schema.String),
-    hiddenModels: MutableStrings,
-    // Models refused in the user's region, so they aren't picked again.
-    unavailableModels: MutableStrings,
-    theme: ThemePreferenceSchema,
-    accentColor: AccentColorSchema,
-    effortControl: EffortControlSchema,
-    // How the Context panel draws token usage.
-    contextChart: ContextChartSchema,
-    composerShortcuts: ComposerShortcutsSchema,
-    composerPredictions: Schema.Boolean,
-    // Explicit opt-in to reading the separately signed-in Codex CLI account.
-    codexCliUsageEnabled: Schema.Boolean,
-    audioVisualizerEnabled: Schema.Boolean,
-    studioTargetsBySession: Schema.Record({ key: Schema.String, value: StudioTargetSchema }),
-    // Chats someone chose to use for work that has nothing to do with Studio.
-    chatsWithoutStudio: MutableStrings,
-    // Places someone picked by hand, as opposed to whichever Studio happened to be open.
-    chatsWithChosenPlace: MutableStrings,
-    // The Studio a chat's latest message was sent to, which says which one it used if it did.
-    routedTargetsBySession: Schema.Record({ key: Schema.String, value: StudioTargetSchema }),
-    projectFolders: Schema.optional(Schema.Array(ProjectFolderSchema)),
-    studioSetupSkipped: Schema.Boolean,
-    // Only for people who haven't chosen kinds yet: off here means every kind starts off.
-    systemNotifications: Schema.Boolean,
-    notificationKinds: Schema.NullOr(NotificationKindsSchema),
-    notificationSound: Schema.Boolean,
-    notificationsOffered: Schema.Boolean,
-    // What the user wrote in Settings; null follows BloxBot's default as it changes.
-    systemPrompt: Schema.NullOr(Schema.String),
-    promptsSent: Schema.Number,
-    starCalloutShown: Schema.Boolean,
-  }),
-);
+const AppConfigFields = Schema.Struct({
+  ...ModelSettingsSchema.fields,
+  lastModel: Schema.NullOr(Schema.String),
+  lastModelVariant: Schema.NullOr(Schema.String),
+  chatModels: Schema.Record({ key: Schema.String, value: ChatModelSelectionSchema }),
+  modelCatalogOrder: ModelCatalogOrderSchema,
+  paidDefaultModel: Schema.NullOr(Schema.String),
+  lastPaidModel: Schema.NullOr(Schema.String),
+  hiddenModels: MutableStrings,
+  // Models refused in the user's region, so they aren't picked again.
+  unavailableModels: MutableStrings,
+  theme: ThemePreferenceSchema,
+  accentColor: AccentColorSchema,
+  presetAccentColors: Schema.optional(
+    Schema.Record({ key: Schema.String, value: AccentColorSchema }),
+  ),
+  themeLibrary: Schema.optional(ThemeLibrarySchema),
+  effortControl: EffortControlSchema,
+  // How the Context panel draws token usage.
+  contextChart: ContextChartSchema,
+  composerShortcuts: ComposerShortcutsSchema,
+  composerPredictions: Schema.Boolean,
+  composerPredictionSource: Schema.optional(Schema.Literal("free", "chat")),
+  composerAutocomplete: Schema.optional(Schema.Boolean),
+  composerPredictionDebug: Schema.optional(Schema.Boolean),
+  hideModelSwitchWarning: Schema.optional(Schema.Boolean),
+  whatsNewSeenVersion: Schema.optional(Schema.String),
+  // Explicit opt-in to reading the separately signed-in Codex CLI account.
+  codexCliUsageEnabled: Schema.Boolean,
+  audioVisualizerEnabled: Schema.Boolean,
+  studioTargetsBySession: Schema.Record({ key: Schema.String, value: StudioTargetSchema }),
+  // Chats someone chose to use for work that has nothing to do with Studio.
+  chatsWithoutStudio: MutableStrings,
+  // Places someone picked by hand, as opposed to whichever Studio happened to be open.
+  chatsWithChosenPlace: MutableStrings,
+  // The Studio a chat's latest message was sent to, which says which one it used if it did.
+  routedTargetsBySession: Schema.Record({ key: Schema.String, value: StudioTargetSchema }),
+  projectFolders: Schema.optional(Schema.Array(ProjectFolderSchema)),
+  // A project folder's directory, or the empty key for the standalone launcher.
+  rojoProjectFiles: Schema.optional(Schema.Record({ key: Schema.String, value: Schema.String })),
+  rojoManifests: Schema.optional(
+    Schema.Record({ key: Schema.String, value: Schema.Array(Schema.String) }),
+  ),
+  studioSetupSkipped: Schema.Boolean,
+  // Only for people who haven't chosen kinds yet: off here means every kind starts off.
+  systemNotifications: Schema.Boolean,
+  notificationKinds: Schema.NullOr(NotificationKindsSchema),
+  notificationSound: Schema.Boolean,
+  notificationsOffered: Schema.Boolean,
+  // What the user wrote in Settings; null follows BloxBot's default as it changes.
+  systemPrompt: Schema.NullOr(Schema.String),
+  promptsSent: Schema.Number,
+  starCalloutShown: Schema.Boolean,
+});
+
+export const AppConfigSchema = Schema.mutable(AppConfigFields);
 
 export type AppConfig = typeof AppConfigSchema.Type;
 
@@ -172,7 +188,10 @@ export const DEFAULT_APP_CONFIG: AppConfig = {
   starCalloutShown: false,
 };
 
-export const AppConfigPatchSchema = Schema.partial(AppConfigSchema);
+// Rojo files are written by the desktop handler after a native picker selection.
+export const AppConfigPatchSchema = Schema.partial(
+  AppConfigFields.omit("rojoProjectFiles", "rojoManifests"),
+);
 
 export const OpenCodeInfoSchema = Schema.mutable(
   Schema.Struct({
@@ -239,6 +258,12 @@ export interface DesktopApi {
   /** The folder OpenCode installs into, for antivirus exclusions. Null outside the desktop app. */
   getOpenCodeInstallFolder(): Promise<string | null>;
   chooseProjectFolder(): Promise<string | null>;
+  addRojoProjectFiles(projectId: string): Promise<readonly string[]>;
+  removeRojoProjectFile(projectId: string, projectFile: string): Promise<void>;
+  listRojoServers(): Promise<readonly RojoServer[]>;
+  startRojoServer(projectId: string, projectFile: string): Promise<RojoServer>;
+  stopRojoServer(projectId: string, projectFile: string): Promise<RojoServer | null>;
+  readStudioRojoConnection(studioId: string): Promise<StudioRojoConnection | null>;
   getSubscriptionUsage(provider: SubscriptionProvider): Promise<SubscriptionUsageResult>;
   getStudioMcpStatus(): Promise<StudioMcpStatus>;
   onOpenCodeStartupProgress(listener: (progress: OpenCodeStartupProgress) => void): () => void;
@@ -265,6 +290,7 @@ export interface DesktopApi {
   setModelSettings(patch: ModelSettingsPatch): Promise<void>;
   setSystemPrompt(systemPrompt: string | null): Promise<void>;
   checkForUpdate(): Promise<AppUpdateCheck>;
+  listReleaseHistory(): Promise<readonly ForkRelease[]>;
   installUpdate(): Promise<void>;
   relaunch(): Promise<void>;
   getBlenderToolsState(): Promise<BlenderToolsState>;

@@ -11,7 +11,7 @@ import { PASSWORD, startServer } from "@/test/support/liveServer";
 const bin = process.env.OPENCODE_LIVE_BIN;
 
 it.skipIf(!bin || !process.env.OPENCODE_LIVE_PREDICTIONS)(
-  "generates a continuation with anonymous OpenCode Zen and removes the isolated session",
+  "generates a continuation and a next message with anonymous OpenCode Zen and removes their isolated sessions",
   async () => {
     const home = await mkdtemp(join(tmpdir(), "bloxbot-live-prediction-"));
     const { child, baseUrl, workspace } = await startServer(bin as string, home);
@@ -46,15 +46,28 @@ it.skipIf(!bin || !process.env.OPENCODE_LIVE_PREDICTIONS)(
         { draft, modelID: modelID as string },
         { signal: AbortSignal.timeout(20_000) },
       );
+      const next = await client.composer.predict(
+        {
+          draft: "",
+          modelID: modelID as string,
+          context: JSON.stringify({
+            user: "Add a shop to my Roblox lobby.",
+            assistant: "The shop is ready. Should I add a sign to make it easier to spot?",
+          }),
+        },
+        { signal: AbortSignal.timeout(20_000) },
+      );
       const sessions = await api.session.list();
       expect(sessions.data).toHaveLength(0);
       console.info("[live] composer prediction", {
         modelID,
-        suffix,
+        gotContinuation: !!suffix,
+        gotNextMessage: !!next,
         elapsedMs: Date.now() - start,
         generateStatuses,
       });
       expect(suffix, JSON.stringify(generateStatuses)).toMatch(/^ \S/);
+      expect(next, JSON.stringify(generateStatuses)).toMatch(/^\S.*\S$/);
     } finally {
       vi.restoreAllMocks();
       if (child.exitCode === null && child.signalCode === null) {
@@ -65,5 +78,5 @@ it.skipIf(!bin || !process.env.OPENCODE_LIVE_PREDICTIONS)(
       await rm(home, { recursive: true, force: true });
     }
   },
-  45_000,
+  60_000,
 );

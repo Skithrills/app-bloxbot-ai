@@ -1,7 +1,71 @@
 import type { AppUpdater, UpdateCheckResult } from "electron-updater";
-import type { AppUpdateCheck } from "../src/types/appUpdate.js";
+import type { AppUpdateCheck, ForkRelease } from "../src/types/appUpdate.js";
 
-const latestReleaseUrl = "https://api.github.com/repos/Skithrills/app-bloxbot-ai/releases/latest";
+const repository = "Skithrills/app-bloxbot-ai";
+const releasesApiUrl = `https://api.github.com/repos/${repository}/releases`;
+const earliestReleaseTag = "v0.15.5";
+
+function parseForkRelease(entry: unknown): ForkRelease | undefined {
+  if (!entry || typeof entry !== "object") return undefined;
+  const { tag_name, published_at, draft, prerelease, body } = entry as Record<string, unknown>;
+  if (
+    draft !== false ||
+    prerelease !== false ||
+    typeof tag_name !== "string" ||
+    typeof published_at !== "string" ||
+    !Number.isFinite(Date.parse(published_at))
+  ) {
+    return undefined;
+  }
+
+  const version = /^v(\d+)\.(\d+)\.(\d+)$/.exec(tag_name);
+  if (!version) return undefined;
+  const [, major, minor, patch] = version.map(Number);
+  if (major === 0 && (minor < 15 || (minor === 15 && patch < 5))) return undefined;
+
+  return {
+    version: tag_name,
+    publishedAt: published_at,
+    body: typeof body === "string" ? body : "",
+    url: `https://github.com/${repository}/releases/tag/${tag_name}`,
+  };
+}
+
+export async function listReleaseHistory(
+  fetchRelease: (url: string, init: RequestInit) => Promise<Response>,
+): Promise<readonly ForkRelease[]> {
+  const releases = new Map<string, ForkRelease>();
+  const signal = AbortSignal.timeout(10_000);
+  try {
+    for (let page = 1; page <= 10; page++) {
+      const response = await fetchRelease(`${releasesApiUrl}?per_page=30&page=${page}`, {
+        headers: { accept: "application/vnd.github+json" },
+        redirect: "error",
+        signal,
+      });
+      if (!response.ok) throw new Error(`GitHub returned HTTP ${response.status}`);
+
+      const entries: unknown = await response.json();
+      if (!Array.isArray(entries)) throw new Error("The GitHub response is missing its release list");
+      for (const entry of entries) {
+        const release = parseForkRelease(entry);
+        if (release && !releases.has(release.version)) {
+          releases.set(release.version, release);
+        }
+      }
+
+      const hasNextPage = /;\s*rel="next"/.test(response.headers.get("link") ?? "");
+      if (releases.has(earliestReleaseTag) || !hasNextPage) {
+        return [...releases.values()].sort(
+          (a, b) => Date.parse(b.publishedAt) - Date.parse(a.publishedAt),
+        );
+      }
+    }
+    throw new Error("The release history exceeded the GitHub page limit");
+  } catch (cause) {
+    throw new Error("Could not load the BloxBot release history.", { cause });
+  }
+}
 
 export async function checkForAppUpdate(
   checkForUpdates: () => Promise<Pick<UpdateCheckResult, "isUpdateAvailable" | "updateInfo"> | null>,
@@ -33,7 +97,7 @@ export async function checkForAppUpdate(
         cause instanceof Error &&
         cause.message === "No published versions on GitHub")
     ) {
-      const release = await fetchRelease(latestReleaseUrl, {
+      const release = await fetchRelease(`${releasesApiUrl}/latest`, {
         headers: { accept: "application/vnd.github+json" },
         signal: AbortSignal.timeout(10_000),
       }).catch(() => undefined);

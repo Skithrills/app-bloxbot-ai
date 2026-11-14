@@ -762,7 +762,7 @@ export default function Explorer({ collapsed, sessionBusy, onToggle }: ExplorerP
             !tree
               ? "flex flex-1 flex-col items-center justify-center gap-2 px-6 text-center text-xs leading-relaxed text-muted-foreground"
               : syncError
-                ? "flex shrink-0 items-center justify-between gap-2 border-b border-amber-200 bg-amber-50 px-4 py-2 text-xs text-amber-800 dark:border-amber-900 dark:bg-amber-950/30 dark:text-amber-300"
+                ? "flex shrink-0 items-center justify-between gap-2 border-b border-warning/25 bg-warning/10 px-4 py-2 text-xs text-warning"
                 : "flex shrink-0 items-center justify-between gap-2 border-b px-4 py-2 text-xs text-muted-foreground"
           }
         >
@@ -1050,7 +1050,7 @@ function DeleteObjectDialog({
           <button
             type="button"
             onClick={onConfirm}
-            className="rounded-md bg-destructive px-3 py-1.5 text-xs font-medium text-white transition-opacity hover:opacity-90"
+            className="rounded-md bg-destructive px-3 py-1.5 text-xs font-medium text-destructive-foreground transition-opacity hover:opacity-90"
           >
             Delete
           </button>

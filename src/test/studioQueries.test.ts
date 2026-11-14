@@ -7,6 +7,7 @@ import {
   inspectExplorerNode,
   readHistoryState,
   readStudioAccount,
+  readStudioRojoConnection,
   resetStudioCaches,
   selectStudioTarget,
 } from "../../electron/studioQueries";
@@ -17,6 +18,102 @@ const json = (value: unknown) => ({
 const failure = (text: string) => ({ isError: true, content: [{ type: "text" as const, text }] });
 
 beforeEach(() => resetStudioCaches());
+
+describe("Rojo's reported Studio endpoint", () => {
+  const studioId = "chosen-studio";
+  const target = { id: studioId, mode: "Edit", placeId: 123 };
+  const selection = (studio: { id: string; mode: string; placeId?: number }) =>
+    json({ studios: [{ id: "other-studio", mode: "Edit", placeId: 999 }, studio] });
+  const workspace = (endpoint?: unknown) =>
+    json({
+      className: "Workspace",
+      attributes: endpoint === undefined ? undefined : { __Rojo_ConnectionUrl: endpoint },
+    });
+  const probe = (endpoint?: unknown) =>
+    vi
+      .fn<CallStudioTool>()
+      .mockResolvedValueOnce(selection(target))
+      .mockResolvedValueOnce(workspace(endpoint))
+      .mockResolvedValueOnce(selection(target));
+
+  it.each([
+    ["http://localhost:34872", 34872],
+    ["http://127.0.0.1:80/", 80],
+    ["https://[::1]:443", 443],
+  ])("reads %s from the requested Edit Studio", async (endpoint, port) => {
+    const callTool = probe(endpoint);
+    await expect(readStudioRojoConnection(callTool, studioId)).resolves.toEqual({
+      port,
+      placeId: "123",
+    });
+    expect(callTool.mock.calls).toEqual([
+      ["list_roblox_studios", {}, { timeout: 2_000 }],
+      ["inspect_instance", { studio_id: studioId, path: "Workspace" }, { timeout: 2_000 }],
+      ["list_roblox_studios", {}, { timeout: 2_000 }],
+    ]);
+  });
+
+  it.each([
+    undefined,
+    false,
+    "http://example.com:34872",
+    "http://127.1:34872",
+    "http://localhost.evil:34872",
+    "http://example.com@localhost:34872",
+    "http://localhost:34872/api",
+    "http://localhost:34872?",
+    "http://localhost:34872\n",
+    "http://localhost",
+    "http://localhost:0",
+    "http://localhost:65536",
+  ])("ignores missing, unsupported, or invalid endpoint %s", async (endpoint) => {
+    const callTool = probe(endpoint);
+    await expect(readStudioRojoConnection(callTool, studioId)).resolves.toBeNull();
+    expect(callTool).toHaveBeenCalledTimes(2);
+  });
+
+  it.each(["Play", undefined])("skips inspection when the current mode is %s", async (mode) => {
+    const callTool = vi
+      .fn<CallStudioTool>()
+      .mockResolvedValue(json({ studios: [{ ...target, mode }] }));
+    await expect(readStudioRojoConnection(callTool, studioId)).resolves.toBeNull();
+    expect(callTool).toHaveBeenCalledTimes(1);
+  });
+
+  it.each([
+    { ...target, placeId: 321 },
+    { ...target, mode: "Play" },
+    { ...target, id: "new-studio" },
+  ])("discards the endpoint when the target changes during inspection", async (newTarget) => {
+    const callTool = vi
+      .fn<CallStudioTool>()
+      .mockResolvedValueOnce(selection(target))
+      .mockResolvedValueOnce(workspace("http://localhost:34872"))
+      .mockResolvedValueOnce(selection(newTarget));
+    await expect(readStudioRojoConnection(callTool, studioId)).resolves.toBeNull();
+  });
+
+  it("reports a local place without a published place ID", async () => {
+    const local = selection({ id: studioId, mode: "Edit" });
+    const callTool = vi
+      .fn<CallStudioTool>()
+      .mockResolvedValueOnce(local)
+      .mockResolvedValueOnce(workspace("http://localhost:34872"))
+      .mockResolvedValueOnce(local);
+    await expect(readStudioRojoConnection(callTool, studioId)).resolves.toEqual({
+      port: 34872,
+      placeId: null,
+    });
+  });
+
+  it("propagates a Studio inspection error", async () => {
+    const callTool = vi
+      .fn<CallStudioTool>()
+      .mockResolvedValueOnce(selection(target))
+      .mockResolvedValueOnce(failure("Studio is busy"));
+    await expect(readStudioRojoConnection(callTool, studioId)).rejects.toThrow("Studio is busy");
+  });
+});
 
 describe("Studio targets", () => {
   const studios = {

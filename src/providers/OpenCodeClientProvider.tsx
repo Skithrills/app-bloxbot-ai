@@ -1,6 +1,8 @@
 import { type QueryClient, useQueryClient } from "@tanstack/react-query";
 import { type ReactNode, useEffect, useMemo, useRef, useState } from "react";
 import LoadingScreen, { type StartupProgress } from "@/components/LoadingScreen";
+import { findProjectFolder } from "@/hooks/useProjectFolders";
+import { loadConfig } from "@/lib/config";
 import { desktop } from "@/lib/desktop";
 import { notify } from "@/lib/notifications";
 import { createOpencodeClient, type OpencodeClient } from "@/lib/opencode/client";
@@ -15,8 +17,21 @@ import {
   type OpenCodeClientContextValue,
 } from "@/providers/openCodeClientContext";
 import type { OpenCodeStartupProgress } from "@/types/desktop";
+import { rojoProjectFilesFor } from "@/types/rojo";
 
 export { OpenCodeClientContext, useOpenCodeClient } from "@/providers/openCodeClientContext";
+
+export async function chatRojoProjectFiles(queryClient: QueryClient, sessionID: string) {
+  const session = queryClient
+    .getQueryData<Session[]>(qk.sessions)
+    ?.find(({ id }) => id === sessionID);
+  if (!session?.directory) return [];
+  const config = await queryClient
+    .ensureQueryData({ queryKey: qk.config, queryFn: loadConfig })
+    .catch(() => undefined);
+  const folder = findProjectFolder(config?.projectFolders ?? [], session.directory);
+  return folder ? rojoProjectFilesFor(config, folder.directory) : [];
+}
 
 const SSE_RECONNECT_DELAY = 3000;
 const SSE_FAILURE_THRESHOLD = 3;
@@ -402,6 +417,7 @@ export function OpenCodeClientProvider({
           baseUrl,
           directory: workspace,
           headers: { Authorization: authorization },
+          rojoProjectFiles: (sessionID) => chatRojoProjectFiles(queryClient, sessionID),
         });
         setStartupPhase("workspace");
         await prefetchServerState(newClient, queryClient);

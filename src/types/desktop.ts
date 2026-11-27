@@ -1,4 +1,5 @@
 import { Schema } from "effect";
+import type { ExternalChatSummary, ExternalChatTranscript } from "../lib/externalChatTypes";
 import { COMPOSER_SHORTCUTS, DEFAULT_COMPOSER_SHORTCUTS } from "../lib/composerDelivery";
 import type {
   ExplorerDetailsRequest,
@@ -273,6 +274,8 @@ export interface DesktopApi {
   saveInstructions(text: string): Promise<void>;
   /** The skills in the user's Codex and Claude Code folders, and the ones BloxBot has. */
   listImportableSkills(): Promise<SkillImportList>;
+  listExternalChats(query?: string): Promise<ExternalChatSummary[]>;
+  readExternalChat(ref: string): Promise<ExternalChatTranscript>;
   /** Copies them into BloxBot's own folder: all of them, as a sync, or only the named ones. */
   importSkills(names?: readonly string[]): Promise<SkillImportResult>;
   openUrl(url: string): Promise<void>;

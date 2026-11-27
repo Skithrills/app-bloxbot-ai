@@ -589,7 +589,7 @@ function ChatInput({
     select: (config) => ({
       nextMessageEnabled: config.composerPredictions === true,
       nextMessageSource: config.composerPredictionSource ?? "free",
-      autocompleteEnabled: (config.composerAutocomplete ?? config.composerPredictions) === true,
+      autocompleteEnabled: config.composerAutocomplete === true,
       debug: config.composerPredictionDebug === true,
       hideModelSwitchWarning: config.hideModelSwitchWarning === true,
     }),
@@ -1296,7 +1296,10 @@ function ChatInput({
               onObjectsWanted={requestSync}
               noStudio={!studioId}
               prediction={
-                predictionSettings && (useComposerSuggestions || predictionSettings.debug)
+                !activeSessionId?.startsWith("ses_import") &&
+                !sessions?.find((s) => s.id === activeSessionId)?.metadata?.externalChatRef &&
+                predictionSettings &&
+                (useComposerSuggestions || predictionSettings.debug)
                   ? {
                       ...predictionSettings,
                       sessionID: activeSessionId,

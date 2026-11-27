@@ -159,6 +159,8 @@ export function useComposerPrediction(
   const draftEligible = !!candidate && !blank && canPredictDraft(candidate.draft);
   const key = blank ? nextKey : draftKey;
   const promptContext = blank && context?.status === "ready" ? context.text : undefined;
+  // Persisted suggestions belong to an empty composer, not an unrelated typed draft.
+  const storageKey = blank ? stored?.key : undefined;
   const request = useMemo(
     () =>
       eligible &&
@@ -170,7 +172,7 @@ export function useComposerPrediction(
       candidate &&
       key &&
       (promptContext || draftEligible)
-        ? { candidate, client, modelID, key, promptContext, storageKey: stored?.key, chatProvider }
+        ? { candidate, client, modelID, key, promptContext, storageKey, chatProvider }
         : null,
     [
       cached,
@@ -184,7 +186,7 @@ export function useComposerPrediction(
       nextReading,
       promptContext,
       ready,
-      stored?.key,
+      storageKey,
     ],
   );
   const [result, setResult] = useState<{

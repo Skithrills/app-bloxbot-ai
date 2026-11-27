@@ -7,6 +7,17 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+## [0.16.5] - 2026-11-27
+
+### Added
+
+- **Local chat import.** Preview and copy visible text from local Claude Code and Codex chats, including Codex thread links, without changing the original.
+- **Live OpenAI catalog.** Both subscription and API-key connections discover supported models, including GPT-6.2 Astra and Sol. API-key connections offer Fast mode where supported.
+
+### Fixed
+
+- **Quieter predictions.** Next-message suggestions stay in the empty composer. Predicting while typing requires the separate Autocomplete setting; unrelated drafts no longer reuse a saved suggestion.
+
 ## [0.16.4] - 2026-11-14
 
 ### Added

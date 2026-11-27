@@ -1,6 +1,6 @@
 /** Runs with OPENCODE_LIVE_BIN set. The only model endpoint is a loopback HTTP capture. */
 import { once } from "node:events";
-import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rename, rm, writeFile } from "node:fs/promises";
 import { createServer } from "node:http";
 import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
@@ -16,7 +16,9 @@ import {
 import { createOpencodeClient } from "@/lib/opencode/client";
 import { PASSWORD, startServer } from "@/test/support/liveServer";
 import { openAiApiProvider } from "../../electron/openAiApiProvider";
+import { fallbackOpenAiCatalog, parseOpenAiCatalog } from "../../electron/openAiCatalog";
 import { migrateLegacyOpenAiCredentials } from "../../electron/services/openAiCredentials";
+import { catalogFixture } from "./support/modelCatalog";
 
 const BIN = process.env.OPENCODE_LIVE_BIN;
 const PLACEHOLDER_KEY = "sk-bloxbot-disposable-test-key";
@@ -67,6 +69,7 @@ it.skipIf(!BIN)(
           plugins: ["*", "-opencode.config.compatibility"],
           providers: {
             [OPENAI_API_PROVIDER]: { ...provider, settings: { ...provider.settings, baseURL } },
+            [NATIVE_OAUTH]: { models: fallbackOpenAiCatalog().nativeModels },
           },
         }),
       );
@@ -149,11 +152,64 @@ it.skipIf(!BIN)(
       expect(oauthMethods?.every((type) => type === "oauth")).toBe(true);
       expect(methods[OPENAI_API_PROVIDER]?.map(({ type }) => type)).toEqual(["api"]);
 
+      // Add a model unknown to the installed binary after boot. No real OpenAI
+      // credential or paid endpoint is involved; the only inference is loopback.
+      const catalog = parseOpenAiCatalog(catalogFixture());
+      const configFile = join(config, "opencode.json");
+      const updated = JSON.parse(await readFile(configFile, "utf8"));
+      updated.providers[NATIVE_OAUTH].models = {
+        ...updated.providers[NATIVE_OAUTH].models,
+        ...catalog.nativeModels,
+      };
+      const dynamicApi = openAiApiProvider("ultrafast", catalog);
+      updated.providers[OPENAI_API_PROVIDER] = {
+        ...dynamicApi,
+        settings: { ...dynamicApi.settings, baseURL },
+      };
+      await writeFile(`${configFile}.tmp`, JSON.stringify(updated));
+      await rename(`${configFile}.tmp`, configFile);
+      await expect
+        .poll(
+          async () => {
+            const list = (await client.provider.list({}, STRICT)).data;
+            return [OPENAI_API_PROVIDER, OPENAI_OAUTH_PROVIDER].every((providerID) => {
+              const models = list.all.find(({ id }) => id === providerID)?.models;
+              return (
+                !!models?.["gpt-6.2-catalog-test"] &&
+                !!models?.["gpt-6.2-sol"] &&
+                !!models?.["gpt-6.2-astra"]
+              );
+            });
+          },
+          { timeout: 10_000 },
+        )
+        .toBe(true);
+      const liveProfiles = (await client.provider.list({}, STRICT)).data;
+      const subscriptionModels = liveProfiles.all.find(
+        ({ id }) => id === OPENAI_OAUTH_PROVIDER,
+      )?.models;
+      expect(subscriptionModels).toHaveProperty("gpt-6.2-catalog-test-fast");
+      expect(subscriptionModels).not.toHaveProperty("gpt-6.2-catalog-test-pro");
+      expect(subscriptionModels?.["gpt-6.2-catalog-test"].cost.input).toBe(0);
+      expect(subscriptionModels?.["gpt-6.2-catalog-test"].limit.input).toBe(500_000);
+      expect(
+        liveProfiles.all.find(({ id }) => id === OPENAI_API_PROVIDER)?.models[
+          "gpt-6.2-catalog-test-fast"
+        ],
+      ).toMatchObject({
+        serviceTier: "priority",
+        cost: { input: 4, output: 20 },
+      });
+
       for (const [modelID, expectedTier] of [
         ["gpt-6.1-sol", "ultrafast"],
         ["gpt-6-astra", "ultrafast"],
         ["gpt-5.4", undefined],
+        ["gpt-6.2-catalog-test", "ultrafast"],
+        ["gpt-6.2-catalog-test-fast", "priority"],
       ] as const) {
+        const start = requests.length;
+        const apiModelID = modelID.endsWith("-fast") ? modelID.slice(0, -5) : modelID;
         const session = (await client.session.create({ title: "OpenAI profile wire test" }, STRICT))
           .data;
         await client.session.promptAsync(
@@ -165,9 +221,11 @@ it.skipIf(!BIN)(
           STRICT,
         );
         await expect
-          .poll(() => requests.find(({ body }) => body.model === modelID), { timeout: 8_000 })
+          .poll(() => requests.slice(start).find(({ body }) => body.model === apiModelID), {
+            timeout: 8_000,
+          })
           .toMatchObject({ method: "POST", path: "/v1/responses", hasBearer: true });
-        const body = requests.find(({ body }) => body.model === modelID)?.body;
+        const body = requests.slice(start).find(({ body }) => body.model === apiModelID)?.body;
         expect(body?.service_tier).toBe(expectedTier);
         if (expectedTier === undefined) expect(body).not.toHaveProperty("service_tier");
       }

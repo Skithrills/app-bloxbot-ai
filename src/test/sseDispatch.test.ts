@@ -6,7 +6,7 @@
  */
 
 import { QueryClient } from "@tanstack/react-query";
-import { beforeEach, describe, expect, it } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 import type {
   Event,
   PermissionRequest,
@@ -39,6 +39,13 @@ function dispatch(qc: QueryClient, event: Partial<Event>, activeSessionId: strin
 }
 
 describe("sseDispatch", () => {
+  it("invalidates the provider/model cache on live catalog changes", () => {
+    const client = makeQC();
+    const invalidate = vi.spyOn(client, "invalidateQueries");
+    sseDispatch(client, { type: "catalog.updated", properties: {} }, { current: null });
+    expect(invalidate).toHaveBeenCalledWith({ queryKey: qk.providers });
+    client.clear();
+  });
   let qc: QueryClient;
 
   beforeEach(() => {

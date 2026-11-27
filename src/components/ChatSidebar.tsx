@@ -12,6 +12,8 @@ import {
 import { type DragEvent, type MouseEvent, memo, useEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { ProjectFolderDialog } from "@/components/ProjectFolderDialog";
+import { ExternalChatDialog } from "@/components/ExternalChatDialog";
+import { Import } from "lucide-react";
 import { RojoLauncher, useRojoServingCount } from "@/components/RojoLauncher";
 import { MENU_ITEM, MENU_SURFACE } from "@/components/ui/menu";
 import { useArchiveSession } from "@/hooks/mutations/useArchiveSession";
@@ -119,6 +121,7 @@ const ChatSidebar = memo(function ChatSidebar({
   const [editValue, setEditValue] = useState("");
   const [snoozedExpanded, setSnoozedExpanded] = useState(false);
   const [rojoOpen, setRojoOpen] = useState(false);
+  const [importOpen, setImportOpen] = useState(false);
   const [folderEditor, setFolderEditor] = useState<{
     folder: ProjectFolder;
     isNew: boolean;
@@ -556,6 +559,22 @@ const ChatSidebar = memo(function ChatSidebar({
       id="chat-sidebar"
       className="flex w-full min-w-0 shrink-0 flex-col bg-sidebar text-sidebar-foreground"
     >
+      {importOpen && (
+        <ExternalChatDialog
+          folders={folders}
+          close={() => setImportOpen(false)}
+          copy={async (transcript, directory) => {
+            if (!client) throw new Error("Wait for BloxBot to connect.");
+            const { data } = await client.session.importExternal(
+              { transcript, directory },
+              { throwOnError: true },
+            );
+            await queryClient.invalidateQueries({ queryKey: qk.sessions });
+            setImportOpen(false);
+            handleSelect(data.id);
+          }}
+        />
+      )}
       {collapsed ? (
         <div className="flex flex-1 flex-col items-center justify-between py-2">
           <div className="flex flex-col items-center">
@@ -623,6 +642,15 @@ const ChatSidebar = memo(function ChatSidebar({
           <div className="flex h-11 items-center justify-between px-3">
             <span className="text-sm font-medium text-sidebar-foreground/70">Chats</span>
             <div className="flex items-center gap-0.5">
+              <button
+                type="button"
+                title="Import chats"
+                aria-label="Import chats"
+                className={folderButtonClass}
+                onClick={() => setImportOpen(true)}
+              >
+                <Import size={14} />
+              </button>
               <button
                 onClick={() => handleCreate(null)}
                 disabled={createSession.isPending}

@@ -3,12 +3,13 @@ import {
   type OpenAiServiceTier,
   supportsUltrafast,
 } from "../src/lib/openAiProfiles";
+import { fallbackOpenAiCatalog, type OpenAiCatalog } from "./openAiCatalog";
 
 const GPT6_EFFORTS = "low medium high xhigh max";
 const GPT5_EFFORTS = "none low medium high xhigh";
 
-// Public Responses chat models from OpenCode's models.dev catalog. Keep this provider
-// independent: inheriting the live OpenAI catalog would also inherit its OAuth routing.
+// Legacy offline floor. Live metadata (including the verified GPT-6.2 floor)
+// overrides these entries below without inheriting native OpenAI OAuth routing.
 type CatalogEntry = [
   id: string,
   name: string,
@@ -49,13 +50,17 @@ const MODELS: CatalogEntry[] = [
   ["o3", "o3", "2025-04-16", 200_000, 100_000, 2, 8, 0.5, "low medium high"],
 ];
 
-export function openAiApiProvider(serviceTier: OpenAiServiceTier) {
+export function openAiApiProvider(
+  serviceTier: OpenAiServiceTier,
+  catalog: OpenAiCatalog = fallbackOpenAiCatalog(),
+) {
   return {
     name: "OpenAI API Key",
     env: [OPENAI_API_KEY_ENV],
     package: "@opencode/ai/providers/openai/responses",
     settings: { baseURL: "https://api.openai.com/v1", transport: "http" },
-    models: Object.fromEntries(
+    models: {
+      ...Object.fromEntries(
       MODELS.map(([id, name, releaseDate, context, output, inputPrice, outputPrice, cacheReadPrice, efforts]) => {
         const tier = supportsUltrafast(id) ? serviceTier : undefined;
         const multiplier = tier === "ultrafast" ? 6 : 1;
@@ -77,6 +82,15 @@ export function openAiApiProvider(serviceTier: OpenAiServiceTier) {
           ...(tier && { body: { service_tier: tier } }),
         }];
       }),
-    ),
+      ),
+      ...Object.fromEntries(
+        Object.entries({ ...fallbackOpenAiCatalog().models, ...catalog.models }).map(([id, entry]) => [
+          id,
+          serviceTier === "ultrafast" && entry.ultrafast
+            ? entry.ultrafast
+            : { ...entry.model, ...(entry.ultrafast && { body: { service_tier: serviceTier } }) },
+        ]),
+      ),
+    },
   };
 }

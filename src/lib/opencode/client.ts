@@ -21,6 +21,7 @@ import {
   isZeroCost,
 } from "../composerPredictions";
 import { isKnownFreeModelKey } from "../freeModels";
+import type { ExternalChatTranscript } from "../externalChatTypes";
 import { freeLimitEndsAt, isFreeUsageLimit } from "../modelError";
 
 import {
@@ -672,6 +673,69 @@ export function createOpencodeClient(options: {
       },
     },
     session: {
+      importExternal: (
+        input: { transcript: ExternalChatTranscript; directory?: string },
+        requestOptions?: RequestOptions,
+      ) =>
+        settle(requestOptions, async () => {
+          const t = input.transcript;
+          const dest = await api.location.get({
+            location: input.directory ? { directory: input.directory } : location,
+          });
+          const digest = await crypto.subtle.digest(
+            "SHA-256",
+            new TextEncoder().encode(`${dest.directory}\n${t.ref}`),
+          );
+          const key = Array.from(new Uint8Array(digest), (b) => b.toString(16).padStart(2, "0"))
+            .join("")
+            .slice(0, 26);
+          const id = `ses_import${key}`;
+          const created = t.messages[0]?.timestamp ?? Date.now();
+          const existing = async () => {
+            const session = await api.session.get({ sessionID: id }).catch(() => null);
+            return session?.metadata?.externalChatRef === t.ref ? session : null;
+          };
+          const previous = await existing();
+          if (previous) return remember(previous);
+          const target = { directory: dest.directory };
+          try {
+            return remember(
+              await api.experimental.session.import({
+                location: target,
+                info: {
+                  id,
+                  projectID: dest.project.id,
+                  location: target,
+                  title: t.title,
+                  time: { created, updated: t.updatedAt },
+                  cost: 0,
+                  tokens: { input: 0, output: 0, reasoning: 0, cache: { read: 0, write: 0 } },
+                  metadata: { externalChatRef: t.ref },
+                },
+                messages: t.messages.map((m, i): Parameters<typeof api.experimental.session.import>[0]['messages'][number] => {
+                  const id = `msg_${key}${i.toString(16).padStart(6, "0")}`;
+                  return m.role === "user"
+                    ? { id, type: "user", time: { created: m.timestamp }, text: m.text }
+                    : {
+                        id,
+                        type: "assistant",
+                        agent: "imported",
+                        model: { providerID: "external", id: t.source },
+                        time: { created: m.timestamp, completed: m.timestamp },
+                        content: [{ type: "text", text: m.text }],
+                        finish: "stop",
+                      };
+                }),
+              }),
+            );
+          } catch {
+            const concurrent = await existing();
+            if (concurrent) return remember(concurrent);
+            throw new Error(
+              "OpenCode could not import this conversation. The original was not changed.",
+            );
+          }
+        }),
       create: (
         input: {
           title?: string;

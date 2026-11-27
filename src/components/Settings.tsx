@@ -974,7 +974,7 @@ function WorkflowTab() {
     onError: () => notify.error("Couldn't save workflow settings"),
   });
   const nextMessageEnabled = config?.composerPredictions === true;
-  const autocompleteEnabled = (config?.composerAutocomplete ?? nextMessageEnabled) === true;
+  const autocompleteEnabled = config?.composerAutocomplete === true;
   const predictionSource = config?.composerPredictionSource ?? "free";
   const predictionModelHint =
     "Uses a verified free OpenCode Zen model. Your selected chat model stays separate.";
@@ -1060,9 +1060,6 @@ function WorkflowTab() {
             onChange={(enabled) =>
               workflowSettings.mutate({
                 composerPredictions: enabled,
-                ...(config?.composerAutocomplete === undefined && {
-                  composerAutocomplete: autocompleteEnabled,
-                }),
               })
             }
           />

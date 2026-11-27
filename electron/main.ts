@@ -78,6 +78,7 @@ import {
 } from "./studioIconResolver";
 import { readInstructions, saveInstructions } from "./instructionFiles";
 import { defaultSkillSources, importSkills, listImportableSkills } from "./skillImport";
+import { listExternalChats, readExternalChat } from "./externalChats";
 import {
   type CallStudioTool,
   discoverStudioTargets,
@@ -86,7 +87,8 @@ import {
   readStudioRojoConnection,
   selectStudioTarget,
 } from "./studioQueries";
-import { withBlender, withModelSettings, withSystemPrompt } from "./opencodeConfig";
+import { withBlender, withModelCatalog, withModelSettings, withSystemPrompt } from "./opencodeConfig";
+import { createLiveOpenAiCatalog } from "./openAiCatalog";
 import { channels } from "./channels";
 import {
   LOCAL_VIDEO_SCHEME,
@@ -112,6 +114,8 @@ protocol.registerSchemesAsPrivileged([
 const currentDirectory = dirname(fileURLToPath(import.meta.url));
 const defaultConfig: AppConfig = DEFAULT_APP_CONFIG;
 const configMutex = Effect.unsafeMakeSemaphore(1);
+// Shared by background catalog refreshes and all engine-config settings writes.
+const configWrites = Effect.unsafeMakeSemaphore(1);
 const rojoServers = new RojoServers();
 
 function configPath(): string {
@@ -171,6 +175,15 @@ const machineFolderOptions = {
 };
 const openCodeBinaryDirectory = engineFolder(machineFolderOptions);
 const blenderToolsRoot = () => blenderToolsFolder(machineFolderOptions);
+const modelCatalogCache = join(openCodeBinaryDirectory, "openai-catalog.json");
+const modelCatalog = createLiveOpenAiCatalog({
+  fetch: (url, init) => net.fetch(url, init),
+  readCache: () => readFile(modelCatalogCache, "utf8"),
+  writeCache: async (contents) => {
+    await mkdir(openCodeBinaryDirectory, { recursive: true });
+    await writeConfigFile(modelCatalogCache, contents);
+  },
+});
 
 const openCodeRuntime = ManagedRuntime.make(
   makeOpenCodeLayer({
@@ -184,6 +197,19 @@ const openCodeRuntime = ManagedRuntime.make(
           Effect.catchAll(() => Effect.succeed(null)),
         ),
       loadModelSettings: () => loadConfig.pipe(Effect.orElseSucceed(() => defaultConfig)),
+      loadModelCatalog: () => modelCatalog.load(),
+      refreshModelCatalog: async () => {
+        const catalog = await modelCatalog.refresh();
+        await runMain(configWrites.withPermits(1)(Effect.gen(function* () {
+          const settings = yield* loadConfig;
+          yield* Effect.tryPromise(async () => {
+            const path = join(openCodeConfigDirectory(), "opencode.json");
+            const previous = await readFile(path, "utf8");
+            const next = withModelCatalog(previous, settings, catalog);
+            if (previous !== next) await writeConfigFile(path, next);
+          });
+        })));
+      },
       onOpenAiProfileMigrated: (providerID) =>
         migrateOpenAiPreferences(providerID).pipe(
           Effect.catchAll(() => Effect.logWarning("[opencode] Could not migrate OpenAI model preferences")),
@@ -535,6 +561,21 @@ const registerIpcHandlers = Effect.sync(() => {
   ipcMain.handle(channels.listImportableSkills, () =>
     afterSkillWork(() => listImportableSkills(skillFolders())),
   );
+  // Only the main app frame may request local history. Never accept a file path from the renderer.
+  const assertChatReader = (event: Electron.IpcMainInvokeEvent) => {
+    if (!mainWindow || mainWindow.isDestroyed() || event.sender !== mainWindow.webContents ||
+      event.senderFrame !== event.sender.mainFrame) throw new Error("Chat history is unavailable here.");
+  };
+  ipcMain.handle(channels.listExternalChats, (event, query: unknown) => {
+    assertChatReader(event);
+    if (query !== undefined && (typeof query !== "string" || query.length > 512)) throw new Error("Invalid chat search.");
+    return listExternalChats(query);
+  });
+  ipcMain.handle(channels.readExternalChat, (event, ref: unknown) => {
+    assertChatReader(event);
+    if (typeof ref !== "string" || !/^(?:codex:\/\/threads|claude:\/\/sessions)\/[\da-f]{8}-(?:[\da-f]{4}-){3}[\da-f]{12}$/i.test(ref)) throw new Error("Invalid chat link.");
+    return readExternalChat(ref);
+  });
   ipcMain.handle(channels.importSkills, (_event, names: unknown) =>
     afterSkillWork(async () => {
       const chosen = await Schema.decodeUnknownPromise(SkillNamesSchema)(names);
@@ -544,7 +585,6 @@ const registerIpcHandlers = Effect.sync(() => {
   ipcMain.handle(channels.loadConfig, () => runMain(loadConfig));
   ipcMain.handle(channels.patchConfig, (_event, patch: unknown) => runMain(patchConfig(patch)));
   // Serialize changes to the engine config so one settings screen can't overwrite another.
-  const configWrites = Effect.unsafeMakeSemaphore(1);
   ipcMain.handle(channels.setModelSettings, (_event, input: unknown) =>
     runMain(
       configWrites.withPermits(1)(
@@ -563,7 +603,7 @@ const registerIpcHandlers = Effect.sync(() => {
             try: () => writeConfigFile(path, contents),
             catch: (cause) => new DesktopMainError({ message: "Failed to apply model settings", cause }),
           });
-          yield* write(withModelSettings(previous, { ...current, ...patch }));
+          yield* write(withModelSettings(previous, { ...current, ...patch }, modelCatalog.current));
           yield* patchConfig(patch).pipe(Effect.tapError(() => write(previous).pipe(Effect.ignore)));
         }),
       ),
@@ -584,7 +624,7 @@ const registerIpcHandlers = Effect.sync(() => {
             const configFile = join(openCodeConfigDirectory(), "opencode.json");
             yield* Effect.tryPromise({
               try: async () =>
-                writeFile(
+                writeConfigFile(
                   configFile,
                   withSystemPrompt(await readFile(configFile, "utf8"), systemPrompt),
                 ),
@@ -707,7 +747,7 @@ const registerIpcHandlers = Effect.sync(() => {
         yield* Effect.tryPromise({
           try: async () => {
             const configFile = join(openCodeConfigDirectory(), "opencode.json");
-            await writeFile(
+            await writeConfigFile(
               configFile,
               withBlender(await readFile(configFile, "utf8"), blender, systemPrompt),
             );

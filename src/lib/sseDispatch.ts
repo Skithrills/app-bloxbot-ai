@@ -81,6 +81,10 @@ function dispatchEvent(
     );
 
   switch (event.type) {
+    case "catalog.updated": {
+      void queryClient.invalidateQueries({ queryKey: qk.providers });
+      break;
+    }
     case "session.created": {
       const { info } = event.properties;
       if (!isVisibleSession(info)) break;

@@ -1,7 +1,7 @@
 import { win32 } from "node:path";
 
 import { isKnownFreeModelKey } from "../src/lib/freeModels";
-import { OPENAI_API_PROVIDER, toEngineModelKey } from "../src/lib/openAiProfiles";
+import { OPENAI_API_PROVIDER, OPENAI_ENGINE_OAUTH_PROVIDER, toEngineModelKey } from "../src/lib/openAiProfiles";
 import { splitModelKey } from "../src/lib/splitModelKey";
 import { STUDIO_MCP_SERVER_NAME } from "../src/lib/studioMcp";
 import { SUBAGENT_PROFILE_PROMPT, SUBAGENT_PROFILES } from "../src/lib/subagentProfiles";
@@ -14,6 +14,7 @@ import {
 } from "../src/lib/systemPrompt";
 import type { ModelSettings } from "../src/types/desktop";
 import { openAiApiProvider } from "./openAiApiProvider";
+import { fallbackOpenAiCatalog, type OpenAiCatalog } from "./openAiCatalog";
 
 export const BLENDER_MCP_SERVER_NAME = "blender";
 
@@ -126,6 +127,7 @@ export function createOpenCodeConfig(
   systemPrompt?: string | null,
   blender?: McpLocalServer | null,
   modelSettings?: ModelSettings,
+  catalog: OpenAiCatalog = fallbackOpenAiCatalog(),
 ) {
   return {
     // Keep OpenCode's standard automatic context compaction enabled for long sessions.
@@ -154,7 +156,8 @@ export function createOpenCodeConfig(
     // OpenCode would otherwise load skills from ~/.claude and ~/.agents, which belong to other tools.
     plugins: ["*", "-opencode.config.compatibility"],
     providers: {
-      [OPENAI_API_PROVIDER]: openAiApiProvider(modelSettings?.openAiApiServiceTier ?? "auto"),
+      [OPENAI_API_PROVIDER]: openAiApiProvider(modelSettings?.openAiApiServiceTier ?? "auto", catalog),
+      [OPENAI_ENGINE_OAUTH_PROVIDER]: { models: { ...fallbackOpenAiCatalog().nativeModels, ...catalog.nativeModels } },
     },
     default_agent: "studio",
     agents: {
@@ -168,7 +171,7 @@ export function createOpenCodeConfig(
   };
 }
 
-export function withModelSettings(contents: string, settings: ModelSettings): string {
+export function withModelSettings(contents: string, settings: ModelSettings, catalog: OpenAiCatalog = fallbackOpenAiCatalog()): string {
   const config: {
     agents?: Record<string, unknown>;
     providers?: Record<string, unknown>;
@@ -176,8 +179,21 @@ export function withModelSettings(contents: string, settings: ModelSettings): st
   config.agents = { ...config.agents, ...subagents(settings) };
   config.providers = {
     ...config.providers,
-    [OPENAI_API_PROVIDER]: openAiApiProvider(settings.openAiApiServiceTier),
+    [OPENAI_API_PROVIDER]: openAiApiProvider(settings.openAiApiServiceTier, catalog),
+    [OPENAI_ENGINE_OAUTH_PROVIDER]: {
+      ...config.providers?.[OPENAI_ENGINE_OAUTH_PROVIDER] as object,
+      models: { ...fallbackOpenAiCatalog().nativeModels, ...catalog.nativeModels },
+    },
   };
+  return JSON.stringify(config, null, 2);
+}
+
+/** Changes only catalogs, not agents, prompt, MCP, credentials or model preferences. */
+export function withModelCatalog(contents: string, settings: ModelSettings, catalog: OpenAiCatalog): string {
+  const config = JSON.parse(contents);
+  const next = JSON.parse(withModelSettings(contents, settings, catalog));
+  if (JSON.stringify(config.providers) === JSON.stringify(next.providers)) return contents;
+  config.providers = next.providers;
   return JSON.stringify(config, null, 2);
 }
 

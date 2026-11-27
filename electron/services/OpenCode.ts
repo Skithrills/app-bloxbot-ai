@@ -11,6 +11,7 @@ import { OPENAI_API_KEY_ENV } from "../../src/lib/openAiProfiles";
 import type { ModelSettings, OpenCodeInfo, OpenCodeStartupProgress } from "../../src/types/desktop";
 import type { blenderMcpServerConfig } from "./BlenderTools";
 import { createOpenCodeConfig, OPENCODE_ISOLATION_ENV } from "../opencodeConfig";
+import { CATALOG_REFRESH_MS, type OpenAiCatalog } from "../openAiCatalog";
 import { loadShellPath } from "../shellEnv";
 import { ensureFolder, workspaceFailureReason } from "../workspaceFolders";
 import { migrateLegacyOpenAiCredentials } from "./openAiCredentials";
@@ -233,6 +234,8 @@ interface PreparedOpenCode {
 }
 
 export interface OpenCodeOptions {
+  loadModelCatalog?: () => Promise<OpenAiCatalog>;
+  refreshModelCatalog?: () => Promise<void>;
   loadSystemPrompt?: () => Effect.Effect<string | null>;
   loadModelSettings?: () => Effect.Effect<ModelSettings>;
   onOpenAiProfileMigrated?: (providerID: string) => Effect.Effect<void>;
@@ -653,7 +656,8 @@ function prepareOpenCode(
     const systemPrompt = options.loadSystemPrompt ? yield* options.loadSystemPrompt() : null;
     const blender = options.loadBlenderServer ? yield* options.loadBlenderServer() : null;
     const modelSettings = options.loadModelSettings ? yield* options.loadModelSettings() : undefined;
-    const config = createOpenCodeConfig(broker.info, systemPrompt, blender, modelSettings);
+    const catalog = options.loadModelCatalog ? yield* Effect.promise(options.loadModelCatalog) : undefined;
+    const config = createOpenCodeConfig(broker.info, systemPrompt, blender, modelSettings, catalog);
     yield* fileOperation("Failed to write the OpenCode configuration", () =>
       writeFile(
         join(configDirectory, "opencode.json"),
@@ -865,6 +869,17 @@ export function makeOpenCodeLayer(options: OpenCodeOptions) {
           ),
         );
         if (profile) yield* options.onOpenAiProfileMigrated(profile);
+      }
+      if (options.refreshModelCatalog) {
+        const refresh = options.refreshModelCatalog;
+        yield* Effect.gen(function* () {
+          while (true) {
+            yield* Effect.sleep(CATALOG_REFRESH_MS);
+            yield* Effect.tryPromise(refresh).pipe(
+              Effect.catchAll(() => Effect.logWarning("[opencode] Could not apply the public model catalog; keeping the previous catalog")),
+            );
+          }
+        }).pipe(Effect.forkScoped);
       }
       const { pid } = resource.child;
       if (pid !== undefined && globalThis.process.platform === "win32") {

@@ -303,6 +303,9 @@ export class EventTranslator {
   translate(event: OpenCodeEvent): Translated[] {
     const created = "created" in event && typeof event.created === "number" ? event.created : 0;
     switch (event.type) {
+      case "model.updated":
+      case "provider.updated":
+        return [{ type: "catalog.updated", properties: {} }];
       case "session.created": {
         const { data } = event;
         const info = {

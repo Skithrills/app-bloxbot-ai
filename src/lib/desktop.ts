@@ -334,6 +334,10 @@ export const desktop: DesktopApi = {
   readInstructions: () => window.bloxbot?.readInstructions() ?? Promise.resolve(""),
   saveInstructions: (text) => window.bloxbot?.saveInstructions(text) ?? Promise.resolve(),
   // A browser has no folders to copy from, which Settings says rather than offering the import.
+  listExternalChats: (query) => window.bloxbot?.listExternalChats(query) ?? Promise.resolve([]),
+  readExternalChat: (ref) =>
+    window.bloxbot?.readExternalChat(ref) ??
+    Promise.reject(new DesktopError({ message: "Importing chats requires the desktop app." })),
   listImportableSkills: () =>
     window.bloxbot?.listImportableSkills() ??
     Promise.resolve({ available: false, folder: "", importable: [], installed: [], skipped: [] }),

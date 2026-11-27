@@ -64,7 +64,7 @@ vi.mock("@/lib/composerVideos", async (importOriginal) => ({
 
 /** Switches predictions on, with the free model they are allowed to use. */
 function enablePredictions(qc: QueryClient, modelID: string, hideFreeModels = false) {
-  qc.setQueryData(qk.config, { ...DEFAULT_APP_CONFIG, composerPredictions: true, hideFreeModels });
+  qc.setQueryData(qk.config, { ...DEFAULT_APP_CONFIG, composerPredictions: true, composerAutocomplete: true, hideFreeModels });
   qc.setQueryData(qk.providers, {
     all: [
       {
@@ -477,6 +477,54 @@ describe("ChatInput", () => {
     );
     expect(suggestion()).toBeNull();
 
+    // An unrelated draft must not inherit the saved whole-message suggestion after the debounce.
+    const writeDraft = async (draft: string) => {
+      await act(async () => {
+        fireEvent.input(editor, { target: { textContent: draft } });
+      });
+      const tail = editor.querySelector("[data-lexical-text]")?.firstChild;
+      if (!tail) throw new Error("Expected a Lexical text node");
+      await act(async () => {
+        window.getSelection()?.collapse(tail, draft.length);
+        document.dispatchEvent(new Event("selectionchange"));
+      });
+    };
+    let finishOld: (suffix: string) => void = () => {};
+    client.composer.predict.mockImplementationOnce(
+      () =>
+        new Promise<string>((resolve) => {
+          finishOld = resolve;
+        }),
+    );
+    await writeDraft("Build a racing track");
+    expect(editor.querySelector("[data-composer-prediction]")).toBeNull();
+    expect(suggestion()).toBeNull();
+    await waitFor(
+      () => expect(client.composer.predict).toHaveBeenCalledTimes(2),
+      waitForPrediction,
+    );
+    expect(client.composer.predict.mock.calls[1][0]).toEqual({
+      draft: "Build a racing track",
+      modelID,
+    });
+    expect(editor.querySelector("[data-composer-prediction]")).toBeNull();
+
+    // Even a client that resolves after cancellation cannot put the previous draft's result back.
+    const oldSignal = client.composer.predict.mock.calls[1][1].signal;
+    client.composer.predict.mockResolvedValueOnce(" with trees");
+    await writeDraft("Build a different map");
+    expect(oldSignal.aborted).toBe(true);
+    await act(async () => finishOld(" with coins"));
+    expect(editor.querySelector("[data-composer-prediction]")).toBeNull();
+    await waitFor(
+      () =>
+        expect(editor.querySelector("[data-composer-prediction]")).toHaveAttribute(
+          "data-composer-prediction",
+          " with trees",
+        ),
+      waitForPrediction,
+    );
+
     // Emptied again, the suggestion is back at once, and Tab writes it without sending.
     await act(async () => {
       fireEvent.input(editor, { target: { textContent: "" } });
@@ -486,7 +534,7 @@ describe("ChatInput", () => {
     expect(fireEvent.keyDown(editor, { key: "Tab" })).toBe(false);
     await waitFor(() => expect(editor).toHaveTextContent("Yes, pull more frames"));
     expect(suggestion()).toBeNull();
-    expect(client.composer.predict).toHaveBeenCalledOnce();
+    expect(client.composer.predict).toHaveBeenCalledTimes(3);
     expect(client.session.promptAsync).not.toHaveBeenCalled();
 
     unmount();
@@ -502,7 +550,7 @@ describe("ChatInput", () => {
           qc.setQueryData(qk.config, {
             ...DEFAULT_APP_CONFIG,
             composerPredictions: true,
-            composerAutocomplete: false,
+            composerAutocomplete: undefined, // Older settings with predictions enabled must leave typing quiet.
             composerPredictionSource: "chat",
             composerPredictionDebug: true,
             lastModel: "anthropic/claude-3.5-sonnet",
@@ -625,7 +673,7 @@ describe("ChatInput", () => {
       waitForPrediction,
     );
     expect(reopenedClient.composer.predict).toHaveBeenCalledOnce();
-  });
+  }, 10_000);
 
   it("attaches a video as still frames and tells the model which images they are", async () => {
     const client = createClient();

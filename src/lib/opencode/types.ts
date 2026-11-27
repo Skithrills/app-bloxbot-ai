@@ -1017,6 +1017,7 @@ export type ProviderAuthResponses = {
 export type ProviderAuthResponse = ProviderAuthResponses[keyof ProviderAuthResponses];
 
 export type Event =
+  | { type: "catalog.updated"; properties: Record<string, never> }
   | EventSessionCreated
   | EventSessionUpdated
   | EventSessionDeleted

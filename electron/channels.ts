@@ -40,6 +40,8 @@ export const channels = {
   readInstructions: "config:read-instructions",
   saveInstructions: "config:save-instructions",
   listImportableSkills: "skills:list-importable",
+  listExternalChats: "external-chats:list",
+  readExternalChat: "external-chats:preview",
   importSkills: "skills:import",
   showSystemNotification: "app:show-system-notification",
   systemNotificationClicked: "app:system-notification-clicked",

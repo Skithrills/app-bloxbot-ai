@@ -84,6 +84,8 @@ const api: DesktopApi = {
   readInstructions: () => ipcRenderer.invoke(channels.readInstructions),
   saveInstructions: (text) => ipcRenderer.invoke(channels.saveInstructions, text),
   listImportableSkills: () => ipcRenderer.invoke(channels.listImportableSkills),
+  listExternalChats: (query) => ipcRenderer.invoke(channels.listExternalChats, query),
+  readExternalChat: (ref) => ipcRenderer.invoke(channels.readExternalChat, ref),
   importSkills: (names) => ipcRenderer.invoke(channels.importSkills, names),
   getExplorerNodeDetails: (studioId, request) =>
     ipcRenderer.invoke(channels.getExplorerNodeDetails, studioId, request),

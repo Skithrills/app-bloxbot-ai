@@ -36,6 +36,8 @@ function useProvidersQuery() {
       return provRes.data;
     },
     enabled: !!client,
+    // Recover even if a catalog-change event was missed while disconnected.
+    refetchInterval: 5 * 60_000,
   });
 }
 

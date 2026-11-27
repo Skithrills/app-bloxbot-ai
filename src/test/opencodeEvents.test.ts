@@ -42,6 +42,12 @@ const turnStart = [
 ];
 
 describe("EventTranslator", () => {
+  it("forwards model and provider updates so the picker can refresh without an app update", () => {
+    expect(translate(event("model.updated", {}), event("provider.updated", {}))).toEqual([
+      { type: "catalog.updated", properties: {} },
+      { type: "catalog.updated", properties: {} },
+    ]);
+  });
   it("turns a delivered prompt into a user message with its text", () => {
     const [message, part] = translate(...turnStart.slice(0, 2));
     expect(message).toMatchObject({

@@ -531,7 +531,10 @@ describe("ChatInput", () => {
     });
     await focusEmpty();
     await waitFor(() => expect(suggestion()).not.toBeNull());
-    expect(fireEvent.keyDown(editor, { key: "Tab" })).toBe(false);
+    // A whole-message prediction stays visible after the composer loses focus.
+    await act(async () => editor.blur());
+    expect(fireEvent.keyDown(document.body, { key: "Tab", shiftKey: true })).toBe(true);
+    expect(fireEvent.keyDown(document.body, { key: "Tab" })).toBe(false);
     await waitFor(() => expect(editor).toHaveTextContent("Yes, pull more frames"));
     expect(suggestion()).toBeNull();
     expect(client.composer.predict).toHaveBeenCalledTimes(3);

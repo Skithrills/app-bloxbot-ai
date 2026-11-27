@@ -618,7 +618,7 @@ function ComposerPredictionPlugin({
     if (candidate.draft && !element) return;
     if (element) element.setAttribute("data-composer-prediction", suffix);
     else onNextMessage(suffix);
-    const handle = (event: KeyboardEvent, accept: boolean) => {
+    const handle = (event: KeyboardEvent, accept: boolean, fromPage = false) => {
       if (
         event.defaultPrevented ||
         event.shiftKey ||
@@ -629,9 +629,22 @@ function ComposerPredictionPlugin({
         event.keyCode === 229 ||
         composing.current ||
         editor.isComposing() ||
-        editor.getRootElement() !== document.activeElement
+        (!fromPage && editor.getRootElement() !== document.activeElement)
       ) {
         return false;
+      }
+      // A placeholder can be visible before Lexical has a caret (e.g. after sending).
+      const root = $getRoot();
+      const paragraph = root.getFirstChild();
+      if (
+        accept &&
+        !candidate.draft &&
+        root.getChildrenSize() === 1 &&
+        $isParagraphNode(paragraph) &&
+        paragraph.getKey() === candidate.key &&
+        paragraph.isEmpty()
+      ) {
+        paragraph.selectEnd();
       }
       const target = $predictionTarget();
       const selection = $getSelection();
@@ -665,7 +678,22 @@ function ComposerPredictionPlugin({
       (event) => handle(event, false),
       COMMAND_PRIORITY_EDITOR,
     );
+    // Lexical commands don't receive page-level keys when no control owns focus.
+    // Never steal Tab from a button, a dialog, another input or a nonempty draft.
+    const pageTab = (event: KeyboardEvent) => {
+      if (
+        candidate.draft ||
+        event.key !== "Tab" ||
+        event.target !== document.body ||
+        document.activeElement !== document.body ||
+        document.querySelector('[aria-modal="true"], dialog[open], [role="dialog"]')
+      )
+        return;
+      editor.update(() => handle(event, true, true), { discrete: true });
+    };
+    if (!candidate.draft) document.addEventListener("keydown", pageTab);
     return () => {
+      document.removeEventListener("keydown", pageTab);
       stopTab();
       stopEscape();
       if (element) element.removeAttribute("data-composer-prediction");

@@ -7,6 +7,12 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+## [0.16.6] - 2026-11-28
+
+### Fixed
+
+- **Tab accepts a suggested message** even when the empty composer has no caret yet. It fills the draft without sending. Shift+Tab and navigation from other controls are unchanged.
+
 ## [0.16.5] - 2026-11-27
 
 ### Added
